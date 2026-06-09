@@ -137,6 +137,10 @@ jobs:
   shellcheck:
     name: scripts / shellcheck
     runs-on: ubuntu-latest
+    env:
+      # --external-sources lets shellcheck follow `source`d files (e.g. run.sh
+      # sourcing lib.sh) instead of emitting SC1091; matches local `shellcheck -x`.
+      SHELLCHECK_OPTS: --external-sources
     steps:
       - uses: actions/checkout@v4
       - uses: ludeeus/action-shellcheck@2.0.0

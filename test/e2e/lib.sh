@@ -89,10 +89,12 @@ wait_config_synced() {
 }
 
 # _strip_noise filters the cruft a one-shot `kubectl run --rm -i` leaves on
-# stdout: the `pod "x" deleted` cleanup notice and blank lines. (We pass the DB
-# password via an env var, never -p, so there is no client warning to strip.)
+# stdout: the pod-cleanup notice and blank lines. kubectl phrases the notice
+# differently across versions — `pod "x" deleted` and `pod "x" deleted from
+# <ns> namespace` — so we match the prefix, not an anchored suffix. (We pass
+# the DB password via an env var, never -p, so there's no client warning.)
 _strip_noise() {
-  grep -vE '^pod "[^"]*" deleted$|^[[:space:]]*$' || true
+  grep -vE '^pod "[^"]*" deleted( from .+ namespace)?[[:space:]]*$|^[[:space:]]*$' || true
 }
 
 # admin_query NS HOST RADMIN_PW SQL -> runs SQL against the admin port (6032)
