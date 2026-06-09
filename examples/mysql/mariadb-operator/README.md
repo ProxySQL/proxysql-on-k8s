@@ -21,11 +21,12 @@ flag automatically.
 > credentials live in admin variables, which the `ProxySQLConfig` exposes as
 > plain strings under `mysqlVariables` (no `secretRef` there). So the monitor
 > password is entered in **two** spots that must match exactly:
-> `mysqlVariables.monitor_password` in `proxysql.yaml` **and** the
+> `mysqlVariables.mysql-monitor_password` in `proxysql.yaml` **and** the
 > `mariadb-monitor` Secret consumed by the `User` CR in `backend.yaml`. Both
 > ship with the same `REPLACE-ME-monitor-pw` placeholder; if you change one,
-> change the other, or ProxySQL will SHUN every backend (monitor auth fails)
-> and all routing stops.
+> change the other, or the monitor gets "Access denied", can't read each
+> backend's `read_only`, and parks every server in the reader hostgroup
+> (leaving the writer hostgroup empty, so writes fail).
 
 ## Install order
 

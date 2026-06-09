@@ -47,13 +47,17 @@ spec:
         name: mariadb-root
         key: password
 
+  # Variable keys are the full ProxySQL global_variables names (the operator
+  # applies them verbatim), so MySQL variables carry the `mysql-` prefix.
   mysqlVariables:
-    monitor_username: "monitor"
-    # The monitor password is also stored in the same secret the User CR
-    # consumes. ProxySQL renders this into its own admin DB.
-    monitor_password: "REPLACE-ME-monitor-pw"
-    monitor_read_only_interval: "1500"
-    monitor_read_only_timeout: "500"
+    mysql-monitor_username: "monitor"
+    # Must match the password of the `monitor` User created in backend.yaml,
+    # so ProxySQL's monitor can read each backend's read_only flag and keep the
+    # writer/reader hostgroup split correct. (If these don't match, the monitor
+    # gets "Access denied" and every server is parked in the reader hostgroup.)
+    mysql-monitor_password: "REPLACE-ME-monitor-pw"
+    mysql-monitor_read_only_interval: "1500"
+    mysql-monitor_read_only_timeout: "500"
 
   mysqlQueryRules:
     - ruleId: 100

@@ -39,10 +39,9 @@ spec:
   replication:
     enabled: true
     primary:
-      automaticFailover: true
+      autoFailover: true
     replica:
-      waitPoint: AfterCommit
-      kind: CurrentPos
+      gtid: CurrentPos
 ---
 # Pre-create a low-privilege monitor user — ProxySQL uses this to ping
 # backends and observe their `read_only` flag.
