@@ -1,0 +1,436 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: proxysqlconfigs.proxysql.com
+spec:
+  group: proxysql.com
+  names:
+    kind: ProxySQLConfig
+    listKind: ProxySQLConfigList
+    plural: proxysqlconfigs
+    shortNames:
+    - pxcfg
+    singular: proxysqlconfig
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterRef.name
+      name: Cluster
+      type: string
+    - jsonPath: .status.syncedReplicas
+      name: Synced
+      type: integer
+    - jsonPath: .status.lastSyncTime
+      name: Last-Sync
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ProxySQLConfig is the Schema for the proxysqlconfigs API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of ProxySQLConfig
+            properties:
+              adminVariables:
+                additionalProperties:
+                  type: string
+                description: ProxySQL variable overrides. Pushed via admin SQL UPDATE.
+                type: object
+              clusterRef:
+                description: |-
+                  ClusterRef points to the ProxySQLCluster this config applies to.
+                  Must exist in the same namespace.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              mysqlQueryRules:
+                items:
+                  description: MySQLQueryRule maps to a row in the ProxySQL mysql_query_rules
+                    table.
+                  properties:
+                    active:
+                      type: boolean
+                    apply:
+                      type: boolean
+                    comment:
+                      type: string
+                    destinationHostgroup:
+                      format: int32
+                      type: integer
+                    matchDigest:
+                      type: string
+                    matchPattern:
+                      type: string
+                    ruleId:
+                      format: int32
+                      type: integer
+                    schemaName:
+                      type: string
+                    username:
+                      type: string
+                  required:
+                  - ruleId
+                  type: object
+                type: array
+              mysqlReplicationHostgroups:
+                items:
+                  description: MySQLReplicationHostgroup maps to mysql_replication_hostgroups.
+                  properties:
+                    checkType:
+                      default: read_only
+                      enum:
+                      - read_only
+                      - innodb_read_only
+                      - super_read_only
+                      - read_only|innodb_read_only
+                      - read_only&innodb_read_only
+                      type: string
+                    comment:
+                      type: string
+                    readerHostgroup:
+                      format: int32
+                      type: integer
+                    writerHostgroup:
+                      format: int32
+                      type: integer
+                  required:
+                  - readerHostgroup
+                  - writerHostgroup
+                  type: object
+                type: array
+              mysqlServers:
+                description: MySQL backend topology.
+                items:
+                  description: MySQLServer maps to a row in the ProxySQL mysql_servers
+                    table.
+                  properties:
+                    comment:
+                      type: string
+                    hostgroup:
+                      description: Hostgroup is the mysql_servers.hostgroup_id.
+                      format: int32
+                      type: integer
+                    hostname:
+                      description: Hostname of the backend MySQL server.
+                      type: string
+                    maxConnections:
+                      format: int32
+                      type: integer
+                    maxReplicationLag:
+                      format: int32
+                      type: integer
+                    port:
+                      default: 3306
+                      description: Port defaults to 3306.
+                      format: int32
+                      type: integer
+                    useSSL:
+                      type: boolean
+                    weight:
+                      format: int32
+                      type: integer
+                  required:
+                  - hostgroup
+                  - hostname
+                  type: object
+                type: array
+              mysqlUsers:
+                items:
+                  description: MySQLUser maps to a row in the ProxySQL mysql_users
+                    table.
+                  properties:
+                    active:
+                      type: boolean
+                    comment:
+                      type: string
+                    defaultHostgroup:
+                      default: 0
+                      format: int32
+                      type: integer
+                    defaultSchema:
+                      type: string
+                    maxConnections:
+                      format: int32
+                      type: integer
+                    passwordSecretRef:
+                      description: PasswordSecretRef references a Secret holding the
+                        user's password.
+                      properties:
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or its key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    transactionPersistent:
+                      type: boolean
+                    useSSL:
+                      type: boolean
+                    username:
+                      type: string
+                  required:
+                  - passwordSecretRef
+                  - username
+                  type: object
+                type: array
+              mysqlVariables:
+                additionalProperties:
+                  type: string
+                type: object
+              pgsqlQueryRules:
+                items:
+                  description: PostgreSQLQueryRule maps to pgsql_query_rules.
+                  properties:
+                    active:
+                      type: boolean
+                    apply:
+                      type: boolean
+                    comment:
+                      type: string
+                    destinationHostgroup:
+                      format: int32
+                      type: integer
+                    matchPattern:
+                      type: string
+                    ruleId:
+                      format: int32
+                      type: integer
+                  required:
+                  - ruleId
+                  type: object
+                type: array
+              pgsqlServers:
+                description: PostgreSQL backend topology (ProxySQL 3.x).
+                items:
+                  description: PostgreSQLServer maps to pgsql_servers (ProxySQL 3.x).
+                  properties:
+                    comment:
+                      type: string
+                    hostgroup:
+                      format: int32
+                      type: integer
+                    hostname:
+                      type: string
+                    maxConnections:
+                      format: int32
+                      type: integer
+                    port:
+                      default: 5432
+                      format: int32
+                      type: integer
+                    weight:
+                      format: int32
+                      type: integer
+                  required:
+                  - hostgroup
+                  - hostname
+                  type: object
+                type: array
+              pgsqlUsers:
+                items:
+                  description: PostgreSQLUser maps to pgsql_users.
+                  properties:
+                    active:
+                      type: boolean
+                    comment:
+                      type: string
+                    defaultHostgroup:
+                      format: int32
+                      type: integer
+                    passwordSecretRef:
+                      description: SecretKeySelector selects a key of a Secret.
+                      properties:
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or its key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    username:
+                      type: string
+                  required:
+                  - passwordSecretRef
+                  - username
+                  type: object
+                type: array
+              pgsqlVariables:
+                additionalProperties:
+                  type: string
+                type: object
+              proxysqlServers:
+                description: |-
+                  ProxySQLServers identifies peer nodes for ProxySQL Cluster sync.
+                  When empty, the operator auto-populates from the ProxySQLCluster's StatefulSet pods.
+                items:
+                  description: ProxySQLServerEntry maps to a row in proxysql_servers.
+                  properties:
+                    comment:
+                      type: string
+                    hostname:
+                      type: string
+                    port:
+                      default: 6032
+                      format: int32
+                      type: integer
+                    weight:
+                      format: int32
+                      type: integer
+                  required:
+                  - hostname
+                  type: object
+                type: array
+            required:
+            - clusterRef
+            type: object
+          status:
+            description: status defines the observed state of ProxySQLConfig
+            properties:
+              conditions:
+                description: |-
+                  Conditions follow standard K8s conventions:
+                    Ready, Progressing, Degraded, ClusterFound
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastAppliedHash:
+                description: LastAppliedHash is a SHA of the spec last successfully
+                  pushed to the cluster.
+                type: string
+              lastSyncTime:
+                description: LastSyncTime is when the operator last successfully wrote
+                  to the cluster.
+                format: date-time
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              syncedReplicas:
+                description: SyncedReplicas is the number of ProxySQL pods that received
+                  the latest config.
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommitTypeAll(chore)",
+    ":dependencyDashboard",
+    "schedule:weekly"
+  ],
+  "timezone": "UTC",
+  "labels": ["dependencies"],
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 8,
+  "rangeStrategy": "bump",
+  "packageRules": [
+    {
+      "description": "Group GitHub Actions bumps into one PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "automerge": true
+    },
+    {
+      "description": "Group Go indirect deps under a single PR",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "matchDepTypes": ["indirect"],
+      "groupName": "go indirect deps"
+    },
+    {
+      "description": "Hold back k8s.io/* major bumps — they require coordinated upgrades across controller-runtime",
+      "matchPackagePatterns": ["^k8s.io/", "^sigs.k8s.io/controller-runtime"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
+      "description": "Pin kindest/node to the kind action's supported list — manual bump only",
+      "matchPackageNames": ["kindest/node"],
+      "enabled": false
+    }
+  ],
+  "kubernetes": {
+    "fileMatch": ["charts/.+\\.yaml$"]
+  }
+}

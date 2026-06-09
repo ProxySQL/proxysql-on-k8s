@@ -1,0 +1,19 @@
+apiVersion: v2
+name: proxysql-operator
+description: Operator that reconciles ProxySQLCluster and ProxySQLConfig CRDs (proxysql.com/v1alpha1)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - proxysql
+  - operator
+  - mysql
+  - postgresql
+home: https://proxysql.com
+sources:
+  - https://github.com/ProxySQL/kubernetes
+maintainers:
+  - name: ProxySQL
+    url: https://proxysql.com
+icon: https://proxysql.com/wp-content/uploads/2020/04/ProxySQL-Colour-Logo.png

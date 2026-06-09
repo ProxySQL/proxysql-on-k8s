@@ -1,0 +1,21 @@
+# chart-testing config. Used by both `ct lint` and `ct install` in CI.
+#
+# `ct install` deploys each chart to a real kind cluster and runs any Helm tests
+# (templates/tests/*). We exclude `proxysql-operator` here because:
+#
+#   1. Its image (`ghcr.io/proxysql/proxysql-operator:<ver>`) doesn't exist on
+#      PR builds — the image is published on tag, not on PR.
+#   2. The operator's behavior is fully covered by the dedicated `e2e` CI job,
+#      which builds the image locally and runs the full reconcile + SQL push
+#      flow against a real ProxySQL pod. Running it twice in CI is wasted time.
+#
+# `ct lint` still runs against every chart.
+excluded-charts:
+  - proxysql-operator
+
+chart-dirs:
+  - charts
+
+target-branch: main
+
+helm-extra-args: --timeout 300s
