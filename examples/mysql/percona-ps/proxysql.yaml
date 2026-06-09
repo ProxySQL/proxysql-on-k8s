@@ -1,0 +1,55 @@
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata:
+  name: proxysql
+  namespace: percona-ps-demo
+spec:
+  replicas: 3
+  protocols:
+    mysql:
+      enabled: true
+---
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata:
+  name: pxcfg
+  namespace: percona-ps-demo
+spec:
+  clusterRef:
+    name: proxysql
+  mysqlServers:
+    # Primary — the PS operator updates this Service's endpoints when the GR
+    # primary changes, so a single mysql_servers row is enough.
+    - hostgroup: 0
+      hostname: cluster1-mysql-primary.percona-ps-demo.svc.cluster.local
+      port: 3306
+      comment: "PS primary"
+    # Replicas — Service selector matches the non-primary instances.
+    - hostgroup: 1
+      hostname: cluster1-mysql-replicas.percona-ps-demo.svc.cluster.local
+      port: 3306
+      comment: "PS replicas"
+  mysqlUsers:
+    - username: root
+      defaultHostgroup: 0
+      passwordSecretRef:
+        name: cluster1-secrets
+        key: root
+    - username: monitor
+      defaultHostgroup: 1
+      passwordSecretRef:
+        name: cluster1-secrets
+        key: monitor
+  mysqlQueryRules:
+    - ruleId: 100
+      active: true
+      matchDigest: "^SELECT.*FOR UPDATE$"
+      destinationHostgroup: 0
+      apply: true
+      comment: "locked reads → primary"
+    - ruleId: 200
+      active: true
+      matchDigest: "^SELECT"
+      destinationHostgroup: 1
+      apply: true
+      comment: "plain SELECTs → replicas"

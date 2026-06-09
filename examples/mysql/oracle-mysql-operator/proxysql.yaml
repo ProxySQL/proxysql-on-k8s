@@ -1,0 +1,60 @@
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata:
+  name: proxysql
+  namespace: oracle-mysql-demo
+spec:
+  replicas: 3
+  protocols:
+    mysql:
+      enabled: true
+---
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata:
+  name: pxcfg
+  namespace: oracle-mysql-demo
+spec:
+  clusterRef:
+    name: proxysql
+  # Both rows resolve to the same Router Service — the operator's R/W port
+  # (6446) is the primary, the R/O port (6447) is the read-only fan-out.
+  # The Router itself does the GR primary selection; ProxySQL adds query
+  # rules + connection multiplexing on top.
+  mysqlServers:
+    - hostgroup: 0
+      hostname: mycluster.oracle-mysql-demo.svc.cluster.local
+      port: 6446
+      comment: "writer via Router R/W port"
+    - hostgroup: 1
+      hostname: mycluster.oracle-mysql-demo.svc.cluster.local
+      port: 6447
+      comment: "reader via Router R/O port"
+  mysqlUsers:
+    - username: root
+      defaultHostgroup: 0
+      passwordSecretRef:
+        name: mycluster-secret
+        key: rootPassword
+    # An "app" user routed by default to readers; SELECT-only traffic.
+    - username: app
+      defaultHostgroup: 1
+      passwordSecretRef:
+        name: mycluster-secret
+        key: rootPassword
+  mysqlQueryRules:
+    # SELECT ... FOR UPDATE / SELECT ... LOCK IN SHARE MODE must hit the writer.
+    - ruleId: 100
+      active: true
+      matchDigest: "^SELECT.*FOR UPDATE$"
+      destinationHostgroup: 0
+      apply: true
+      comment: "locked reads → writer"
+    # Read-only SELECTs from the app user → readers.
+    - ruleId: 200
+      active: true
+      username: app
+      matchDigest: "^SELECT"
+      destinationHostgroup: 1
+      apply: true
+      comment: "app SELECTs → readers"

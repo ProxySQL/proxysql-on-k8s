@@ -1,0 +1,67 @@
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata:
+  name: proxysql
+  namespace: percona-pxc-demo
+spec:
+  replicas: 3
+  protocols:
+    mysql:
+      enabled: true
+---
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata:
+  name: pxcfg
+  namespace: percona-pxc-demo
+spec:
+  clusterRef:
+    name: proxysql
+  # All three Galera nodes in hostgroup 0 (writer pool). PXC handles consistency
+  # via certification — any node can take a write — so we deliberately don't
+  # split read/write. The PXC operator publishes the headless service
+  # `<name>-pxc-unready` for bootstrap; once the cluster is healthy, the regular
+  # `<name>-pxc` Service exposes only the three voting nodes.
+  mysqlServers:
+    - hostgroup: 0
+      hostname: cluster1-pxc-0.cluster1-pxc.percona-pxc-demo.svc.cluster.local
+      port: 3306
+      weight: 1000
+    - hostgroup: 0
+      hostname: cluster1-pxc-1.cluster1-pxc.percona-pxc-demo.svc.cluster.local
+      port: 3306
+      weight: 1000
+    - hostgroup: 0
+      hostname: cluster1-pxc-2.cluster1-pxc.percona-pxc-demo.svc.cluster.local
+      port: 3306
+      weight: 1000
+    # Mirror into hostgroup 1 for read-only routing — keeps the option of
+    # later down-weighting one node for reads without changing application
+    # query paths.
+    - hostgroup: 1
+      hostname: cluster1-pxc-0.cluster1-pxc.percona-pxc-demo.svc.cluster.local
+      port: 3306
+    - hostgroup: 1
+      hostname: cluster1-pxc-1.cluster1-pxc.percona-pxc-demo.svc.cluster.local
+      port: 3306
+    - hostgroup: 1
+      hostname: cluster1-pxc-2.cluster1-pxc.percona-pxc-demo.svc.cluster.local
+      port: 3306
+  mysqlUsers:
+    - username: root
+      defaultHostgroup: 0
+      passwordSecretRef:
+        name: cluster1-secrets
+        key: root
+    - username: monitor
+      defaultHostgroup: 1
+      passwordSecretRef:
+        name: cluster1-secrets
+        key: monitor
+  mysqlQueryRules:
+    - ruleId: 100
+      active: true
+      matchDigest: "^SELECT"
+      destinationHostgroup: 1
+      apply: true
+      comment: "SELECTs → read hostgroup (mirrors writers)"

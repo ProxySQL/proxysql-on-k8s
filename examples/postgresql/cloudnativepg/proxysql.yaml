@@ -1,0 +1,53 @@
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata:
+  name: proxysql
+  namespace: cnpg-demo
+spec:
+  replicas: 3
+  protocols:
+    # MySQL listener stays on by default; we mostly care about pgsql here.
+    pgsql:
+      enabled: true
+---
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata:
+  name: pxcfg
+  namespace: cnpg-demo
+spec:
+  clusterRef:
+    name: proxysql
+  pgsqlServers:
+    # CNPG's `-rw` Service IP always resolves to the current primary —
+    # CNPG re-points it during a failover, so ProxySQL needs no extra
+    # promotion handling.
+    - hostgroup: 0
+      hostname: pg-rw.cnpg-demo.svc.cluster.local
+      port: 5432
+      comment: "CNPG primary (read-write)"
+    # `-ro` resolves to the hot standbys only (excludes the primary).
+    - hostgroup: 1
+      hostname: pg-ro.cnpg-demo.svc.cluster.local
+      port: 5432
+      comment: "CNPG hot standbys"
+  pgsqlUsers:
+    - username: app
+      defaultHostgroup: 1 # default to reads for the app user
+      passwordSecretRef:
+        name: pg-app # CNPG-managed
+        key: password
+    - username: postgres
+      defaultHostgroup: 0
+      passwordSecretRef:
+        name: pg-superuser # CNPG-managed
+        key: password
+  pgsqlQueryRules:
+    # Writing statements from `app` must go to the primary; SELECTs stay
+    # on the readers by default (defaultHostgroup=1 above).
+    - ruleId: 100
+      active: true
+      matchPattern: "^(INSERT|UPDATE|DELETE|BEGIN|COMMIT|ROLLBACK)"
+      destinationHostgroup: 0
+      apply: true
+      comment: "mutating statements → primary"

@@ -1,0 +1,48 @@
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata:
+  name: proxysql
+  namespace: crunchy-demo
+spec:
+  replicas: 3
+  protocols:
+    pgsql:
+      enabled: true
+---
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata:
+  name: pxcfg
+  namespace: crunchy-demo
+spec:
+  clusterRef:
+    name: proxysql
+  pgsqlServers:
+    # PGO's `<cluster>-primary` Service tracks the current Patroni leader.
+    - hostgroup: 0
+      hostname: hippo-primary.crunchy-demo.svc.cluster.local
+      port: 5432
+      comment: "Patroni leader"
+    # `<cluster>-replicas` selects the standby instances only.
+    - hostgroup: 1
+      hostname: hippo-replicas.crunchy-demo.svc.cluster.local
+      port: 5432
+      comment: "Patroni standbys"
+  pgsqlUsers:
+    - username: app
+      defaultHostgroup: 1
+      passwordSecretRef:
+        name: hippo-pguser-app
+        key: password
+    - username: postgres
+      defaultHostgroup: 0
+      passwordSecretRef:
+        name: hippo-pguser-postgres
+        key: password
+  pgsqlQueryRules:
+    - ruleId: 100
+      active: true
+      matchPattern: "^(INSERT|UPDATE|DELETE|BEGIN|COMMIT|ROLLBACK)"
+      destinationHostgroup: 0
+      apply: true
+      comment: "mutating statements → primary"

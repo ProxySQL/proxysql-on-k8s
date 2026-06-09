@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cnpg-demo
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg
+  namespace: cnpg-demo
+spec:
+  instances: 3
+  storage:
+    size: 2Gi
+
+  # CNPG creates these secrets automatically and rotates them on demand:
+  #   pg-superuser  → superuser (postgres)
+  #   pg-app        → application user (default name "app", db "app")
+  # Both are referenced by ProxySQLConfig — no copies, no rotation drift.
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
