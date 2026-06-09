@@ -72,6 +72,14 @@ const (
 	// requeueAfterTransient: after a transient failure (cluster not found,
 	// admin unreachable on some replicas), retry sooner.
 	requeueAfterTransient = 5 * time.Second
+	// driftResyncInterval bounds how long out-of-band runtime drift can persist.
+	// The hash short-circuit skips the SQL push when desired config, replica
+	// set, and generation are unchanged — which is cheap but means a pod whose
+	// runtime tables were mutated externally (or never converged) would never
+	// be corrected. To stay level-based, we force a full re-push (bypassing the
+	// short-circuit) once this much wall-clock has elapsed since the last
+	// successful sync; the periodic requeue then re-asserts desired state.
+	driftResyncInterval = 2 * time.Minute
 )
 
 // Reconcile pushes ProxySQLConfig to the target cluster.
@@ -163,8 +171,16 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// 5) Compute a fingerprint over (desired config + the exact pod set) for
 	// the short-circuit. Including the address set means a recreated pod (new
 	// IP, empty runtime tables) changes the fingerprint and forces a re-push.
+	//
+	// We skip the SQL push only when nothing observable changed AND we re-pushed
+	// recently. The driftResyncInterval clause keeps the operator level-based:
+	// without it, runtime drift that doesn't change the spec/replica-set/
+	// generation (e.g. an externally-mutated admin table) would be skipped
+	// forever, since the hash and replica count still match.
 	hash := syncFingerprint(desired, addrs)
-	allHealthy := cfg.Status.LastAppliedHash == hash &&
+	dueForResync := resyncDue(cfg.Status.LastSyncTime, time.Now(), driftResyncInterval)
+	allHealthy := !dueForResync &&
+		cfg.Status.LastAppliedHash == hash &&
 		cfg.Status.SyncedReplicas == int32(len(addrs)) &&
 		cfg.Status.ObservedGeneration == cfg.Generation
 	if allHealthy {
@@ -384,6 +400,15 @@ func syncFingerprint(d *proxysqlclient.Desired, addrs []string) string {
 		h.Write([]byte(a))
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// resyncDue reports whether a full re-push is overdue: true if we've never
+// synced (last == nil) or at least interval has elapsed since the last
+// successful sync. This forces the reconciler past the hash short-circuit
+// periodically so externally-drifted runtime state is re-asserted (level-based
+// reconciliation) rather than skipped forever.
+func resyncDue(last *metav1.Time, now time.Time, interval time.Duration) bool {
+	return last == nil || now.Sub(last.Time) >= interval
 }
 
 func joinErrs(errs []error) string {
