@@ -34,7 +34,10 @@ kubectl create namespace percona-pxc-demo
 kubectl apply -f backend.yaml
 
 # 3. Wait — first boot does an SST and can take several minutes.
-kubectl -n percona-pxc-demo wait pxc/cluster1 --for=jsonpath='{.status.state}'=ready --timeout=15m
+#    Use the fully-qualified name: `pxc` is also the shortName of the operator's
+#    ProxySQLCluster CRD, so the bare `pxc/` alias is ambiguous once the ProxySQL
+#    operator is installed.
+kubectl -n percona-pxc-demo wait perconaxtradbclusters.pxc.percona.com/cluster1 --for=jsonpath='{.status.state}'=ready --timeout=15m
 
 # 4. ProxySQL operator — see examples/README.md.
 

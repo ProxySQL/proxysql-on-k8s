@@ -38,7 +38,7 @@ kubectl apply -f proxysql.yaml
 | Example | Backend operator | Service DNS used by ProxySQL |
 | --- | --- | --- |
 | [`mysql/oracle-mysql-operator/`](mysql/oracle-mysql-operator/) | Oracle's [MySQL Operator for Kubernetes](https://github.com/mysql/mysql-operator) (`mysql.oracle.com/v2.InnoDBCluster`) | `<name>.<ns>.svc` (router) |
-| [`mysql/percona-ps/`](mysql/percona-ps/) | [Percona Operator for MySQL Server](https://docs.percona.com/percona-operator-for-mysql/ps/) (`ps.percona.com/v1.PerconaServerMySQL`) | `<name>-mysql-primary`, `<name>-mysql-replicas` |
+| [`mysql/percona-ps/`](mysql/percona-ps/) | [Percona Operator for MySQL Server](https://docs.percona.com/percona-operator-for-mysql/ps/) (`ps.percona.com/v1.PerconaServerMySQL`) | `<name>-mysql-primary` (writer; reads need HAProxy or per-pod exposure — see the example) |
 | [`mysql/percona-pxc/`](mysql/percona-pxc/) | [Percona Operator for PXC](https://docs.percona.com/percona-operator-for-mysql/pxc/) (`pxc.percona.com/v1.PerconaXtraDBCluster`) | `<name>-pxc` |
 | [`mysql/mariadb-operator/`](mysql/mariadb-operator/) | [mariadb-operator](https://github.com/mariadb-operator/mariadb-operator) (`k8s.mariadb.com/v1alpha1.MariaDB`) | `<name>-primary`, `<name>-secondary` |
 

@@ -13,7 +13,13 @@ spec:
   storage:
     size: 2Gi
 
-  # CNPG creates these secrets automatically and rotates them on demand:
+  # CNPG 1.21+ disables superuser access by default and does NOT create the
+  # pg-superuser secret unless this is set. The ProxySQLConfig references the
+  # `postgres` user via that secret, so enable it explicitly. (Drop this and
+  # the postgres user from proxysql.yaml if you only need the app user.)
+  enableSuperuserAccess: true
+
+  # With the above, CNPG creates and rotates these secrets automatically:
   #   pg-superuser  → superuser (postgres)
   #   pg-app        → application user (default name "app", db "app")
   # Both are referenced by ProxySQLConfig — no copies, no rotation drift.

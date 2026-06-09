@@ -17,6 +17,16 @@ flag automatically.
     `read_only` on a new primary, ProxySQL moves the row between
     hostgroups within seconds.
 
+> ⚠️ **Monitor password — keep two places in sync.** ProxySQL's monitor
+> credentials live in admin variables, which the `ProxySQLConfig` exposes as
+> plain strings under `mysqlVariables` (no `secretRef` there). So the monitor
+> password is entered in **two** spots that must match exactly:
+> `mysqlVariables.monitor_password` in `proxysql.yaml` **and** the
+> `mariadb-monitor` Secret consumed by the `User` CR in `backend.yaml`. Both
+> ship with the same `REPLACE-ME-monitor-pw` placeholder; if you change one,
+> change the other, or ProxySQL will SHUN every backend (monitor auth fails)
+> and all routing stops.
+
 ## Install order
 
 ```bash

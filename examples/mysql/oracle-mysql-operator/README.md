@@ -46,11 +46,14 @@ kubectl -n oracle-mysql-demo get proxysqlconfig pxcfg -w
 ## Smoke test
 
 ```bash
-kubectl -n oracle-mysql-demo exec -it deploy/proxysql -- \
-  mysql -h 127.0.0.1 -P 6033 -uapp -p"$(kubectl -n oracle-mysql-demo get secret mycluster-secret -o jsonpath='{.data.rootPassword}' | base64 -d)" \
+ROOT_PW=$(kubectl -n oracle-mysql-demo get secret mycluster-secret -o jsonpath='{.data.rootPassword}' | base64 -d)
+kubectl -n oracle-mysql-demo exec -it sts/proxysql -- \
+  mysql -h 127.0.0.1 -P 6033 -uroot -p"$ROOT_PW" \
   -e "SELECT @@hostname, @@read_only"
 ```
 
-Run it twice — you should see different hostnames as ProxySQL load-balances
-through Router. Or run the [sysbench loadgen](../../loadgen/sysbench.yaml) with
+The operator runs ProxySQL as a StatefulSet, so the exec target is
+`sts/proxysql`. Run it twice — you should see different hostnames as ProxySQL
+load-balances through Router. Or run the
+[sysbench loadgen](../../loadgen/sysbench.yaml) with
 `HOST=proxysql.oracle-mysql-demo.svc` for sustained traffic.

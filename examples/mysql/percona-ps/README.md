@@ -1,17 +1,26 @@
 # Percona Operator for MySQL Server
 
 ProxySQL in front of the [Percona Operator for MySQL Server](https://docs.percona.com/percona-operator-for-mysql/ps/)
-(PS Operator). This one uses MySQL Group Replication under the hood, but
-unlike Oracle's operator it exposes ready-made `*-mysql-primary` and
-`*-mysql-replicas` Services so we can wire ProxySQL straight to them.
+(PS Operator), running MySQL Group Replication. With `exposePrimary` enabled
+the operator publishes a `cluster1-mysql-primary` Service that always points
+at the current GR primary and is re-pointed on failover — so ProxySQL needs
+just one `mysql_servers` row to always reach the writer.
+
+> **Reads:** the PS operator does **not** create a `-mysql-replicas` Service in
+> the HAProxy-disabled topology used here. This example routes everything to
+> the primary (ProxySQL still adds connection multiplexing, query rules, and
+> stats). To scale reads across the GR secondaries you have two options:
+> enable HAProxy (`spec.proxy.haproxy.enabled`) and add a reader hostgroup
+> pointing at `cluster1-haproxy:3307`, or expose the pods individually
+> (`spec.mysql.expose.enabled`) and split writer/reader by `read_only` with a
+> `mysqlReplicationHostgroups` entry — see the
+> [mariadb-operator example](../mariadb-operator/) for that pattern.
 
 ## What this example creates
 
-- A `PerconaServerMySQL` (3 nodes) with HAProxy disabled (we use ProxySQL
-  instead).
+- A `PerconaServerMySQL` (3 nodes), HAProxy/Router disabled, `exposePrimary` on.
 - A `ProxySQLCluster` (3 replicas).
-- A `ProxySQLConfig` with hostgroup 0 → `cluster1-mysql-primary` and
-  hostgroup 1 → `cluster1-mysql-replicas`.
+- A `ProxySQLConfig` with hostgroup 0 → `cluster1-mysql-primary`.
 
 ## Install order
 

@@ -31,14 +31,12 @@ spec:
       port: 6447
       comment: "reader via Router R/O port"
   mysqlUsers:
+    # InnoDBCluster only provisions the `root` account, so that's the user we
+    # wire through. For an app-specific account, create it in the backend
+    # (e.g. via the operator's user management) with its own Secret and add a
+    # mysqlUsers entry referencing that — do NOT reuse root's password.
     - username: root
       defaultHostgroup: 0
-      passwordSecretRef:
-        name: mycluster-secret
-        key: rootPassword
-    # An "app" user routed by default to readers; SELECT-only traffic.
-    - username: app
-      defaultHostgroup: 1
       passwordSecretRef:
         name: mycluster-secret
         key: rootPassword
@@ -50,11 +48,10 @@ spec:
       destinationHostgroup: 0
       apply: true
       comment: "locked reads → writer"
-    # Read-only SELECTs from the app user → readers.
+    # Plain SELECTs → readers (Router R/O port).
     - ruleId: 200
       active: true
-      username: app
       matchDigest: "^SELECT"
       destinationHostgroup: 1
       apply: true
-      comment: "app SELECTs → readers"
+      comment: "SELECTs → readers"

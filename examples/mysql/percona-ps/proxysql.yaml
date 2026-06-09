@@ -18,38 +18,24 @@ spec:
   clusterRef:
     name: proxysql
   mysqlServers:
-    # Primary — the PS operator updates this Service's endpoints when the GR
-    # primary changes, so a single mysql_servers row is enough.
+    # All traffic to the group-replication primary. The PS operator re-points
+    # the cluster1-mysql-primary Service to the new primary on failover, so
+    # this single row always reaches the writer.
+    #
+    # NOTE: the PS operator does NOT create a "-mysql-replicas" Service in the
+    # HAProxy-disabled topology this example uses. To scale reads across the GR
+    # secondaries, either enable HAProxy (spec.proxy.haproxy.enabled) and point
+    # a reader hostgroup at cluster1-haproxy:3307, or expose the pods
+    # individually (spec.mysql.expose.enabled) and add a
+    # mysqlReplicationHostgroups entry that splits writer/reader by read_only —
+    # see the mariadb-operator example for that pattern.
     - hostgroup: 0
       hostname: cluster1-mysql-primary.percona-ps-demo.svc.cluster.local
       port: 3306
-      comment: "PS primary"
-    # Replicas — Service selector matches the non-primary instances.
-    - hostgroup: 1
-      hostname: cluster1-mysql-replicas.percona-ps-demo.svc.cluster.local
-      port: 3306
-      comment: "PS replicas"
+      comment: "PS group-replication primary"
   mysqlUsers:
     - username: root
       defaultHostgroup: 0
       passwordSecretRef:
         name: cluster1-secrets
         key: root
-    - username: monitor
-      defaultHostgroup: 1
-      passwordSecretRef:
-        name: cluster1-secrets
-        key: monitor
-  mysqlQueryRules:
-    - ruleId: 100
-      active: true
-      matchDigest: "^SELECT.*FOR UPDATE$"
-      destinationHostgroup: 0
-      apply: true
-      comment: "locked reads → primary"
-    - ruleId: 200
-      active: true
-      matchDigest: "^SELECT"
-      destinationHostgroup: 1
-      apply: true
-      comment: "plain SELECTs → replicas"
