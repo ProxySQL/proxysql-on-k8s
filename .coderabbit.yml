@@ -1,0 +1,44 @@
+# CodeRabbit config — https://docs.coderabbit.ai
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+
+  # Skip generated/scaffolded files so review attention stays on
+  # hand-written code. These exclusions apply repo-wide.
+  path_filters:
+    - "!**/zz_generated*.go"               # controller-gen deepcopy
+    - "!operator/config/**"                # kustomize/kubebuilder-generated manifests
+    - "!operator/hack/boilerplate.go.txt"  # copyright header template
+    - "!charts/proxysql-operator/crds/**"  # generated CRD copies (source-of-truth in operator/config/crd/bases/)
+    - "!operator/go.sum"                   # transitive deps, locked
+    - "!**/*.tgz"                          # helm package outputs
+
+  path_instructions:
+    - path: "operator/**/*.go"
+      instructions: |
+        Focus on Kubernetes controller patterns:
+          - idempotency (CreateOrUpdate, owner references, immutable-field handling)
+          - error/condition surfacing on .status
+          - RBAC implications of any new API calls
+          - log levels (V(1) for verbose, errors via Error())
+    - path: "charts/**/*.yaml"
+      instructions: |
+        Check that values overrides flow through templates,
+        label/selector consistency is preserved across resources,
+        and Pod Security Standards restricted-profile compatibility holds.
+    - path: "examples/**/*.yaml"
+      instructions: |
+        Validate field names against the ProxySQLCluster / ProxySQLConfig
+        CRDs in operator/config/crd/bases/.
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+chat:
+  auto_reply: true

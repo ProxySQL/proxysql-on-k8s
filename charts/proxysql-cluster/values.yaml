@@ -1,0 +1,170 @@
+# Default values for the proxysql-cluster control-plane chart.
+#
+# This chart deploys ProxySQL as a StatefulSet with persistent storage. It is
+# intended for use either standalone (config rendered from values into a
+# ConfigMap, same as the data-plane proxysql chart) or paired with the
+# proxysql-operator (operator pushes config via the admin port at runtime).
+#
+# Differences from the proxysql chart:
+#   - StatefulSet with volumeClaimTemplates (PVC per replica)
+#   - Headless Service for stable pod DNS
+#   - replicaCount defaults to 3 (cluster-friendly)
+#   - proxysqlServers should be populated to enable ProxySQL Cluster sync
+#     across all replicas (or leave empty and let the operator manage it)
+#
+# See docs/v2-plan.md.
+
+replicaCount: 3
+
+image:
+  repository: proxysql/proxysql
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+auth:
+  adminPassword: ""
+  radminPassword: ""
+  monitorPassword: ""
+
+protocols:
+  mysql:
+    enabled: true
+    port: 6033
+    serverVersion: "8.0.40"
+  pgsql:
+    enabled: false
+    port: 6133
+
+admin:
+  port: 6032
+
+backends:
+  mysql: []
+  pgsql: []
+
+mysqlReplicationHostgroups: []
+
+users:
+  mysql: []
+  pgsql: []
+
+queryRules:
+  mysql: []
+  pgsql: []
+
+# When empty, ProxySQL Cluster sync is disabled. With the operator in Phase 3,
+# the operator will populate this from the StatefulSet's pod DNS entries.
+proxysqlServers: []
+
+adminVariables: {}
+mysqlVariables:
+  threads: 4
+  max_connections: 2048
+  default_query_timeout: 36000000
+  poll_timeout: 2000
+  have_compress: true
+  monitor_history: 600000
+  monitor_connect_interval: 5000
+  monitor_ping_interval: 2000
+  monitor_read_only_interval: 1500
+  monitor_read_only_timeout: 500
+  ping_interval_server_msec: 15000
+  ping_timeout_server: 500
+  connect_retries_on_failure: 10
+  connect_timeout_server: 3000
+  commands_stats: true
+  sessions_sort: true
+pgsqlVariables:
+  threads: 4
+  max_connections: 2048
+  poll_timeout: 2000
+
+# Persistence for /var/lib/proxysql (admin DB + datadir).
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+  annotations: {}
+
+service:
+  type: ClusterIP
+  annotations: {}
+  exposeAdmin: true
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+metrics:
+  enabled: true
+  port: 6070
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    relabelings: []
+    metricRelabelings: []
+
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 3
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: proxysql-cluster
+
+podAnnotations: {}
+podLabels: {}
+
+extraVolumes: []
+extraVolumeMounts: []
+extraEnv: []
+
+tests:
+  enabled: true
+  image: busybox:1.36

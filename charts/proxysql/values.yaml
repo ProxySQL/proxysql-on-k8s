@@ -1,0 +1,185 @@
+# Default values for the proxysql data-plane chart.
+# See docs/v2-plan.md for the broader v2 design.
+
+# Workload topology.
+#   layer   - standalone Deployment fronting backends (default; only supported value in v2.0)
+#   sidecar - planned for v2.1; tracked in docs/v2-plan.md
+topology: layer
+
+replicaCount: 2
+
+image:
+  repository: proxysql/proxysql
+  # Empty defaults to .Chart.appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ProxySQL credentials.
+# The chart creates a Secret holding these three passwords. Leave any field blank
+# to auto-generate a 32-char random password (preserved across upgrades via lookup).
+# To set them yourself, --set auth.adminPassword=..., or use --values with a SOPS-encrypted file.
+auth:
+  adminPassword: ""
+  radminPassword: ""
+  monitorPassword: ""
+
+# Protocols. Each enabled protocol gets a listening port and a Service entry.
+# Phase 1 supports mysql + pgsql via ProxySQL 3.x.
+protocols:
+  mysql:
+    enabled: true
+    port: 6033
+    serverVersion: "8.0.40"
+  pgsql:
+    enabled: false
+    port: 6133
+
+# Admin port (cluster-internal; exposed on the same Service when service.exposeAdmin=true).
+admin:
+  port: 6032
+
+# Backend definitions rendered into proxysql.cnf.
+# When paired with the operator (Phase 3), leave these empty and manage via ProxySQLConfig.
+backends:
+  mysql: []
+  # - { host: mysql-primary, port: 3306, hostgroup: 0, maxConnections: 5000, comment: "" }
+  # - { host: mysql-replica, port: 3306, hostgroup: 1, maxConnections: 5000 }
+  pgsql: []
+  # - { host: postgres-rw, port: 5432, hostgroup: 0, maxConnections: 1000 }
+  # - { host: postgres-ro, port: 5432, hostgroup: 1, maxConnections: 1000 }
+
+# mysql_replication_hostgroups in proxysql.cnf
+mysqlReplicationHostgroups: []
+# - { writer: 0, reader: 1, checkType: read_only, comment: "" }
+
+# Application users. Passwords inline for Phase 1; Secret-ref support tracked for a later phase.
+users:
+  mysql: []
+  # - { username: app, password: hunter2, defaultHostgroup: 0, maxConnections: 1000 }
+  pgsql: []
+  # - { username: app, password: hunter2, defaultHostgroup: 0 }
+
+# Query rules.
+queryRules:
+  mysql: []
+  # - { ruleId: 1, active: true, matchPattern: '^SELECT .* FOR UPDATE$', destinationHostgroup: 0, apply: 1 }
+  # - { ruleId: 2, active: true, matchPattern: '^SELECT',                destinationHostgroup: 1, apply: 1 }
+  pgsql: []
+
+# ProxySQL Cluster: peer ProxySQL nodes to sync runtime config with.
+# Leave empty when config comes entirely from this chart's ConfigMap.
+proxysqlServers: []
+# - { hostname: proxysql, port: 6032, weight: 0, comment: "" }
+
+# ProxySQL admin/mysql/pgsql variables. These get merged into the rendered cnf.
+# Keys map 1:1 to ProxySQL variable names.
+adminVariables: {}
+mysqlVariables:
+  threads: 4
+  max_connections: 2048
+  default_query_timeout: 36000000
+  poll_timeout: 2000
+  have_compress: true
+  monitor_history: 600000
+  monitor_connect_interval: 5000
+  monitor_ping_interval: 2000
+  monitor_read_only_interval: 1500
+  monitor_read_only_timeout: 500
+  ping_interval_server_msec: 15000
+  ping_timeout_server: 500
+  connect_retries_on_failure: 10
+  connect_timeout_server: 3000
+  commands_stats: true
+  sessions_sort: true
+pgsqlVariables:
+  threads: 4
+  max_connections: 2048
+  poll_timeout: 2000
+
+service:
+  type: ClusterIP
+  annotations: {}
+  # Expose the admin port on the same Service. For production, prefer a separate
+  # internal Service + NetworkPolicy.
+  exposeAdmin: true
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Prometheus metrics (ProxySQL exposes a Prometheus exporter via the REST API).
+metrics:
+  enabled: true
+  port: 6070
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    relabelings: []
+    metricRelabelings: []
+
+# Probes TCP-check the admin port — no mysql/psql client needed in-image.
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 3
+
+# Pod Security Standards "restricted"-compatible defaults.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: proxysql
+
+podAnnotations: {}
+podLabels: {}
+
+extraVolumes: []
+extraVolumeMounts: []
+extraEnv: []
+
+# Helm test pod TCP-probes the admin port.
+tests:
+  enabled: true
+  image: busybox:1.36

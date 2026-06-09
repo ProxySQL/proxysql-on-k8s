@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: v3.16.4
+  KIND_NODE_IMAGE: kindest/node:v1.31.0
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Helm: lint + kubeconform on every chart in charts/.
+  # --------------------------------------------------------------------------
+  charts-lint:
+    name: charts / lint + kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: helm lint
+        run: make lint
+      - name: install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+      - name: helm template | kubeconform
+        run: make kubeconform
+
+  # --------------------------------------------------------------------------
+  # chart-testing: ct lint + ct install on a real kind cluster.
+  # --------------------------------------------------------------------------
+  chart-testing:
+    name: charts / chart-testing install
+    runs-on: ubuntu-latest
+    needs: charts-lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # ct needs base ref for --target-branch
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: helm/chart-testing-action@v2.7.0
+      - name: ct lint
+        run: ct lint --config .github/ct.yaml --target-branch=${{ github.event.repository.default_branch }}
+      - uses: helm/kind-action@v1
+        with:
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: ct
+      - name: ct install
+        run: ct install --config .github/ct.yaml --target-branch=${{ github.event.repository.default_branch }}

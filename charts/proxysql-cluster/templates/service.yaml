@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "proxysql-cluster.fullname" . }}
+  labels:
+    {{- include "proxysql-cluster.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "proxysql-cluster.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- if .Values.protocols.mysql.enabled }}
+    - name: mysql
+      port: {{ .Values.protocols.mysql.port }}
+      targetPort: mysql
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.protocols.pgsql.enabled }}
+    - name: pgsql
+      port: {{ .Values.protocols.pgsql.port }}
+      targetPort: pgsql
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.service.exposeAdmin }}
+    - name: admin
+      port: {{ .Values.admin.port }}
+      targetPort: admin
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}

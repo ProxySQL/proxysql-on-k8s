@@ -1,0 +1,40 @@
+ProxySQL was deployed as {{ include "proxysql.fullname" . }} (release {{ .Release.Name }}, namespace {{ .Release.Namespace }}).
+
+Image:      {{ include "proxysql.image" . }}
+Topology:   {{ .Values.topology }}
+Replicas:   {{ .Values.replicaCount }}
+
+Protocols:
+{{- if .Values.protocols.mysql.enabled }}
+  MySQL:      {{ .Values.protocols.mysql.port }} (server_version {{ .Values.protocols.mysql.serverVersion }})
+{{- end }}
+{{- if .Values.protocols.pgsql.enabled }}
+  PostgreSQL: {{ .Values.protocols.pgsql.port }}
+{{- end }}
+  Admin:      {{ .Values.admin.port }}{{ if not .Values.service.exposeAdmin }} (cluster-internal only){{ end }}
+{{- if .Values.metrics.enabled }}
+  Metrics:    {{ .Values.metrics.port }} (REST API / Prometheus exporter)
+{{- end }}
+
+Service:    {{ include "proxysql.fullname" . }}.{{ .Release.Namespace }}.svc
+
+Credentials (chart-managed Secret):
+  Secret:   {{ include "proxysql.fullname" . }}
+  Keys:     admin-password, radmin-password, monitor-password
+
+Get the admin password:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "proxysql.fullname" . }} -o jsonpath='{.data.admin-password}' | base64 -d
+
+Open an admin session (from a debug pod):
+  kubectl run -n {{ .Release.Namespace }} -it --rm proxysql-admin --image=mysql:8 --restart=Never -- \
+    mysql -h {{ include "proxysql.fullname" . }} -P {{ .Values.admin.port }} -u admin -p
+
+{{- if not (or .Values.backends.mysql .Values.backends.pgsql) }}
+
+NOTE: No backends are configured. ProxySQL is running but has no servers to route
+queries to. Either populate `backends.mysql` / `backends.pgsql` in values.yaml,
+or pair this chart with the proxysql-operator and use a ProxySQLConfig CR.
+{{- end }}
+
+Run the bundled Helm test:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

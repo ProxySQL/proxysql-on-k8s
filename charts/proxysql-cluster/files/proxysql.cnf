@@ -1,0 +1,138 @@
+{{- $pw := fromYaml (include "proxysql-cluster.passwords" .) -}}
+# Rendered by the {{ .Chart.Name }} Helm chart v{{ .Chart.Version }}.
+# Do not edit by hand. Manage configuration via Helm values or, when paired
+# with the proxysql-operator, via ProxySQLConfig CRs.
+
+datadir="/var/lib/proxysql"
+
+admin_variables=
+{
+  admin_credentials="admin:{{ $pw.admin }};radmin:{{ $pw.radmin }}"
+  mysql_ifaces="0.0.0.0:{{ .Values.admin.port }}"
+{{- if .Values.metrics.enabled }}
+  restapi_enabled=true
+  restapi_port={{ .Values.metrics.port }}
+{{- end }}
+{{- if .Values.proxysqlServers }}
+  cluster_username="radmin"
+  cluster_password="{{ $pw.radmin }}"
+  cluster_check_interval_ms=200
+  cluster_check_status_frequency=100
+  cluster_mysql_query_rules_save_to_disk=true
+  cluster_mysql_servers_save_to_disk=true
+  cluster_mysql_users_save_to_disk=true
+  cluster_proxysql_servers_save_to_disk=true
+  cluster_mysql_query_rules_diffs_before_sync=3
+  cluster_mysql_servers_diffs_before_sync=3
+  cluster_mysql_users_diffs_before_sync=3
+  cluster_proxysql_servers_diffs_before_sync=3
+{{- end }}
+{{- range $k, $v := .Values.adminVariables }}
+  {{ include "proxysql-cluster.variableLine" (dict "key" $k "value" $v) }}
+{{- end }}
+}
+
+{{- if .Values.protocols.mysql.enabled }}
+
+mysql_variables=
+{
+  interfaces="0.0.0.0:{{ .Values.protocols.mysql.port }}"
+  monitor_username="monitor"
+  monitor_password="{{ $pw.monitor }}"
+  server_version="{{ .Values.protocols.mysql.serverVersion }}"
+{{- range $k, $v := .Values.mysqlVariables }}
+  {{ include "proxysql-cluster.variableLine" (dict "key" $k "value" $v) }}
+{{- end }}
+}
+{{- end }}
+
+{{- if .Values.protocols.pgsql.enabled }}
+
+pgsql_variables=
+{
+  interfaces="0.0.0.0:{{ .Values.protocols.pgsql.port }}"
+{{- range $k, $v := .Values.pgsqlVariables }}
+  {{ include "proxysql-cluster.variableLine" (dict "key" $k "value" $v) }}
+{{- end }}
+}
+{{- end }}
+
+{{- if .Values.backends.mysql }}
+
+mysql_servers=
+(
+{{- range $i, $b := .Values.backends.mysql }}
+  { address="{{ $b.host }}", port={{ $b.port | default 3306 }}, hostgroup={{ $b.hostgroup | default 0 }}, max_connections={{ $b.maxConnections | default 1000 }}{{ if $b.comment }}, comment="{{ $b.comment }}"{{ end }} }{{ if lt (add $i 1) (len $.Values.backends.mysql) }},{{ end }}
+{{- end }}
+)
+{{- end }}
+
+{{- if .Values.backends.pgsql }}
+
+pgsql_servers=
+(
+{{- range $i, $b := .Values.backends.pgsql }}
+  { address="{{ $b.host }}", port={{ $b.port | default 5432 }}, hostgroup={{ $b.hostgroup | default 0 }}, max_connections={{ $b.maxConnections | default 1000 }}{{ if $b.comment }}, comment="{{ $b.comment }}"{{ end }} }{{ if lt (add $i 1) (len $.Values.backends.pgsql) }},{{ end }}
+{{- end }}
+)
+{{- end }}
+
+{{- if .Values.mysqlReplicationHostgroups }}
+
+mysql_replication_hostgroups=
+(
+{{- range $i, $g := .Values.mysqlReplicationHostgroups }}
+  { writer_hostgroup={{ $g.writer }}, reader_hostgroup={{ $g.reader }}{{ if $g.checkType }}, check_type="{{ $g.checkType }}"{{ end }}, comment="{{ $g.comment | default "" }}" }{{ if lt (add $i 1) (len $.Values.mysqlReplicationHostgroups) }},{{ end }}
+{{- end }}
+)
+{{- end }}
+
+{{- if .Values.users.mysql }}
+
+mysql_users=
+(
+{{- range $i, $u := .Values.users.mysql }}
+  { username="{{ $u.username }}", password="{{ $u.password }}", default_hostgroup={{ $u.defaultHostgroup | default 0 }}, active=1{{ if $u.maxConnections }}, max_connections={{ $u.maxConnections }}{{ end }} }{{ if lt (add $i 1) (len $.Values.users.mysql) }},{{ end }}
+{{- end }}
+)
+{{- end }}
+
+{{- if .Values.users.pgsql }}
+
+pgsql_users=
+(
+{{- range $i, $u := .Values.users.pgsql }}
+  { username="{{ $u.username }}", password="{{ $u.password }}", default_hostgroup={{ $u.defaultHostgroup | default 0 }}, active=1 }{{ if lt (add $i 1) (len $.Values.users.pgsql) }},{{ end }}
+{{- end }}
+)
+{{- end }}
+
+{{- if .Values.queryRules.mysql }}
+
+mysql_query_rules=
+(
+{{- range $i, $r := .Values.queryRules.mysql }}
+  { rule_id={{ $r.ruleId }}, active={{ if $r.active }}1{{ else }}0{{ end }}{{ if $r.matchPattern }}, match_pattern="{{ $r.matchPattern }}"{{ end }}{{ if $r.matchDigest }}, match_digest="{{ $r.matchDigest }}"{{ end }}, destination_hostgroup={{ $r.destinationHostgroup }}, apply={{ $r.apply | default 1 }} }{{ if lt (add $i 1) (len $.Values.queryRules.mysql) }},{{ end }}
+{{- end }}
+)
+{{- end }}
+
+{{- if .Values.queryRules.pgsql }}
+
+pgsql_query_rules=
+(
+{{- range $i, $r := .Values.queryRules.pgsql }}
+  { rule_id={{ $r.ruleId }}, active={{ if $r.active }}1{{ else }}0{{ end }}{{ if $r.matchPattern }}, match_pattern="{{ $r.matchPattern }}"{{ end }}{{ if $r.matchDigest }}, match_digest="{{ $r.matchDigest }}"{{ end }}, destination_hostgroup={{ $r.destinationHostgroup }}, apply={{ $r.apply | default 1 }} }{{ if lt (add $i 1) (len $.Values.queryRules.pgsql) }},{{ end }}
+{{- end }}
+)
+{{- end }}
+
+{{- if .Values.proxysqlServers }}
+
+proxysql_servers=
+(
+{{- range $i, $s := .Values.proxysqlServers }}
+  { hostname="{{ $s.hostname }}", port={{ $s.port | default 6032 }}, weight={{ $s.weight | default 0 }}, comment="{{ $s.comment | default "" }}" }{{ if lt (add $i 1) (len $.Values.proxysqlServers) }},{{ end }}
+{{- end }}
+)
+{{- end }}
