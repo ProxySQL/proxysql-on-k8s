@@ -17,6 +17,11 @@ fullnameOverride: ""
 leaderElection:
   enabled: true
 
+# How often the ProxySQLConfig reconciler re-asserts desired state on every
+# replica to self-heal out-of-band runtime drift. Empty = operator default (2m).
+# Accepts a Go duration (e.g. "30s", "5m").
+configResyncInterval: ""
+
 # Metrics endpoint (controller-runtime default). Disable to drop the
 # metrics-server-side TLS and the metrics Service.
 metrics:

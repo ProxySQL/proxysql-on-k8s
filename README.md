@@ -144,7 +144,7 @@ make template          # render every chart (sanity)
 make kubeconform       # render + kubeconform schema validation
 make sync-crds         # regenerate CRDs and copy them into the operator chart
 make operator-image    # build the operator container (single-arch, local docker)
-make e2e               # full kind e2e — see test/e2e/proxysql-cluster.sh
+make e2e               # full kind e2e suite — see test/e2e/run.sh
 
 cd operator
 make test              # go test ./... (unit + envtest)

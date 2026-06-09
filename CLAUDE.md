@@ -29,7 +29,7 @@ make operator-image        # build the operator container (single-arch, local do
 make operator-image-multi  # multi-arch buildx push to IMG
 make operator-image-kind   # build + kind load docker-image
 make kind-up / kind-down   # local kind cluster
-make e2e                   # full kind e2e (test/e2e/proxysql-cluster.sh)
+make e2e                   # full kind e2e suite (test/e2e/run.sh)
 ```
 
 Operator's own Makefile (`cd operator`):

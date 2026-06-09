@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Scenario: multi-replica write-to-all + pod-recreation reconvergence.
+# Verifies syncedReplicas reaches the full replica count, then deletes a pod and
+# confirms the recreated pod (new IP, empty runtime) gets config re-pushed
+# quickly — exercising the address-set fingerprint in the short-circuit.
+
+scenario_multireplica() {
+  local ns=e2e-multi
+  kubectl create ns "$ns" >/dev/null
+  kubectl -n "$ns" apply -f - >/dev/null <<'YAML'
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata: {name: pxc}
+spec:
+  replicas: 3
+  persistence: {enabled: false}
+  protocols: {mysql: {enabled: true}, pgsql: {enabled: false}}
+---
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata: {name: pxcfg}
+spec:
+  clusterRef: {name: pxc}
+  mysqlServers:
+    - {hostgroup: 0, hostname: 10.9.9.9, port: 3306, comment: fake}
+  mysqlVariables:
+    mysql-monitor_enabled: "false"
+YAML
+  kubectl -n "$ns" rollout status statefulset/pxc --timeout=180s >/dev/null
+  wait_config_synced "$ns" pxcfg 3 120 || { dump_ns "$ns"; return 1; }
+  log "multireplica: write-to-all reached syncedReplicas=3"
+
+  local radmin oldip newip out
+  radmin="$(radmin_pw "$ns" pxc)"
+  oldip="$(kubectl -n "$ns" get pod pxc-1 -o jsonpath='{.status.podIP}')"
+  log "multireplica: deleting pxc-1 (old IP $oldip)"
+  kubectl -n "$ns" delete pod pxc-1 --wait=true >/dev/null
+  kubectl -n "$ns" wait --for=condition=Ready pod/pxc-1 --timeout=120s >/dev/null
+  newip="$(kubectl -n "$ns" get pod pxc-1 -o jsonpath='{.status.podIP}')"
+  log "multireplica: pxc-1 recreated (new IP $newip)"
+
+  # Poll the recreated pod directly: it must receive config well before the
+  # safety requeue.
+  local i
+  for i in $(seq 1 15); do
+    out="$(admin_query "$ns" "$newip" "$radmin" "SELECT hostgroup_id,hostname FROM runtime_mysql_servers")"
+    echo "$out" | grep -qE "^0[[:space:]]+10\.9\.9\.9$" && { log "multireplica: recreated pod has config after ~$((i*4))s"; return 0; }
+    sleep 4
+  done
+  fail "recreated pod pxc-1 did not receive config: '$out'"; dump_ns "$ns"; return 1
+}

@@ -48,6 +48,18 @@ import (
 type ProxySQLConfigReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// ResyncInterval bounds how long out-of-band runtime drift can persist
+	// before a full re-push re-asserts desired state. Zero means use the
+	// default (defaultDriftResyncInterval).
+	ResyncInterval time.Duration
+}
+
+// resyncInterval returns the configured interval, or the default when unset.
+func (r *ProxySQLConfigReconciler) resyncInterval() time.Duration {
+	if r.ResyncInterval > 0 {
+		return r.ResyncInterval
+	}
+	return defaultDriftResyncInterval
 }
 
 // +kubebuilder:rbac:groups=proxysql.com,resources=proxysqlconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -79,7 +91,7 @@ const (
 	// be corrected. To stay level-based, we force a full re-push (bypassing the
 	// short-circuit) once this much wall-clock has elapsed since the last
 	// successful sync; the periodic requeue then re-asserts desired state.
-	driftResyncInterval = 2 * time.Minute
+	defaultDriftResyncInterval = 2 * time.Minute
 )
 
 // Reconcile pushes ProxySQLConfig to the target cluster.
@@ -178,7 +190,7 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// generation (e.g. an externally-mutated admin table) would be skipped
 	// forever, since the hash and replica count still match.
 	hash := syncFingerprint(desired, addrs)
-	dueForResync := resyncDue(cfg.Status.LastSyncTime, time.Now(), driftResyncInterval)
+	dueForResync := resyncDue(cfg.Status.LastSyncTime, time.Now(), r.resyncInterval())
 	allHealthy := !dueForResync &&
 		cfg.Status.LastAppliedHash == hash &&
 		cfg.Status.SyncedReplicas == int32(len(addrs)) &&
