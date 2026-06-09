@@ -114,10 +114,10 @@ func syncMySQLServers(ctx context.Context, c Executor, d *Desired) error {
 			s.Hostgroup,
 			quote(s.Hostname),
 			defaultInt32(s.Port, 3306),
-			defInt32(s.Weight, 1),              // mysql_servers.weight NOT NULL DEFAULT 1
-			defInt32(s.MaxConnections, 1000),   // NOT NULL DEFAULT 1000
-			defInt32(s.MaxReplicationLag, 0),   // NOT NULL DEFAULT 0
-			defBoolAsInt(s.UseSSL, false),      // NOT NULL DEFAULT 0
+			defInt32(s.Weight, 1),            // mysql_servers.weight NOT NULL DEFAULT 1
+			defInt32(s.MaxConnections, 1000), // NOT NULL DEFAULT 1000
+			defInt32(s.MaxReplicationLag, 0), // NOT NULL DEFAULT 0
+			defBoolAsInt(s.UseSSL, false),    // NOT NULL DEFAULT 0
 			quote(s.Comment),
 		)
 	}
@@ -167,10 +167,10 @@ func syncMySQLUsers(ctx context.Context, c Executor, d *Desired) error {
 			quote(u.Username),
 			quote(u.Password),
 			u.DefaultHostgroup,
-			defBoolAsInt(u.Active, true),               // mysql_users.active NOT NULL DEFAULT 1
-			defInt32(u.MaxConnections, 10000),          // NOT NULL DEFAULT 10000
-			defBoolAsInt(u.UseSSL, false),              // NOT NULL DEFAULT 0
-			quote(u.DefaultSchema),                     // nullable column; '' is fine
+			defBoolAsInt(u.Active, true),                // mysql_users.active NOT NULL DEFAULT 1
+			defInt32(u.MaxConnections, 10000),           // NOT NULL DEFAULT 10000
+			defBoolAsInt(u.UseSSL, false),               // NOT NULL DEFAULT 0
+			quote(u.DefaultSchema),                      // nullable column; '' is fine
 			defBoolAsInt(u.TransactionPersistent, true), // NOT NULL DEFAULT 1
 			quote(u.Comment),
 		)
@@ -200,7 +200,7 @@ func syncMySQLQueryRules(ctx context.Context, c Executor, d *Desired) error {
 		}
 		fmt.Fprintf(&b, "(%d,%s,%s,%s,%s,%s,%s,%s,%s)",
 			r.RuleID,
-			defBoolAsInt(r.Active, true),         // a declared rule defaults to active
+			defBoolAsInt(r.Active, true), // a declared rule defaults to active
 			quote(r.Username),
 			quote(r.SchemaName),
 			quote(r.MatchPattern),
@@ -232,8 +232,8 @@ func syncPostgreSQLServers(ctx context.Context, c Executor, d *Desired) error {
 			s.Hostgroup,
 			quote(s.Hostname),
 			defaultInt32(s.Port, 5432),
-			defInt32(s.Weight, 1),             // pgsql_servers.weight NOT NULL DEFAULT 1
-			defInt32(s.MaxConnections, 1000),  // NOT NULL DEFAULT 1000
+			defInt32(s.Weight, 1),            // pgsql_servers.weight NOT NULL DEFAULT 1
+			defInt32(s.MaxConnections, 1000), // NOT NULL DEFAULT 1000
 			quote(s.Comment),
 		)
 	}
