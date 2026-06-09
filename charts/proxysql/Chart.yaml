@@ -1,0 +1,21 @@
+apiVersion: v2
+name: proxysql
+description: ProxySQL data plane for Kubernetes (MySQL + PostgreSQL via ProxySQL 3.x)
+type: application
+version: 0.1.0
+appVersion: "3.0"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - proxysql
+  - mysql
+  - postgresql
+  - database
+  - proxy
+home: https://proxysql.com
+sources:
+  - https://github.com/sysown/proxysql
+  - https://github.com/ProxySQL/kubernetes
+maintainers:
+  - name: ProxySQL
+    url: https://proxysql.com
+icon: https://proxysql.com/wp-content/uploads/2020/04/ProxySQL-Colour-Logo.png

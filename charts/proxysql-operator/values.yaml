@@ -1,0 +1,69 @@
+# Default values for the proxysql-operator install chart.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/proxysql/proxysql-operator
+  # Empty defaults to .Chart.appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Leader election (only meaningful with replicaCount > 1).
+leaderElection:
+  enabled: true
+
+# Metrics endpoint (controller-runtime default). Disable to drop the
+# metrics-server-side TLS and the metrics Service.
+metrics:
+  enabled: true          # set false to drop the metrics endpoint + Service entirely
+  secureServing: true
+  port: 8443
+  service:
+    type: ClusterIP
+    port: 8443
+
+# Health/readiness endpoint.
+health:
+  bindAddress: ":8081"
+
+# Resource requests/limits for the manager container.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# PSA-restricted-compatible defaults.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  # Empty = chart-managed ServiceAccount with the chart's fullname.
+  name: ""
+  annotations: {}
+
+# Extra args appended to the manager command.
+extraArgs: []
+extraEnv: []

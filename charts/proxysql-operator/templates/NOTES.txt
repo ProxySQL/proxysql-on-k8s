@@ -1,0 +1,32 @@
+The proxysql-operator was deployed as {{ include "proxysql-operator.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+CRDs installed (proxysql.com/v1alpha1):
+  - proxysqlclusters   (short: pxc)
+  - proxysqlconfigs    (short: pxcfg)
+
+Scope: cluster-wide
+Image:           {{ include "proxysql-operator.image" . }}
+Replicas:        {{ .Values.replicaCount }}
+Leader election: {{ .Values.leaderElection.enabled }}
+{{- if .Values.metrics.enabled }}
+Metrics:         {{ include "proxysql-operator.fullname" . }}-metrics:{{ .Values.metrics.service.port }} (TLS{{ if .Values.metrics.secureServing }}, secure{{ end }})
+{{- end }}
+
+Status:
+  kubectl -n {{ .Release.Namespace }} get deploy {{ include "proxysql-operator.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "proxysql-operator.fullname" . }}
+
+Create a ProxySQLCluster:
+  kubectl apply -f - <<EOF
+  apiVersion: proxysql.com/v1alpha1
+  kind: ProxySQLCluster
+  metadata:
+    name: example
+  spec:
+    replicas: 3
+    image:
+      tag: "3.0"
+  EOF
+
+Then push backends/users/query rules with a ProxySQLConfig referencing it.
+See the examples/ directory for end-to-end recipes per backend operator.

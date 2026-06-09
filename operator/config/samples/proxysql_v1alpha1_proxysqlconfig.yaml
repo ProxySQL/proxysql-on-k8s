@@ -1,0 +1,9 @@
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: proxysqlconfig-sample
+spec:
+  # TODO(user): Add fields here

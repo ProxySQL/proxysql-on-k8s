@@ -1,0 +1,231 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref — saves CI minutes on rapid push/PR updates.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: v3.16.4
+  # Bumping this also bumps the kind node image used in chart-testing + e2e.
+  KIND_NODE_IMAGE: kindest/node:v1.31.0
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Helm: lint + kubeconform on every chart in charts/.
+  # Fast (<30s) — runs first so chart authors get quick feedback.
+  # --------------------------------------------------------------------------
+  charts-lint:
+    name: charts / lint + kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm lint
+        run: make lint
+
+      - name: install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+
+      - name: helm template | kubeconform
+        run: make kubeconform
+
+  # --------------------------------------------------------------------------
+  # chart-testing: helm/chart-testing's lint + install on a real kind cluster.
+  # Catches CRD/RBAC/template issues that `helm lint` alone misses.
+  # --------------------------------------------------------------------------
+  chart-testing:
+    name: charts / chart-testing install
+    runs-on: ubuntu-latest
+    needs: charts-lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # ct needs base ref for --target-branch
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: helm/chart-testing-action@v2.7.0
+
+      - name: ct lint
+        run: ct lint --config .github/ct.yaml --target-branch=${{ github.event.repository.default_branch }}
+
+      - uses: helm/kind-action@v1
+        with:
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: ct
+
+      - name: ct install
+        # --all installs every chart regardless of change-detection. Without it,
+        # ct reports "No chart changes detected" against a fresh main and tests
+        # nothing (a false green that previously hid a CrashLoop in the charts).
+        run: ct install --all --config .github/ct.yaml --target-branch=${{ github.event.repository.default_branch }}
+
+  # --------------------------------------------------------------------------
+  # Operator Go tests: build + vet + envtest-backed unit/integration suite.
+  # Reuses the operator's own Makefile (which downloads setup-envtest binaries).
+  # --------------------------------------------------------------------------
+  operator-test:
+    name: operator / go test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - name: build + vet
+        working-directory: operator
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: test (unit + envtest)
+        working-directory: operator
+        run: make test
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operator-coverage
+          path: operator/cover.out
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # golangci-lint: runs `make lint` in operator/, which downloads the project-
+  # pinned golangci-lint version and respects operator/.golangci.yml. Single
+  # source of truth so local + CI lint stays in lockstep.
+  # --------------------------------------------------------------------------
+  golangci:
+    name: operator / golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      - name: lint
+        working-directory: operator
+        run: make lint
+
+  # --------------------------------------------------------------------------
+  # Shell scripts: shellcheck everything under test/.
+  # --------------------------------------------------------------------------
+  shellcheck:
+    name: scripts / shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: ./test
+
+  # --------------------------------------------------------------------------
+  # Operator container image: buildx build (no push) + Trivy vulnerability scan.
+  # The image is exported as an artifact so the e2e job can re-use it.
+  # --------------------------------------------------------------------------
+  operator-image:
+    name: operator / image build + trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build (load into local daemon)
+        working-directory: operator
+        run: |
+          docker buildx build --load \
+            --build-arg VERSION=${{ github.sha }} \
+            --build-arg COMMIT=${{ github.sha }} \
+            -t proxysql-operator:ci .
+
+      # v0.36.0 pins its transitive setup-trivy dependency by commit SHA;
+      # older tags (≤v0.30) reference deleted setup-trivy tags and fail to resolve.
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: proxysql-operator:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: save image for downstream jobs
+        run: docker save proxysql-operator:ci -o /tmp/operator.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-image
+          path: /tmp/operator.tar
+          retention-days: 1
+
+  # --------------------------------------------------------------------------
+  # End-to-end: kind up → load the operator image built in the previous job →
+  # run test/e2e/proxysql-cluster.sh. Tests the full chart + reconciler + SQL
+  # push loop against a real ProxySQL pod.
+  # --------------------------------------------------------------------------
+  e2e:
+    name: operator / e2e on kind
+    runs-on: ubuntu-latest
+    needs: [operator-image, charts-lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: operator-image
+          path: /tmp
+
+      - name: import operator image into docker
+        run: docker load -i /tmp/operator.tar
+
+      - uses: helm/kind-action@v1
+        with:
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: proxysql-e2e
+
+      - name: kind-load operator image
+        run: kind load docker-image proxysql-operator:ci --name proxysql-e2e
+
+      - name: run e2e
+        env:
+          KIND_CLUSTER: proxysql-e2e
+          IMG: proxysql-operator:ci
+          SKIP_BUILD: "1" # image already loaded above
+          KEEP_CLUSTER: "1" # GHA runner is ephemeral; teardown wastes ~30s
+        run: ./test/e2e/proxysql-cluster.sh
+
+      - name: dump operator logs on failure
+        if: failure()
+        run: |
+          kubectl -n proxysql-e2e logs deploy/proxysql-operator --tail=200 || true
+          kubectl -n proxysql-e2e get all
+          kubectl -n proxysql-e2e describe proxysqlcluster pxc || true
+          kubectl -n proxysql-e2e describe proxysqlconfig pxcfg || true
