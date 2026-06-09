@@ -54,8 +54,27 @@ wait_synced() {
   die "config $ns/$cfg did not reach syncedReplicas>=$want"
 }
 
-# query_clean — run a client command via a one-shot pod and strip kubectl noise.
+# strip_noise drops the `pod "x" deleted[ from <ns> namespace]` cleanup notice
+# and blank lines that a one-shot `kubectl run --rm -i` leaves on stdout.
 strip_noise() { grep -vE '^pod "[^"]*" deleted( from .+ namespace)?[[:space:]]*$|^[[:space:]]*$' || true; }
+
+# client_query NS IMAGE ENVKV -- CMD...
+# Runs CMD in a one-shot pod, returns its stripped stdout, and RETRIES on empty.
+# The retry matters: a single attempt can come back empty when kubectl loses the
+# attach and falls back to log-streaming, or the backend isn't quite reachable
+# yet — which would otherwise fail the smoke spuriously.
+client_query() {
+  local ns="$1" image="$2" envkv="$3"; shift 3  # remaining args after `--` are CMD
+  shift # drop the literal "--"
+  local i out
+  for i in 1 2 3 4 5 6; do
+    out="$(kubectl -n "$ns" run "smoke-$RANDOM" --rm -i --restart=Never --image="$image" \
+      --env="$envkv" --command -- "$@" 2>/dev/null | strip_noise || true)"
+    [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+    sleep 5
+  done
+  printf '%s' "$out"
+}
 
 dir() { echo "$REPO_ROOT/examples/$1"; }
 
@@ -72,9 +91,8 @@ case "$EX" in
     kubectl -n cnpg-demo rollout status statefulset/proxysql --timeout=3m
     wait_synced cnpg-demo pxcfg 1
     pw="$(kubectl -n cnpg-demo get secret pg-app -o jsonpath='{.data.password}' | base64 -d)"
-    out="$(kubectl -n cnpg-demo run smoke-$RANDOM --rm -i --restart=Never --image=postgres:16 \
-      --env=PGPASSWORD="$pw" --command -- \
-      psql -h proxysql -p 6133 -U app -d app -tAc "SELECT current_database()" 2>/dev/null | strip_noise || true)"
+    out="$(client_query cnpg-demo postgres:16 "PGPASSWORD=$pw" -- \
+      psql -h proxysql -p 6133 -U app -d app -tAc "SELECT current_database()")"
     echo "$out" | grep -qx app || die "psql through ProxySQL did not return 'app': '$out'"
     ok "psql through ProxySQL :6133 returned '$out'"
     ;;
@@ -93,9 +111,8 @@ case "$EX" in
     wait_synced mariadb-demo pxcfg 1
     # root password is the example placeholder (consistent within the example).
     pw="$(kubectl -n mariadb-demo get secret mariadb-root -o jsonpath='{.data.password}' | base64 -d)"
-    out="$(kubectl -n mariadb-demo run smoke-$RANDOM --rm -i --restart=Never --image=mariadb:11.4 \
-      --env=MYSQL_PWD="$pw" --command -- \
-      mariadb -h proxysql -P6033 -uroot -N -B -e "SELECT @@version" 2>/dev/null | strip_noise || true)"
+    out="$(client_query mariadb-demo mariadb:11.4 "MYSQL_PWD=$pw" -- \
+      mariadb -h proxysql -P6033 -uroot -N -B -e "SELECT @@version")"
     echo "$out" | grep -qiE "maria|[0-9]+\.[0-9]+" || die "query through ProxySQL did not return a version: '$out'"
     ok "mariadb query through ProxySQL :6033 returned '$out'"
     ;;
