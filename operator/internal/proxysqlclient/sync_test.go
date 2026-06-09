@@ -154,6 +154,44 @@ func TestSync_Quote_EscapesSingleQuotes(t *testing.T) {
 	}
 }
 
+func TestSync_Quote_StripsNulAndControlBytes(t *testing.T) {
+	rec := &recorder{}
+	d := &Desired{
+		// Password with an embedded NUL + a vertical-tab control char; comment
+		// with a legitimate newline that must be preserved.
+		MySQLUsers: []MySQLUser{
+			{Username: "u\x00x", Password: "pa\x00ss\x0bword", Comment: "line1\nline2"},
+		},
+	}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	var insert string
+	for _, q := range rec.queries {
+		if strings.HasPrefix(q, "INSERT INTO mysql_users") {
+			insert = q
+			break
+		}
+	}
+	if insert == "" {
+		t.Fatalf("no INSERT into mysql_users; queries=%v", rec.queries)
+	}
+	if strings.ContainsRune(insert, 0) || strings.ContainsRune(insert, '\x0b') {
+		t.Errorf("NUL or control byte survived into SQL: %q", insert)
+	}
+	// NUL stripped, not replaced: "u\x00x" -> "ux", "pa\x00ss\x0bword" -> "password".
+	if !strings.Contains(insert, "'ux'") {
+		t.Errorf("username NUL not stripped cleanly; got %q", insert)
+	}
+	if !strings.Contains(insert, "'password'") {
+		t.Errorf("password control bytes not stripped cleanly; got %q", insert)
+	}
+	// A legitimate newline inside a comment must be preserved.
+	if !strings.Contains(insert, "'line1\nline2'") {
+		t.Errorf("newline in comment should be preserved; got %q", insert)
+	}
+}
+
 func TestSync_StepFailure_DoesNotAbortLaterSteps(t *testing.T) {
 	rec := &failOnce{recorder: recorder{}, failQuery: "DELETE FROM mysql_users"}
 	d := &Desired{

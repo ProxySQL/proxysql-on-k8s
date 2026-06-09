@@ -156,8 +156,10 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
 
-	// 5) Compute spec hash for short-circuit.
-	hash := hashDesired(desired)
+	// 5) Compute a fingerprint over (desired config + the exact pod set) for
+	// the short-circuit. Including the address set means a recreated pod (new
+	// IP, empty runtime tables) changes the fingerprint and forces a re-push.
+	hash := syncFingerprint(desired, addrs)
 	allHealthy := cfg.Status.LastAppliedHash == hash &&
 		cfg.Status.SyncedReplicas == int32(len(addrs)) &&
 		cfg.Status.ObservedGeneration == cfg.Generation
@@ -350,16 +352,32 @@ func (r *ProxySQLConfigReconciler) setCfgCondition(cfg *proxysqlv1alpha1.ProxySQ
 	})
 }
 
-// hashDesired returns a stable SHA-256 over the JSON-marshaled Desired.
-// Used to short-circuit when nothing has changed since the last successful
-// sync. Maps are serialized in sorted order by encoding/json.
-func hashDesired(d *proxysqlclient.Desired) string {
+// syncFingerprint returns a stable SHA-256 over the JSON-marshaled Desired
+// AND the set of pod addresses it was applied to. Used to short-circuit when
+// nothing has changed since the last successful sync.
+//
+// The address set is part of the fingerprint on purpose: SyncedReplicas is a
+// count, so it can't distinguish "same 3 pods" from "one pod was recreated
+// with a new IP and empty runtime tables." Folding the (sorted, deterministic)
+// addresses in means a membership change busts the short-circuit and forces a
+// re-push to the fresh pod, rather than waiting for the safety requeue.
+//
+// On marshal failure it returns a sentinel that cannot equal a real hex SHA,
+// so the short-circuit can never spuriously match an unset ("") status.
+func syncFingerprint(d *proxysqlclient.Desired, addrs []string) string {
 	b, err := json.Marshal(d)
 	if err != nil {
-		return ""
+		return "marshal-error"
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	h := sha256.New()
+	h.Write(b)
+	// addrs is already sorted by discoverPodAddresses; a NUL separator keeps
+	// the boundaries unambiguous.
+	for _, a := range addrs {
+		h.Write([]byte{0})
+		h.Write([]byte(a))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func joinErrs(errs []error) string {

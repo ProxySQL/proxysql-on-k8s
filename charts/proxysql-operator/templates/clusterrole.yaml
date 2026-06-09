@@ -1,4 +1,8 @@
-{{- if .Values.clusterScope }}
+# The operator's manager cache is not namespace-scoped, so it watches
+# resources cluster-wide and requires a ClusterRole. A namespaced-only mode
+# would need both a Role here and a --namespace cache restriction wired into
+# the manager (cmd/main.go); that isn't implemented, so RBAC is always
+# cluster-scoped.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -51,4 +55,3 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "proxysql-operator.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- end }}

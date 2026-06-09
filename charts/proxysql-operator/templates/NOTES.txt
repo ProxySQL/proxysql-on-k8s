@@ -4,7 +4,7 @@ CRDs installed (proxysql.com/v1alpha1):
   - proxysqlclusters   (short: pxc)
   - proxysqlconfigs    (short: pxcfg)
 
-Scope: {{ if .Values.clusterScope }}cluster-wide{{ else }}namespace ({{ .Release.Namespace }}){{ end }}
+Scope: cluster-wide
 Image:           {{ include "proxysql-operator.image" . }}
 Replicas:        {{ .Values.replicaCount }}
 Leader election: {{ .Values.leaderElection.enabled }}
@@ -28,5 +28,5 @@ Create a ProxySQLCluster:
       tag: "3.0"
   EOF
 
-NOTE: this MVP operator reconciler is currently a no-op. Full reconciliation
-lands in subsequent Phase 3.x commits — see docs/v2-plan.md.
+Then push backends/users/query rules with a ProxySQLConfig referencing it.
+See the examples/ directory for end-to-end recipes per backend operator.

@@ -13,10 +13,6 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-# Whether the operator watches resources cluster-wide (true) or only in its
-# own namespace (false). Defaults to cluster-scoped for simplicity.
-clusterScope: true
-
 # Leader election (only meaningful with replicaCount > 1).
 leaderElection:
   enabled: true
@@ -24,8 +20,7 @@ leaderElection:
 # Metrics endpoint (controller-runtime default). Disable to drop the
 # metrics-server-side TLS and the metrics Service.
 metrics:
-  enabled: true
-  bindAddress: "0"        # ":8443" by kubebuilder default; "0" disables
+  enabled: true          # set false to drop the metrics endpoint + Service entirely
   secureServing: true
   port: 8443
   service:

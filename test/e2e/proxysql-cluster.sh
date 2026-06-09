@@ -173,12 +173,16 @@ log "querying ProxySQL admin port via a transient mysql client pod"
 # We can't assume the proxysql container has a mysql client (readOnlyRootFilesystem +
 # distroless-style upstream image), so spin up a one-shot mysql:8 pod that connects to
 # the in-cluster admin service.
+# `|| true` so that under `set -euo pipefail` a non-zero exit from the client
+# pod (connection refused, auth failure, image-pull error, --rm cleanup race)
+# does NOT abort the script before the diagnostic grep/fail below — otherwise
+# we'd lose the captured output that explains the failure.
 QUERY_OUT="$(kubectl -n "$NAMESPACE" run e2e-mysql-client \
   --rm -i --restart=Never \
   --image=mysql:8.0 \
   --command -- \
   mysql -h "${CLUSTER_NAME}" -P 6032 -uadmin -p"$ADMIN_PW" -N -B \
-    -e "SELECT hostgroup_id, hostname, port FROM runtime_mysql_servers ORDER BY hostgroup_id;" 2>&1)"
+    -e "SELECT hostgroup_id, hostname, port FROM runtime_mysql_servers ORDER BY hostgroup_id;" 2>&1 || true)"
 
 log "admin query result:"
 printf '%s\n' "$QUERY_OUT" >&2

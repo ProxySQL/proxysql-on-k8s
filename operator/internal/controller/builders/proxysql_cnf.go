@@ -73,6 +73,8 @@ mysql_variables=
 pgsql_variables=
 {
   interfaces="0.0.0.0:{{ .PostgreSQLPort }}"
+  monitor_username="monitor"
+  monitor_password="{{ .MonitorPassword }}"
   threads=4
 }
 {{- end }}

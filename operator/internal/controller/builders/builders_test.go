@@ -134,6 +134,33 @@ func TestBuilder_ConfigMap_ClusterSyncOnMultiReplica(t *testing.T) {
 	}
 }
 
+func TestBuilder_ConfigMap_PostgreSQLMonitorCreds(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.PostgreSQL.Enabled = true
+	})
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "monitorpw"})
+
+	cm, err := b.ConfigMap()
+	if err != nil {
+		t.Fatalf("ConfigMap: %v", err)
+	}
+	cnf := cm.Data["proxysql.cnf"]
+	// The pgsql_variables block must carry monitor credentials so PostgreSQL
+	// backend health checks can authenticate (verified pgsql-monitor_username/
+	// password exist in ProxySQL 3.0).
+	pgIdx := strings.Index(cnf, "pgsql_variables=")
+	if pgIdx < 0 {
+		t.Fatalf("cnf missing pgsql_variables block\n%s", cnf)
+	}
+	pgBlock := cnf[pgIdx:]
+	if !strings.Contains(pgBlock, `monitor_username="monitor"`) {
+		t.Errorf("pgsql_variables missing monitor_username\n%s", cnf)
+	}
+	if !strings.Contains(pgBlock, `monitor_password="monitorpw"`) {
+		t.Errorf("pgsql_variables missing monitor_password\n%s", cnf)
+	}
+}
+
 func TestBuilder_ConfigMap_NoClusterSyncOnSingleReplica(t *testing.T) {
 	one := int32(1)
 	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) { c.Spec.Replicas = &one })

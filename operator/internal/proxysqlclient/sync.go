@@ -351,8 +351,33 @@ func syncVariables(ctx context.Context, c Executor, vars map[string]string, doma
 // quote returns the SQL-literal form of s: 'value' with internal quotes
 // doubled. Used everywhere instead of parameter binding because ProxySQL's
 // admin parser handles literal SQL better than prepared statements.
+//
+// Single-quote doubling is sufficient against breakout for ProxySQL's
+// SQLite-derived admin parser. As defense-in-depth we also strip NUL and other
+// C0 control characters first: a NUL embedded in a password or comment can be
+// truncated by ProxySQL's C/C++ string handling (silently storing a different,
+// shorter value than intended), and stray control bytes have no legitimate
+// place in a hostname/username/password/comment. Tab, newline, and carriage
+// return are preserved since they can legitimately appear in a comment.
 func quote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	return "'" + strings.ReplaceAll(stripControl(s), "'", "''") + "'"
+}
+
+// stripControl removes NUL and C0 control characters (except \t, \n, \r) from s.
+func stripControl(s string) string {
+	if strings.IndexFunc(s, isStripControl) < 0 {
+		return s // common case: nothing to strip, no allocation
+	}
+	return strings.Map(func(r rune) rune {
+		if isStripControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isStripControl(r rune) bool {
+	return (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f
 }
 
 func defaultInt32(v, def int32) int32 {
