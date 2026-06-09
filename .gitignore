@@ -1,0 +1,46 @@
+# --- Go ---
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+cover.out
+coverage.txt
+vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Build artifacts
+bin/
+dist/
+operator/bin/
+
+# --- Helm ---
+*.tgz
+charts/*/charts/
+charts/*/Chart.lock
+
+# --- Docker ---
+Dockerfile.cross
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Local kube/dev state ---
+*.kubeconfig
+kubeconfig
+.envrc
+
+# --- Secrets that should never be committed ---
+*.pem
+*.key
+*-secret.yaml
