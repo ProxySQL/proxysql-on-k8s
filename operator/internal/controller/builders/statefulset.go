@@ -128,6 +128,12 @@ func (b *Builder) container() corev1.Container {
 		Image:           b.Image(),
 		ImagePullPolicy: b.Spec.Image.PullPolicy,
 		SecurityContext: b.Spec.ContainerSecurityContext,
+		// The proxysql/proxysql image has no ENTRYPOINT — the binary name is the
+		// first token of its CMD ("proxysql -f --idle-threads -D ..."). Overriding
+		// args without command makes Kubernetes exec "-f" directly, and the
+		// container CrashLoops with `exec: "-f": executable file not found`. So
+		// command must be set explicitly.
+		Command: []string{"proxysql"},
 		Args: []string{
 			"-f",
 			"-c", "/etc/proxysql/proxysql.cnf",

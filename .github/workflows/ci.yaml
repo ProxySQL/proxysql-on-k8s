@@ -76,7 +76,10 @@ jobs:
           cluster_name: ct
 
       - name: ct install
-        run: ct install --config .github/ct.yaml --target-branch=${{ github.event.repository.default_branch }}
+        # --all installs every chart regardless of change-detection. Without it,
+        # ct reports "No chart changes detected" against a fresh main and tests
+        # nothing (a false green that previously hid a CrashLoop in the charts).
+        run: ct install --all --config .github/ct.yaml --target-branch=${{ github.event.repository.default_branch }}
 
   # --------------------------------------------------------------------------
   # Operator Go tests: build + vet + envtest-backed unit/integration suite.

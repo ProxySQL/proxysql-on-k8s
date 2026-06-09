@@ -198,6 +198,20 @@ func TestBuilder_StatefulSet_PortsMatchEnabledProtocols(t *testing.T) {
 	}
 }
 
+func TestBuilder_StatefulSet_SetsProxysqlCommand(t *testing.T) {
+	// The proxysql/proxysql image has no ENTRYPOINT, so command MUST be set to
+	// the binary; otherwise Kubernetes execs args[0] ("-f") and the container
+	// CrashLoops. Guard against regressing back to args-only.
+	b := New(newCluster(clusterName), newScheme(t), Passwords{})
+	c := b.StatefulSet("checksum").Spec.Template.Spec.Containers[0]
+	if len(c.Command) == 0 || c.Command[0] != "proxysql" {
+		t.Errorf("container command must start with \"proxysql\", got %v", c.Command)
+	}
+	if len(c.Args) == 0 || c.Args[0] != "-f" {
+		t.Errorf("container args should begin with -f, got %v", c.Args)
+	}
+}
+
 func TestBuilder_StatefulSet_PersistenceOff_UsesEmptyDir(t *testing.T) {
 	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
 		f := false
