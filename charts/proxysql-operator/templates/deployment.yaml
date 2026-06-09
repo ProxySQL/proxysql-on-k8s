@@ -41,6 +41,9 @@ spec:
             - --leader-elect
             {{- end }}
             - --health-probe-bind-address={{ .Values.health.bindAddress }}
+            {{- with .Values.configResyncInterval }}
+            - --config-resync-interval={{ . }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             {{- if .Values.metrics.secureServing }}

@@ -87,7 +87,7 @@ kind-down: ## delete the local kind cluster
 
 .PHONY: e2e
 e2e: ## run the operator end-to-end test on a kind cluster (set KEEP_CLUSTER=1 to retain)
-	./test/e2e/proxysql-cluster.sh
+	./test/e2e/run.sh
 
 ## ---- aggregate ----
 

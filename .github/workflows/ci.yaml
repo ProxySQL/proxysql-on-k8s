@@ -137,6 +137,10 @@ jobs:
   shellcheck:
     name: scripts / shellcheck
     runs-on: ubuntu-latest
+    env:
+      # --external-sources lets shellcheck follow `source`d files (e.g. run.sh
+      # sourcing lib.sh) instead of emitting SC1091; matches local `shellcheck -x`.
+      SHELLCHECK_OPTS: --external-sources
     steps:
       - uses: actions/checkout@v4
       - uses: ludeeus/action-shellcheck@2.0.0
@@ -184,8 +188,9 @@ jobs:
 
   # --------------------------------------------------------------------------
   # End-to-end: kind up → load the operator image built in the previous job →
-  # run test/e2e/proxysql-cluster.sh. Tests the full chart + reconciler + SQL
-  # push loop against a real ProxySQL pod.
+  # run the e2e suite (test/e2e/run.sh). Each scenario (mysql, postgres,
+  # multi-replica, drift, psa) deploys real backends and asserts behaviour
+  # through ProxySQL — see test/e2e/scenarios/.
   # --------------------------------------------------------------------------
   e2e:
     name: operator / e2e on kind
@@ -214,13 +219,13 @@ jobs:
       - name: kind-load operator image
         run: kind load docker-image proxysql-operator:ci --name proxysql-e2e
 
-      - name: run e2e
+      - name: run e2e suite
         env:
           KIND_CLUSTER: proxysql-e2e
           IMG: proxysql-operator:ci
           SKIP_BUILD: "1" # image already loaded above
           KEEP_CLUSTER: "1" # GHA runner is ephemeral; teardown wastes ~30s
-        run: ./test/e2e/proxysql-cluster.sh
+        run: ./test/e2e/run.sh
 
       - name: dump operator logs on failure
         if: failure()
