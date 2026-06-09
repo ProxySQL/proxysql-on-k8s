@@ -114,10 +114,10 @@ func syncMySQLServers(ctx context.Context, c Executor, d *Desired) error {
 			s.Hostgroup,
 			quote(s.Hostname),
 			defaultInt32(s.Port, 3306),
-			nullableInt32(s.Weight),
-			nullableInt32(s.MaxConnections),
-			nullableInt32(s.MaxReplicationLag),
-			nullableBoolAsInt(s.UseSSL),
+			defInt32(s.Weight, 1),              // mysql_servers.weight NOT NULL DEFAULT 1
+			defInt32(s.MaxConnections, 1000),   // NOT NULL DEFAULT 1000
+			defInt32(s.MaxReplicationLag, 0),   // NOT NULL DEFAULT 0
+			defBoolAsInt(s.UseSSL, false),      // NOT NULL DEFAULT 0
 			quote(s.Comment),
 		)
 	}
@@ -167,11 +167,11 @@ func syncMySQLUsers(ctx context.Context, c Executor, d *Desired) error {
 			quote(u.Username),
 			quote(u.Password),
 			u.DefaultHostgroup,
-			nullableBoolAsInt(u.Active),
-			nullableInt32(u.MaxConnections),
-			nullableBoolAsInt(u.UseSSL),
-			quote(u.DefaultSchema),
-			nullableBoolAsInt(u.TransactionPersistent),
+			defBoolAsInt(u.Active, true),               // mysql_users.active NOT NULL DEFAULT 1
+			defInt32(u.MaxConnections, 10000),          // NOT NULL DEFAULT 10000
+			defBoolAsInt(u.UseSSL, false),              // NOT NULL DEFAULT 0
+			quote(u.DefaultSchema),                     // nullable column; '' is fine
+			defBoolAsInt(u.TransactionPersistent, true), // NOT NULL DEFAULT 1
 			quote(u.Comment),
 		)
 	}
@@ -200,13 +200,13 @@ func syncMySQLQueryRules(ctx context.Context, c Executor, d *Desired) error {
 		}
 		fmt.Fprintf(&b, "(%d,%s,%s,%s,%s,%s,%s,%s,%s)",
 			r.RuleID,
-			nullableBoolAsInt(r.Active),
+			defBoolAsInt(r.Active, true),         // a declared rule defaults to active
 			quote(r.Username),
 			quote(r.SchemaName),
 			quote(r.MatchPattern),
 			quote(r.MatchDigest),
-			nullableInt32(r.DestinationHostgroup),
-			nullableBoolAsInt(r.Apply),
+			nullableInt32(r.DestinationHostgroup), // nullable: NULL = no hostgroup override
+			defBoolAsInt(r.Apply, false),          // mysql_query_rules.apply NOT NULL DEFAULT 0
 			quote(r.Comment),
 		)
 	}
@@ -232,8 +232,8 @@ func syncPostgreSQLServers(ctx context.Context, c Executor, d *Desired) error {
 			s.Hostgroup,
 			quote(s.Hostname),
 			defaultInt32(s.Port, 5432),
-			nullableInt32(s.Weight),
-			nullableInt32(s.MaxConnections),
+			defInt32(s.Weight, 1),             // pgsql_servers.weight NOT NULL DEFAULT 1
+			defInt32(s.MaxConnections, 1000),  // NOT NULL DEFAULT 1000
 			quote(s.Comment),
 		)
 	}
@@ -259,7 +259,7 @@ func syncPostgreSQLUsers(ctx context.Context, c Executor, d *Desired) error {
 			quote(u.Username),
 			quote(u.Password),
 			u.DefaultHostgroup,
-			nullableBoolAsInt(u.Active),
+			defBoolAsInt(u.Active, true), // pgsql_users.active NOT NULL DEFAULT 1
 			quote(u.Comment),
 		)
 	}
@@ -286,10 +286,10 @@ func syncPostgreSQLQueryRules(ctx context.Context, c Executor, d *Desired) error
 		}
 		fmt.Fprintf(&b, "(%d,%s,%s,%s,%s,%s)",
 			r.RuleID,
-			nullableBoolAsInt(r.Active),
+			defBoolAsInt(r.Active, true), // a declared rule defaults to active
 			quote(r.MatchPattern),
-			nullableInt32(r.DestinationHostgroup),
-			nullableBoolAsInt(r.Apply),
+			nullableInt32(r.DestinationHostgroup), // nullable
+			defBoolAsInt(r.Apply, false),          // pgsql_query_rules.apply NOT NULL DEFAULT 0
 			quote(r.Comment),
 		)
 	}
@@ -387,6 +387,10 @@ func defaultInt32(v, def int32) int32 {
 	return v
 }
 
+// nullableInt32 emits *p, or NULL when unset. Use ONLY for genuinely nullable
+// ProxySQL columns (e.g. mysql_query_rules.destination_hostgroup). For NOT NULL
+// columns use defInt32/defBoolAsInt — emitting NULL into a NOT NULL column
+// fails with "NOT NULL constraint failed".
 func nullableInt32(p *int32) string {
 	if p == nil {
 		return "NULL"
@@ -394,11 +398,22 @@ func nullableInt32(p *int32) string {
 	return strconv.FormatInt(int64(*p), 10)
 }
 
-func nullableBoolAsInt(p *bool) string {
+// defInt32 emits *p, or def when unset. For NOT NULL integer columns, def must
+// be ProxySQL's column default so an unset field behaves as the backend default.
+func defInt32(p *int32, def int32) string {
 	if p == nil {
-		return "NULL"
+		return strconv.FormatInt(int64(def), 10)
 	}
-	if *p {
+	return strconv.FormatInt(int64(*p), 10)
+}
+
+// defBoolAsInt emits *p as 0/1, or def when unset. For NOT NULL boolean columns.
+func defBoolAsInt(p *bool, def bool) string {
+	v := def
+	if p != nil {
+		v = *p
+	}
+	if v {
 		return "1"
 	}
 	return "0"

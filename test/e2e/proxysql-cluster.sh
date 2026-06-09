@@ -164,31 +164,46 @@ fi
 #-----------------------------------------------------------------------------
 # 5) Assert runtime tables match the spec
 #-----------------------------------------------------------------------------
-log "reading minted admin password from the operator-managed Secret"
-ADMIN_PW="$(kubectl -n "$NAMESPACE" get secret "$CLUSTER_NAME" \
-  -o jsonpath='{.data.admin-password}' | base64 -d)"
-[[ -n "$ADMIN_PW" ]] || fail "admin password is empty"
+# Use the radmin account, not admin: ProxySQL restricts the "admin" user to
+# localhost, so a connection over the Service/pod network as admin is rejected
+# ("User 'admin' can only connect locally"). radmin is the remote-capable
+# admin user the operator mints.
+log "reading minted radmin password from the operator-managed Secret"
+RADMIN_PW="$(kubectl -n "$NAMESPACE" get secret "$CLUSTER_NAME" \
+  -o jsonpath='{.data.radmin-password}' | base64 -d)"
+[[ -n "$RADMIN_PW" ]] || fail "radmin password is empty"
 
 log "querying ProxySQL admin port via a transient mysql client pod"
 # We can't assume the proxysql container has a mysql client (readOnlyRootFilesystem +
-# distroless-style upstream image), so spin up a one-shot mysql:8 pod that connects to
-# the in-cluster admin service.
-# `|| true` so that under `set -euo pipefail` a non-zero exit from the client
-# pod (connection refused, auth failure, image-pull error, --rm cleanup race)
-# does NOT abort the script before the diagnostic grep/fail below — otherwise
-# we'd lose the captured output that explains the failure.
-QUERY_OUT="$(kubectl -n "$NAMESPACE" run e2e-mysql-client \
-  --rm -i --restart=Never \
-  --image=mysql:8.0 \
-  --command -- \
-  mysql -h "${CLUSTER_NAME}" -P 6032 -uadmin -p"$ADMIN_PW" -N -B \
-    -e "SELECT hostgroup_id, hostname, port FROM runtime_mysql_servers ORDER BY hostgroup_id;" 2>&1 || true)"
+# distroless-style upstream image), so spin up a one-shot mysql:8 pod that connects
+# to the in-cluster admin service as radmin.
+#
+# Retry: the one-shot client pod can transiently fail (image pull, a brief
+# connection refusal, --rm cleanup race), which would otherwise produce empty
+# output and a spurious assertion failure. `|| true` keeps `set -e` from aborting
+# mid-loop; the per-attempt grep decides success.
+QUERY_OUT=""
+matched=0
+for attempt in $(seq 1 6); do
+  QUERY_OUT="$(kubectl -n "$NAMESPACE" run "e2e-mysql-client-${attempt}" \
+    --rm -i --restart=Never \
+    --image=mysql:8.0 \
+    --command -- \
+    mysql -h "${CLUSTER_NAME}" -P 6032 -uradmin -p"$RADMIN_PW" -N -B \
+      -e "SELECT hostgroup_id, hostname, port FROM runtime_mysql_servers ORDER BY hostgroup_id;" 2>&1 || true)"
+  if grep -E "^0[[:space:]]+127\.0\.0\.1[[:space:]]+13306$" <<<"$QUERY_OUT" >/dev/null; then
+    matched=1
+    break
+  fi
+  log "smoke query attempt ${attempt} did not match yet; retrying…"
+  sleep 5
+done
 
 log "admin query result:"
 printf '%s\n' "$QUERY_OUT" >&2
 
-if ! grep -E "^0[[:space:]]+127\.0\.0\.1[[:space:]]+13306$" <<<"$QUERY_OUT" >/dev/null; then
-  fail "runtime_mysql_servers does not contain the row we declared"
+if [[ "$matched" -ne 1 ]]; then
+  fail "runtime_mysql_servers does not contain the row we declared (after retries)"
 fi
 
 log "PASS — operator end-to-end flow works"

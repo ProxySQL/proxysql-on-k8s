@@ -121,16 +121,20 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	keys := b.SecretKeys()
 	adminPort := b.Spec.Protocols.Admin.Port
 
-	// 2) Read cluster admin Secret.
+	// 2) Read cluster admin Secret. We connect with the "radmin" account, not
+	// "admin": ProxySQL hardcodes the "admin" user to localhost-only, so a
+	// remote (pod-network) admin connection as "admin" is rejected with
+	// "User 'admin' can only connect locally". radmin is the remote-capable
+	// admin user the operator mints (and also uses for cluster sync).
 	var adminSec corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Name: b.SecretName(), Namespace: cluster.Namespace}, &adminSec); err != nil {
 		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "AdminSecretMissing", err.Error())
 		_ = r.Status().Update(ctx, &cfg)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
-	adminPassword := string(adminSec.Data[keys.AdminPassword])
-	if adminPassword == "" {
-		err := fmt.Errorf("admin secret %q is missing key %q", adminSec.Name, keys.AdminPassword)
+	radminPassword := string(adminSec.Data[keys.RadminPassword])
+	if radminPassword == "" {
+		err := fmt.Errorf("admin secret %q is missing key %q", adminSec.Name, keys.RadminPassword)
 		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "AdminSecretIncomplete", err.Error())
 		_ = r.Status().Update(ctx, &cfg)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
@@ -169,7 +173,7 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// 6) Fan out writes.
-	synced, syncErrs := r.applyToReplicas(ctx, addrs, adminPassword, desired)
+	synced, syncErrs := r.applyToReplicas(ctx, addrs, radminPassword, desired)
 
 	// 7) Status.
 	cfg.Status.ObservedGeneration = cfg.Generation
@@ -320,12 +324,14 @@ func isPodReady(p *corev1.Pod) bool {
 
 // applyToReplicas opens a connection to each addr and runs Sync. Returns the
 // count of replicas that synced successfully, plus the per-addr errors.
+// Connections use the "radmin" account — ProxySQL restricts "admin" to
+// localhost, so remote (pod-network) admin connections must use radmin.
 func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []string, password string, d *proxysqlclient.Desired) (int, []error) {
 	log := logf.FromContext(ctx)
 	var ok int
 	var errs []error
 	for _, addr := range addrs {
-		pxc, err := proxysqlclient.New(addr, "admin", password)
+		pxc, err := proxysqlclient.New(addr, "radmin", password)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", addr, err))
 			continue

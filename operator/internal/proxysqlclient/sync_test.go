@@ -101,7 +101,10 @@ func TestSync_MySQLServers_RendersInsert(t *testing.T) {
 	}
 	for _, want := range []string{
 		"(0,'host-a',3306,100,",
-		"(1,'host-b',3306,NULL,NULL,NULL,NULL,'')",
+		// Unset optional columns must get ProxySQL's NOT NULL defaults, not NULL
+		// (weight=1, max_connections=1000, max_replication_lag=0, use_ssl=0) —
+		// emitting NULL into these NOT NULL columns fails the constraint.
+		"(1,'host-b',3306,1,1000,0,0,'')",
 		"'primary'",
 	} {
 		if !strings.Contains(insert, want) {
