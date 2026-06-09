@@ -160,7 +160,9 @@ jobs:
             --build-arg COMMIT=${{ github.sha }} \
             -t proxysql-operator:ci .
 
-      - uses: aquasecurity/trivy-action@v0.28.0
+      # v0.36.0 pins its transitive setup-trivy dependency by commit SHA;
+      # older tags (≤v0.30) reference deleted setup-trivy tags and fail to resolve.
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: proxysql-operator:ci
           format: table
