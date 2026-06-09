@@ -1,0 +1,43 @@
+# chart-testing values that exercise cnf string-escaping and apply:0 handling.
+#
+# The default values.yaml leaves backends/users/queryRules empty, so a plain
+# `helm template`/`ct install` never renders those interpolations. This file
+# populates them with values containing the characters that previously broke
+# the rendered proxysql.cnf — a double quote and a backslash (e.g. a regex in
+# match_pattern) — plus a query rule with `apply: 0`. If escaping regresses,
+# ProxySQL fails to parse its config and the pod never becomes ready, so
+# `ct install` (which waits for readiness + runs the chart's helm test) fails.
+#
+# Backends point at an unreachable host on purpose: ProxySQL still starts (the
+# backend just goes OFFLINE) and the admin port — which the readiness probe and
+# test-connection use — comes up regardless.
+protocols:
+  mysql:
+    enabled: true
+
+backends:
+  mysql:
+    - host: db-does-not-resolve.example.invalid
+      port: 3306
+      hostgroup: 0
+      comment: 'has a "quote" and a \backslash'
+
+users:
+  mysql:
+    - username: app
+      password: 'p\a"ss'
+      defaultHostgroup: 0
+
+queryRules:
+  mysql:
+    # match_pattern is a regex with backslashes — the classic break case.
+    - ruleId: 1
+      active: true
+      matchPattern: '^SELECT \d+ FROM "tbl"'
+      destinationHostgroup: 0
+      apply: 0   # must survive as apply=0 (continue), not be defaulted to 1
+    - ruleId: 2
+      active: true
+      matchPattern: '^SELECT'
+      destinationHostgroup: 0
+      apply: 1

@@ -1,0 +1,39 @@
+# chart-testing values that exercise cnf string-escaping and apply:0 handling.
+# See the proxysql chart's ci/special-chars-values.yaml for the rationale: the
+# default values leave backends/users/queryRules empty, so escaping is never
+# rendered. These inputs contain a double quote and a backslash (regex), plus a
+# query rule with apply:0; if escaping regresses, ProxySQL fails to parse its
+# config and the StatefulSet pod never becomes ready, failing `ct install`.
+replicaCount: 1
+persistence:
+  enabled: false
+
+protocols:
+  mysql:
+    enabled: true
+
+backends:
+  mysql:
+    - host: db-does-not-resolve.example.invalid
+      port: 3306
+      hostgroup: 0
+      comment: 'has a "quote" and a \backslash'
+
+users:
+  mysql:
+    - username: app
+      password: 'p\a"ss'
+      defaultHostgroup: 0
+
+queryRules:
+  mysql:
+    - ruleId: 1
+      active: true
+      matchPattern: '^SELECT \d+ FROM "tbl"'
+      destinationHostgroup: 0
+      apply: 0   # must survive as apply=0 (continue), not be defaulted to 1
+    - ruleId: 2
+      active: true
+      matchPattern: '^SELECT'
+      destinationHostgroup: 0
+      apply: 1

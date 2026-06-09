@@ -26,10 +26,12 @@ filesystem, all capabilities dropped, `RuntimeDefault` seccomp.
 ```bash
 helm install proxysql ./charts/proxysql \
   -n proxysql --create-namespace \
-  --set "backends[0].hostgroup=0,backends[0].hostname=mysql.default.svc,backends[0].port=3306"
+  --set "backends.mysql[0].hostgroup=0,backends.mysql[0].host=mysql.default.svc,backends.mysql[0].port=3306"
 ```
 
-See each chart's `values.yaml` for the full configuration surface.
+Backends live under `backends.mysql` / `backends.pgsql` (each a list of
+`{ hostgroup, host, port }`). See each chart's `values.yaml` for the full
+configuration surface.
 
 ## Development
 

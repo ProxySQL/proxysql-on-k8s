@@ -1,3 +1,6 @@
+{{- if not (or .Values.protocols.mysql.enabled .Values.protocols.pgsql.enabled .Values.service.exposeAdmin .Values.metrics.enabled) }}
+{{- fail "proxysql-cluster: the Service would have no ports — enable at least one of protocols.mysql.enabled, protocols.pgsql.enabled, service.exposeAdmin, or metrics.enabled" }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:

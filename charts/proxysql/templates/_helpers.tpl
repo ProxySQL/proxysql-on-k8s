@@ -62,13 +62,23 @@ Returns a dict with keys: admin, radmin, monitor (raw plaintext).
 {{- end -}}
 
 {{/*
+Escape a string for safe interpolation into a double-quoted ProxySQL
+(libconfig) .cnf value: backslash -> \\, then double-quote -> \". Order
+matters — backslashes must be escaped first. Pass the string as the context,
+e.g. {{ include "proxysql.cnfEscape" $u.password }}.
+*/}}
+{{- define "proxysql.cnfEscape" -}}
+{{- . | replace "\\" "\\\\" | replace "\"" "\\\"" -}}
+{{- end -}}
+
+{{/*
 Render a single ProxySQL variable line. Strings get quoted, numbers/bools don't.
 */}}
 {{- define "proxysql.variableLine" -}}
 {{- $k := .key -}}
 {{- $v := .value -}}
 {{- if kindIs "string" $v -}}
-{{ $k }}="{{ $v }}"
+{{ $k }}="{{ include "proxysql.cnfEscape" $v }}"
 {{- else if kindIs "bool" $v -}}
 {{ $k }}={{ $v }}
 {{- else if kindIs "float64" $v -}}

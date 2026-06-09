@@ -58,11 +58,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- dict "admin" $admin "radmin" $radmin "monitor" $monitor | toYaml -}}
 {{- end -}}
 
+{{/*
+Escape a string for safe interpolation into a double-quoted ProxySQL
+(libconfig) .cnf value: backslash -> \\, then double-quote -> \". Order
+matters — backslashes must be escaped first.
+*/}}
+{{- define "proxysql-cluster.cnfEscape" -}}
+{{- . | replace "\\" "\\\\" | replace "\"" "\\\"" -}}
+{{- end -}}
+
 {{- define "proxysql-cluster.variableLine" -}}
 {{- $k := .key -}}
 {{- $v := .value -}}
 {{- if kindIs "string" $v -}}
-{{ $k }}="{{ $v }}"
+{{ $k }}="{{ include "proxysql-cluster.cnfEscape" $v }}"
 {{- else if kindIs "bool" $v -}}
 {{ $k }}={{ $v }}
 {{- else if kindIs "float64" $v -}}

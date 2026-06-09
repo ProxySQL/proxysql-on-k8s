@@ -7,7 +7,7 @@ datadir="/var/lib/proxysql"
 
 admin_variables=
 {
-  admin_credentials="admin:{{ $pw.admin }};radmin:{{ $pw.radmin }}"
+  admin_credentials="admin:{{ include "proxysql.cnfEscape" $pw.admin }};radmin:{{ include "proxysql.cnfEscape" $pw.radmin }}"
   mysql_ifaces="0.0.0.0:{{ .Values.admin.port }}"
 {{- if .Values.metrics.enabled }}
   restapi_enabled=true
@@ -15,7 +15,7 @@ admin_variables=
 {{- end }}
 {{- if .Values.proxysqlServers }}
   cluster_username="radmin"
-  cluster_password="{{ $pw.radmin }}"
+  cluster_password="{{ include "proxysql.cnfEscape" $pw.radmin }}"
   cluster_check_interval_ms=200
   cluster_check_status_frequency=100
   cluster_mysql_query_rules_save_to_disk=true
@@ -38,7 +38,7 @@ mysql_variables=
 {
   interfaces="0.0.0.0:{{ .Values.protocols.mysql.port }}"
   monitor_username="monitor"
-  monitor_password="{{ $pw.monitor }}"
+  monitor_password="{{ include "proxysql.cnfEscape" $pw.monitor }}"
   server_version="{{ .Values.protocols.mysql.serverVersion }}"
 {{- range $k, $v := .Values.mysqlVariables }}
   {{ include "proxysql.variableLine" (dict "key" $k "value" $v) }}
@@ -62,7 +62,7 @@ pgsql_variables=
 mysql_servers=
 (
 {{- range $i, $b := .Values.backends.mysql }}
-  { address="{{ $b.host }}", port={{ $b.port | default 3306 }}, hostgroup={{ $b.hostgroup | default 0 }}, max_connections={{ $b.maxConnections | default 1000 }}{{ if $b.comment }}, comment="{{ $b.comment }}"{{ end }} }{{ if lt (add $i 1) (len $.Values.backends.mysql) }},{{ end }}
+  { address="{{ $b.host }}", port={{ $b.port | default 3306 }}, hostgroup={{ $b.hostgroup | default 0 }}, max_connections={{ $b.maxConnections | default 1000 }}{{ if $b.comment }}, comment="{{ include "proxysql.cnfEscape" $b.comment }}"{{ end }} }{{ if lt (add $i 1) (len $.Values.backends.mysql) }},{{ end }}
 {{- end }}
 )
 {{- end }}
@@ -72,7 +72,7 @@ mysql_servers=
 pgsql_servers=
 (
 {{- range $i, $b := .Values.backends.pgsql }}
-  { address="{{ $b.host }}", port={{ $b.port | default 5432 }}, hostgroup={{ $b.hostgroup | default 0 }}, max_connections={{ $b.maxConnections | default 1000 }}{{ if $b.comment }}, comment="{{ $b.comment }}"{{ end }} }{{ if lt (add $i 1) (len $.Values.backends.pgsql) }},{{ end }}
+  { address="{{ $b.host }}", port={{ $b.port | default 5432 }}, hostgroup={{ $b.hostgroup | default 0 }}, max_connections={{ $b.maxConnections | default 1000 }}{{ if $b.comment }}, comment="{{ include "proxysql.cnfEscape" $b.comment }}"{{ end }} }{{ if lt (add $i 1) (len $.Values.backends.pgsql) }},{{ end }}
 {{- end }}
 )
 {{- end }}
@@ -82,7 +82,7 @@ pgsql_servers=
 mysql_replication_hostgroups=
 (
 {{- range $i, $g := .Values.mysqlReplicationHostgroups }}
-  { writer_hostgroup={{ $g.writer }}, reader_hostgroup={{ $g.reader }}{{ if $g.checkType }}, check_type="{{ $g.checkType }}"{{ end }}, comment="{{ $g.comment | default "" }}" }{{ if lt (add $i 1) (len $.Values.mysqlReplicationHostgroups) }},{{ end }}
+  { writer_hostgroup={{ $g.writer }}, reader_hostgroup={{ $g.reader }}{{ if $g.checkType }}, check_type="{{ include "proxysql.cnfEscape" $g.checkType }}"{{ end }}, comment="{{ include "proxysql.cnfEscape" ($g.comment | default "") }}" }{{ if lt (add $i 1) (len $.Values.mysqlReplicationHostgroups) }},{{ end }}
 {{- end }}
 )
 {{- end }}
@@ -92,7 +92,7 @@ mysql_replication_hostgroups=
 mysql_users=
 (
 {{- range $i, $u := .Values.users.mysql }}
-  { username="{{ $u.username }}", password="{{ $u.password }}", default_hostgroup={{ $u.defaultHostgroup | default 0 }}, active=1{{ if $u.maxConnections }}, max_connections={{ $u.maxConnections }}{{ end }} }{{ if lt (add $i 1) (len $.Values.users.mysql) }},{{ end }}
+  { username="{{ include "proxysql.cnfEscape" $u.username }}", password="{{ include "proxysql.cnfEscape" $u.password }}", default_hostgroup={{ $u.defaultHostgroup | default 0 }}, active=1{{ if $u.maxConnections }}, max_connections={{ $u.maxConnections }}{{ end }} }{{ if lt (add $i 1) (len $.Values.users.mysql) }},{{ end }}
 {{- end }}
 )
 {{- end }}
@@ -102,7 +102,7 @@ mysql_users=
 pgsql_users=
 (
 {{- range $i, $u := .Values.users.pgsql }}
-  { username="{{ $u.username }}", password="{{ $u.password }}", default_hostgroup={{ $u.defaultHostgroup | default 0 }}, active=1 }{{ if lt (add $i 1) (len $.Values.users.pgsql) }},{{ end }}
+  { username="{{ include "proxysql.cnfEscape" $u.username }}", password="{{ include "proxysql.cnfEscape" $u.password }}", default_hostgroup={{ $u.defaultHostgroup | default 0 }}, active=1 }{{ if lt (add $i 1) (len $.Values.users.pgsql) }},{{ end }}
 {{- end }}
 )
 {{- end }}
@@ -112,7 +112,7 @@ pgsql_users=
 mysql_query_rules=
 (
 {{- range $i, $r := .Values.queryRules.mysql }}
-  { rule_id={{ $r.ruleId }}, active={{ if $r.active }}1{{ else }}0{{ end }}{{ if $r.matchPattern }}, match_pattern="{{ $r.matchPattern }}"{{ end }}{{ if $r.matchDigest }}, match_digest="{{ $r.matchDigest }}"{{ end }}, destination_hostgroup={{ $r.destinationHostgroup }}, apply={{ $r.apply | default 1 }} }{{ if lt (add $i 1) (len $.Values.queryRules.mysql) }},{{ end }}
+  { rule_id={{ $r.ruleId }}, active={{ if $r.active }}1{{ else }}0{{ end }}{{ if $r.matchPattern }}, match_pattern="{{ include "proxysql.cnfEscape" $r.matchPattern }}"{{ end }}{{ if $r.matchDigest }}, match_digest="{{ include "proxysql.cnfEscape" $r.matchDigest }}"{{ end }}, destination_hostgroup={{ $r.destinationHostgroup }}, apply={{ if hasKey $r "apply" }}{{ $r.apply }}{{ else }}1{{ end }} }{{ if lt (add $i 1) (len $.Values.queryRules.mysql) }},{{ end }}
 {{- end }}
 )
 {{- end }}
@@ -122,7 +122,7 @@ mysql_query_rules=
 pgsql_query_rules=
 (
 {{- range $i, $r := .Values.queryRules.pgsql }}
-  { rule_id={{ $r.ruleId }}, active={{ if $r.active }}1{{ else }}0{{ end }}{{ if $r.matchPattern }}, match_pattern="{{ $r.matchPattern }}"{{ end }}{{ if $r.matchDigest }}, match_digest="{{ $r.matchDigest }}"{{ end }}, destination_hostgroup={{ $r.destinationHostgroup }}, apply={{ $r.apply | default 1 }} }{{ if lt (add $i 1) (len $.Values.queryRules.pgsql) }},{{ end }}
+  { rule_id={{ $r.ruleId }}, active={{ if $r.active }}1{{ else }}0{{ end }}{{ if $r.matchPattern }}, match_pattern="{{ include "proxysql.cnfEscape" $r.matchPattern }}"{{ end }}{{ if $r.matchDigest }}, match_digest="{{ include "proxysql.cnfEscape" $r.matchDigest }}"{{ end }}, destination_hostgroup={{ $r.destinationHostgroup }}, apply={{ if hasKey $r "apply" }}{{ $r.apply }}{{ else }}1{{ end }} }{{ if lt (add $i 1) (len $.Values.queryRules.pgsql) }},{{ end }}
 {{- end }}
 )
 {{- end }}
@@ -132,7 +132,7 @@ pgsql_query_rules=
 proxysql_servers=
 (
 {{- range $i, $s := .Values.proxysqlServers }}
-  { hostname="{{ $s.hostname }}", port={{ $s.port | default 6032 }}, weight={{ $s.weight | default 0 }}, comment="{{ $s.comment | default "" }}" }{{ if lt (add $i 1) (len $.Values.proxysqlServers) }},{{ end }}
+  { hostname="{{ $s.hostname }}", port={{ $s.port | default 6032 }}, weight={{ $s.weight | default 0 }}, comment="{{ include "proxysql.cnfEscape" ($s.comment | default "") }}" }{{ if lt (add $i 1) (len $.Values.proxysqlServers) }},{{ end }}
 {{- end }}
 )
 {{- end }}

@@ -25,9 +25,16 @@ Credentials (chart-managed Secret):
 Get the admin password:
   kubectl -n {{ .Release.Namespace }} get secret {{ include "proxysql.fullname" . }} -o jsonpath='{.data.admin-password}' | base64 -d
 
-Open an admin session (from a debug pod):
+Open an admin session:
+{{- if .Values.service.exposeAdmin }}
   kubectl run -n {{ .Release.Namespace }} -it --rm proxysql-admin --image=mysql:8 --restart=Never -- \
     mysql -h {{ include "proxysql.fullname" . }} -P {{ .Values.admin.port }} -u admin -p
+{{- else }}
+  # The admin port is not exposed on the Service (service.exposeAdmin=false).
+  # Port-forward directly to a pod instead:
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "proxysql.fullname" . }} {{ .Values.admin.port }}:{{ .Values.admin.port }} &
+  mysql -h 127.0.0.1 -P {{ .Values.admin.port }} -u admin -p
+{{- end }}
 
 {{- if not (or .Values.backends.mysql .Values.backends.pgsql) }}
 
