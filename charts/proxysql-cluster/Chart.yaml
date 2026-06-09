@@ -1,0 +1,22 @@
+apiVersion: v2
+name: proxysql-cluster
+description: ProxySQL control-plane (StatefulSet, persistent) for operator-managed ProxySQL Clusters
+type: application
+version: 0.1.0
+appVersion: "3.0"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - proxysql
+  - mysql
+  - postgresql
+  - database
+  - proxy
+  - cluster
+home: https://proxysql.com
+sources:
+  - https://github.com/sysown/proxysql
+  - https://github.com/ProxySQL/kubernetes
+maintainers:
+  - name: ProxySQL
+    url: https://proxysql.com
+icon: https://proxysql.com/wp-content/uploads/2020/04/ProxySQL-Colour-Logo.png
