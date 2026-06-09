@@ -1,0 +1,86 @@
+name: examples-nightly
+
+# End-to-end smoke of the backend-operator cookbooks under examples/, against
+# the REAL backend operators (CloudNativePG, mariadb-operator, ...). These are
+# heavy and network-dependent (they pull whole operators), so they run nightly
+# and on demand — never on PRs. Each example is an independent matrix leg
+# (fail-fast: false) so one flaky backend doesn't mask the others.
+#
+# See test/examples/smoke.sh for the per-example logic.
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      example:
+        description: "Single example to run (blank = all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: examples-nightly
+  cancel-in-progress: true
+
+env:
+  KIND_NODE_IMAGE: kindest/node:v1.31.0
+
+jobs:
+  smoke:
+    name: examples / ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Validated end-to-end. Others (percona-ps, percona-pxc,
+        # oracle-mysql-operator, crunchy-pgo) are stubbed in smoke.sh and added
+        # here as their harness support lands.
+        example: [cloudnativepg, mariadb-operator]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only run the dispatch-selected example, if one was given.
+      - name: skip non-selected example
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.example != '' && github.event.inputs.example != matrix.example }}
+        run: echo "skip=true" >> "$GITHUB_ENV"
+
+      - uses: azure/setup-helm@v4
+        if: ${{ env.skip != 'true' }}
+        with:
+          version: v3.16.4
+
+      - uses: docker/setup-buildx-action@v3
+        if: ${{ env.skip != 'true' }}
+
+      - name: build + kind-load operator image
+        if: ${{ env.skip != 'true' }}
+        run: |
+          docker buildx build --load -t proxysql-operator:ci ./operator
+          docker pull proxysql/proxysql:3.0
+
+      - uses: helm/kind-action@v1
+        if: ${{ env.skip != 'true' }}
+        with:
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: examples
+
+      - name: load images into kind
+        if: ${{ env.skip != 'true' }}
+        run: |
+          kind load docker-image proxysql-operator:ci --name examples
+          kind load docker-image proxysql/proxysql:3.0 --name examples
+
+      - name: smoke ${{ matrix.example }}
+        if: ${{ env.skip != 'true' }}
+        env:
+          IMG: proxysql-operator:ci
+        run: ./test/examples/smoke.sh ${{ matrix.example }}
+
+      - name: diagnostics on failure
+        if: ${{ failure() && env.skip != 'true' }}
+        run: |
+          kubectl get pods -A 2>&1 | grep -vE "kube-system|local-path" || true
+          kubectl -n proxysql-system logs deploy/proxysql-operator --tail=150 || true
