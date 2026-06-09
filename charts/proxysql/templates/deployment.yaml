@@ -38,6 +38,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          # The proxysql/proxysql image has no ENTRYPOINT (its binary name is the
+          # first token of CMD), so command must be set explicitly — otherwise
+          # Kubernetes execs args[0] ("-f") and the container CrashLoops with
+          # `exec: "-f": executable file not found`.
+          command: ["proxysql"]
           args:
             - "-f"
             - "-c"
