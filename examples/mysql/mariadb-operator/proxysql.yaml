@@ -1,0 +1,68 @@
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata:
+  name: proxysql
+  namespace: mariadb-demo
+spec:
+  replicas: 3
+  protocols:
+    mysql:
+      enabled: true
+---
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata:
+  name: pxcfg
+  namespace: mariadb-demo
+spec:
+  clusterRef:
+    name: proxysql
+  # The mariadb-operator exposes:
+  #   mariadb-primary        single endpoint that follows the current primary
+  #   mariadb-secondary      replica fan-out
+  # We list all individual pods so ProxySQL can react on read_only flips
+  # via its monitor (faster than waiting for Service endpoint churn).
+  mysqlServers:
+    - hostgroup: 0
+      hostname: mariadb-0.mariadb-internal.mariadb-demo.svc.cluster.local
+      port: 3306
+    - hostgroup: 0
+      hostname: mariadb-1.mariadb-internal.mariadb-demo.svc.cluster.local
+      port: 3306
+    - hostgroup: 0
+      hostname: mariadb-2.mariadb-internal.mariadb-demo.svc.cluster.local
+      port: 3306
+
+  # Tell ProxySQL to track read_only on these hosts and shuffle them
+  # between writer (hg 0) and reader (hg 1) accordingly.
+  mysqlReplicationHostgroups:
+    - writerHostgroup: 0
+      readerHostgroup: 1
+      checkType: read_only
+
+  mysqlUsers:
+    - username: root
+      defaultHostgroup: 0
+      passwordSecretRef:
+        name: mariadb-root
+        key: password
+
+  mysqlVariables:
+    monitor_username: "monitor"
+    # The monitor password is also stored in the same secret the User CR
+    # consumes. ProxySQL renders this into its own admin DB.
+    monitor_password: "REPLACE-ME-monitor-pw"
+    monitor_read_only_interval: "1500"
+    monitor_read_only_timeout: "500"
+
+  mysqlQueryRules:
+    - ruleId: 100
+      active: true
+      matchDigest: "^SELECT.*FOR UPDATE$"
+      destinationHostgroup: 0
+      apply: true
+    - ruleId: 200
+      active: true
+      matchDigest: "^SELECT"
+      destinationHostgroup: 1
+      apply: true

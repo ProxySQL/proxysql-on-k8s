@@ -1,0 +1,72 @@
+# pgbench loadgen — drives the standard TPC-B-like workload through
+# ProxySQL's PostgreSQL port (6133).
+#
+# Usage:
+#   1. Apply this in the namespace where ProxySQL runs.
+#   2. Set HOST / USER / DB / DURATION / CLIENTS as needed.
+#   3. The init step (-i) seeds the standard pgbench schema.
+#
+# Defaults assume examples/postgresql/* — service=proxysql, port=6133,
+# user=app, db=app.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgbench-config
+data:
+  PGHOST: proxysql
+  PGPORT: "6133"
+  PGUSER: app
+  PGDATABASE: app
+  SCALE: "10" # ~1.6 GB at scale=10
+  CLIENTS: "8"
+  DURATION: "60" # seconds
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pgbench-credentials
+stringData:
+  # The READMEs in examples/postgresql/* explain which secret holds the
+  # `app` password (`<cluster>-app` for CNPG, `<cluster>-pguser-app` for
+  # Crunchy). Read it with:
+  #   kubectl get secret <name> -o jsonpath='{.data.password}' | base64 -d
+  PGPASSWORD: "REPLACE-ME"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pgbench-init
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: pgbench
+          image: postgres:16
+          envFrom:
+            - configMapRef: { name: pgbench-config }
+            - secretRef: { name: pgbench-credentials }
+          command: ["/bin/sh", "-c"]
+          args:
+            - pgbench -i -s "$SCALE"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pgbench-run
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: pgbench
+          image: postgres:16
+          envFrom:
+            - configMapRef: { name: pgbench-config }
+            - secretRef: { name: pgbench-credentials }
+          command: ["/bin/sh", "-c"]
+          args:
+            - pgbench -c "$CLIENTS" -j "$CLIENTS" -T "$DURATION" -P 5 -r

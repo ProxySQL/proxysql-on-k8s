@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: percona-ps-demo
+---
+# Backend secrets — the PS Operator wants the full set up front. Generate
+# fresh random passwords for everything. The names match the operator's
+# expected schema; do not rename keys.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster1-secrets
+  namespace: percona-ps-demo
+stringData:
+  root: "REPLACE-ME-root"
+  xtrabackup: "REPLACE-ME-xtrabackup"
+  monitor: "REPLACE-ME-monitor"
+  operator: "REPLACE-ME-operator"
+  orchestrator: "REPLACE-ME-orchestrator"
+  replication: "REPLACE-ME-replication"
+  heartbeat: "REPLACE-ME-heartbeat"
+---
+# Three-node group-replication cluster. We disable HAProxy and the bundled
+# ProxySQL since we're running our own. orchestrator handles failover
+# announcements; PS exposes the current primary as a labeled Service.
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQL
+metadata:
+  name: cluster1
+  namespace: percona-ps-demo
+spec:
+  secretsName: cluster1-secrets
+  mysql:
+    clusterType: group-replication
+    size: 3
+    # Expose the current group-replication primary as a stable Service
+    # (cluster1-mysql-primary). The operator re-points it on failover, so a
+    # single mysql_servers row in ProxySQL always reaches the writer.
+    exposePrimary:
+      enabled: true
+    volumeSpec:
+      persistentVolumeClaim:
+        resources:
+          requests:
+            storage: 2Gi
+  orchestrator:
+    enabled: true
+    size: 3
+  proxy:
+    haproxy:
+      enabled: false
+    router:
+      enabled: false

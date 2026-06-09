@@ -1,0 +1,41 @@
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata:
+  name: proxysql
+  namespace: percona-ps-demo
+spec:
+  replicas: 3
+  protocols:
+    mysql:
+      enabled: true
+---
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLConfig
+metadata:
+  name: pxcfg
+  namespace: percona-ps-demo
+spec:
+  clusterRef:
+    name: proxysql
+  mysqlServers:
+    # All traffic to the group-replication primary. The PS operator re-points
+    # the cluster1-mysql-primary Service to the new primary on failover, so
+    # this single row always reaches the writer.
+    #
+    # NOTE: the PS operator does NOT create a "-mysql-replicas" Service in the
+    # HAProxy-disabled topology this example uses. To scale reads across the GR
+    # secondaries, either enable HAProxy (spec.proxy.haproxy.enabled) and point
+    # a reader hostgroup at cluster1-haproxy:3307, or expose the pods
+    # individually (spec.mysql.expose.enabled) and add a
+    # mysqlReplicationHostgroups entry that splits writer/reader by read_only —
+    # see the mariadb-operator example for that pattern.
+    - hostgroup: 0
+      hostname: cluster1-mysql-primary.percona-ps-demo.svc.cluster.local
+      port: 3306
+      comment: "PS group-replication primary"
+  mysqlUsers:
+    - username: root
+      defaultHostgroup: 0
+      passwordSecretRef:
+        name: cluster1-secrets
+        key: root

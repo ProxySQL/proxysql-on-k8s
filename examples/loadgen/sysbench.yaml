@@ -1,0 +1,89 @@
+# sysbench loadgen — drives oltp_read_write through ProxySQL's MySQL port.
+#
+# Usage:
+#   1. kubectl apply this Job into the namespace where ProxySQL is running.
+#   2. Override NAMESPACE / HOST / USER / PASSWORD / DB / DURATION / THREADS
+#      via env-from-secret or `kubectl set env`.
+#   3. The init step (prepare) creates 8 tables in the target DB.
+#
+# Defaults assume an examples/ install: namespace=*-demo, service=proxysql,
+# port=6033, db=sbtest, user=root.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sysbench-config
+data:
+  HOST: proxysql
+  PORT: "6033"
+  USER: root
+  DB: sbtest
+  DURATION: "60" # seconds
+  THREADS: "8"
+  TABLES: "8"
+  TABLE_SIZE: "10000"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sysbench-credentials
+stringData:
+  # Replace with the actual backend root password before applying. For
+  # the examples/ flavors, see the README of the flavor in question —
+  # all of them reuse a backend-managed secret you can read with
+  # `kubectl get secret … -o jsonpath='{.data.<key>}' | base64 -d`.
+  PASSWORD: "REPLACE-ME"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sysbench-prepare
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sysbench
+          image: severalnines/sysbench:latest
+          envFrom:
+            - configMapRef: { name: sysbench-config }
+            - secretRef: { name: sysbench-credentials }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              mysql -h "$HOST" -P "$PORT" -u"$USER" -p"$PASSWORD" \
+                -e "CREATE DATABASE IF NOT EXISTS $DB"
+              sysbench oltp_read_write \
+                --mysql-host="$HOST" --mysql-port="$PORT" \
+                --mysql-user="$USER" --mysql-password="$PASSWORD" \
+                --mysql-db="$DB" \
+                --tables="$TABLES" --table-size="$TABLE_SIZE" \
+                prepare
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sysbench-run
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sysbench
+          image: severalnines/sysbench:latest
+          envFrom:
+            - configMapRef: { name: sysbench-config }
+            - secretRef: { name: sysbench-credentials }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              sysbench oltp_read_write \
+                --mysql-host="$HOST" --mysql-port="$PORT" \
+                --mysql-user="$USER" --mysql-password="$PASSWORD" \
+                --mysql-db="$DB" \
+                --tables="$TABLES" --table-size="$TABLE_SIZE" \
+                --threads="$THREADS" --time="$DURATION" --report-interval=5 \
+                run
