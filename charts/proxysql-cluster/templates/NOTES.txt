@@ -1,0 +1,47 @@
+proxysql-cluster was deployed as {{ include "proxysql-cluster.fullname" . }} (release {{ .Release.Name }}, namespace {{ .Release.Namespace }}).
+
+Image:        {{ include "proxysql-cluster.image" . }}
+Replicas:     {{ .Values.replicaCount }}
+Persistence:  {{ if .Values.persistence.enabled }}{{ .Values.persistence.size }} per replica{{ if .Values.persistence.storageClass }} ({{ .Values.persistence.storageClass }}){{ end }}{{ else }}DISABLED (emptyDir){{ end }}
+
+Protocols:
+{{- if .Values.protocols.mysql.enabled }}
+  MySQL:       {{ .Values.protocols.mysql.port }} (server_version {{ .Values.protocols.mysql.serverVersion }})
+{{- end }}
+{{- if .Values.protocols.pgsql.enabled }}
+  PostgreSQL:  {{ .Values.protocols.pgsql.port }}
+{{- end }}
+  Admin:       {{ .Values.admin.port }}{{ if not .Values.service.exposeAdmin }} (cluster-internal only){{ end }}
+{{- if .Values.metrics.enabled }}
+  Metrics:     {{ .Values.metrics.port }} (REST API / Prometheus exporter)
+{{- end }}
+
+Services:
+  Headless:    {{ include "proxysql-cluster.headlessName" . }}.{{ .Release.Namespace }}.svc  (stable per-pod DNS)
+  Load-balanced: {{ include "proxysql-cluster.fullname" . }}.{{ .Release.Namespace }}.svc
+
+Per-pod DNS (StatefulSet):
+{{- range $i, $_ := until (int .Values.replicaCount) }}
+  {{ include "proxysql-cluster.fullname" $ }}-{{ $i }}.{{ include "proxysql-cluster.headlessName" $ }}.{{ $.Release.Namespace }}.svc
+{{- end }}
+
+Credentials (chart-managed Secret):
+  Secret:      {{ include "proxysql-cluster.fullname" . }}
+  Keys:        admin-password, radmin-password, monitor-password
+
+{{- if not .Values.proxysqlServers }}
+
+NOTE: proxysqlServers is empty, so ProxySQL Cluster sync is NOT enabled.
+For a real cluster, populate proxysqlServers in values.yaml with all peer pods,
+or deploy the proxysql-operator (Phase 3) and let it manage cluster topology.
+{{- end }}
+
+{{- if not (or .Values.backends.mysql .Values.backends.pgsql) }}
+
+NOTE: No backends are configured. ProxySQL is running but has no servers to route
+queries to. Either populate `backends.mysql` / `backends.pgsql` in values.yaml,
+or pair this chart with the proxysql-operator and use a ProxySQLConfig CR.
+{{- end }}
+
+Run the bundled Helm test:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
