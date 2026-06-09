@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- proxysql_v1alpha1_proxysqlcluster.yaml
+- proxysql_v1alpha1_proxysqlconfig.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

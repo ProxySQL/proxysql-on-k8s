@@ -1,0 +1,273 @@
+/*
+Copyright 2026 ProxySQL.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+)
+
+// ProxySQLClusterSpec defines the desired state of a ProxySQL control-plane
+// cluster. The operator reconciles this into a StatefulSet, headless+regular
+// Services, an admin Secret, and an optional PodDisruptionBudget.
+type ProxySQLClusterSpec struct {
+	// Replicas is the number of ProxySQL control-plane pods.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Image is the ProxySQL container image to run.
+	// +optional
+	Image ImageSpec `json:"image,omitempty"`
+
+	// ImagePullSecrets is a list of secrets used to pull the image.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// Auth references a Secret holding admin/radmin/monitor passwords.
+	// When SecretName is empty, the operator creates a Secret with random
+	// 32-char passwords (preserved across reconciles).
+	// +optional
+	Auth AuthSpec `json:"auth,omitempty"`
+
+	// Persistence configures the per-pod PVC mounted at /var/lib/proxysql.
+	// +optional
+	Persistence PersistenceSpec `json:"persistence,omitempty"`
+
+	// Protocols toggles which client-facing protocols are listening.
+	// +optional
+	Protocols ProtocolsSpec `json:"protocols,omitempty"`
+
+	// Resources sets container resource requests and limits.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// NodeSelector for pod scheduling.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations for pod scheduling.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// Affinity for pod scheduling. Defaults to soft pod antiAffinity across nodes.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// PodSecurityContext defaults to PSA-restricted-compatible (non-root, fsGroup 999,
+	// runtime/default seccomp). Override only if a specific image needs it.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ContainerSecurityContext defaults to allowPrivilegeEscalation=false,
+	// readOnlyRootFilesystem=true, capabilities drop=[ALL].
+	// +optional
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+
+	// Metrics controls the ProxySQL REST/Prometheus exporter port and optional ServiceMonitor.
+	// +optional
+	Metrics MetricsSpec `json:"metrics,omitempty"`
+
+	// PodDisruptionBudget configures a PDB for the StatefulSet.
+	// +optional
+	PodDisruptionBudget PDBSpec `json:"podDisruptionBudget,omitempty"`
+
+	// PodAnnotations and PodLabels are propagated to the pod template.
+	// +optional
+	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
+	// +optional
+	PodLabels map[string]string `json:"podLabels,omitempty"`
+}
+
+// ImageSpec selects a container image and pull policy.
+type ImageSpec struct {
+	// +optional
+	// +kubebuilder:default=proxysql/proxysql
+	Repository string `json:"repository,omitempty"`
+	// +optional
+	// +kubebuilder:default="3.0"
+	Tag string `json:"tag,omitempty"`
+	// +optional
+	// +kubebuilder:default=IfNotPresent
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
+}
+
+// AuthSpec references the Secret that holds admin/radmin/monitor passwords.
+type AuthSpec struct {
+	// SecretName is the name of an existing Secret. When empty, the operator
+	// creates a Secret named after the ProxySQLCluster with random passwords.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+
+	// Keys maps logical password names to keys inside the Secret.
+	// Defaults match the operator-created Secret schema.
+	// +optional
+	Keys AuthKeys `json:"keys,omitempty"`
+}
+
+// AuthKeys names the Secret keys for each ProxySQL credential.
+type AuthKeys struct {
+	// +optional
+	// +kubebuilder:default=admin-password
+	AdminPassword string `json:"adminPassword,omitempty"`
+	// +optional
+	// +kubebuilder:default=radmin-password
+	RadminPassword string `json:"radminPassword,omitempty"`
+	// +optional
+	// +kubebuilder:default=monitor-password
+	MonitorPassword string `json:"monitorPassword,omitempty"`
+}
+
+// PersistenceSpec configures the per-pod PVC for /var/lib/proxysql.
+type PersistenceSpec struct {
+	// Enabled controls whether a PVC is mounted at /var/lib/proxysql. When
+	// nil, the operator defaults to true; set false explicitly to disable
+	// persistence and use an emptyDir instead.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// +optional
+	Size resource.Quantity `json:"size,omitempty"`
+	// +optional
+	StorageClass *string `json:"storageClass,omitempty"`
+	// +optional
+	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
+}
+
+// ProtocolsSpec toggles MySQL / PostgreSQL / admin listening.
+type ProtocolsSpec struct {
+	// +optional
+	MySQL ProtocolSpec `json:"mysql,omitempty"`
+	// +optional
+	PostgreSQL ProtocolSpec `json:"pgsql,omitempty"`
+	// +optional
+	Admin ProtocolSpec `json:"admin,omitempty"`
+}
+
+// ProtocolSpec configures one listening protocol.
+type ProtocolSpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port,omitempty"`
+}
+
+// MetricsSpec configures the ProxySQL Prometheus exporter (REST API).
+type MetricsSpec struct {
+	// Enabled exposes the ProxySQL REST/Prometheus endpoint. Defaults to true.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// +optional
+	// +kubebuilder:default=6070
+	Port int32 `json:"port,omitempty"`
+	// +optional
+	ServiceMonitor ServiceMonitorSpec `json:"serviceMonitor,omitempty"`
+}
+
+// ServiceMonitorSpec configures the optional Prometheus Operator ServiceMonitor.
+type ServiceMonitorSpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	Interval string `json:"interval,omitempty"`
+	// +optional
+	// +kubebuilder:default="10s"
+	ScrapeTimeout string `json:"scrapeTimeout,omitempty"`
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// PDBSpec configures a PodDisruptionBudget for the StatefulSet.
+type PDBSpec struct {
+	// Enabled toggles whether a PodDisruptionBudget is created. Defaults to
+	// true; the PDB is still omitted when replicas <= 1.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// +optional
+	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
+// ProxySQLClusterStatus reports observed state.
+type ProxySQLClusterStatus struct {
+	// ObservedGeneration is the most recent .metadata.generation reconciled.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Replicas is the desired replica count.
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// ReadyReplicas is the ready replica count of the underlying StatefulSet.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+
+	// AdminSecretName is the Secret the operator wired in (created or referenced).
+	// +optional
+	AdminSecretName string `json:"adminSecretName,omitempty"`
+
+	// Conditions follow standard K8s API conventions:
+	//   Available, Progressing, Degraded
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=pxc
+// +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
+// +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// ProxySQLCluster is the Schema for the proxysqlclusters API.
+type ProxySQLCluster struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// metadata is a standard object metadata
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitzero"`
+
+	// spec defines the desired state of ProxySQLCluster
+	// +required
+	Spec ProxySQLClusterSpec `json:"spec"`
+
+	// status defines the observed state of ProxySQLCluster
+	// +optional
+	Status ProxySQLClusterStatus `json:"status,omitzero"`
+}
+
+// +kubebuilder:object:root=true
+
+// ProxySQLClusterList contains a list of ProxySQLCluster.
+type ProxySQLClusterList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitzero"`
+	Items           []ProxySQLCluster `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&ProxySQLCluster{}, &ProxySQLClusterList{})
+}
