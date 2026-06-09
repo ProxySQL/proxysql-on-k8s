@@ -162,6 +162,11 @@ resources:
 
 nodeSelector: {}
 tolerations: []
+# Soft anti-affinity spreads replicas across nodes. The selector matches only
+# app.kubernetes.io/name, so if you run multiple releases of this chart in one
+# cluster they will softly spread against each other too. For strict per-release
+# spreading, override this and add app.kubernetes.io/instance: <release> to the
+# matchLabels (or set a hard requiredDuringScheduling term).
 affinity:
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
