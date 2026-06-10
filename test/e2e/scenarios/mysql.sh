@@ -62,7 +62,10 @@ spec:
   mysqlServers:
     - {hostgroup: 0, hostname: mysql.$ns.svc.cluster.local, port: 3306}
   mysqlUsers:
-    - {username: app, defaultHostgroup: 0, passwordSecretRef: {name: appcreds, key: password}}
+    # defaultSchema: schema-less client sessions would otherwise inherit
+    # ProxySQL's mysql-default_schema (information_schema), which the mysql
+    # image's app user cannot open as a handshake database.
+    - {username: app, defaultHostgroup: 0, defaultSchema: appdb, passwordSecretRef: {name: appcreds, key: password}}
   mysqlQueryRules:
     - {ruleId: 100, active: true, matchDigest: "^SELECT", destinationHostgroup: 0, apply: true}
     # Rewrite rule (#19): replace_pattern substitutes the matched REGEX TEXT,
