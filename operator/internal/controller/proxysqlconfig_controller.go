@@ -163,6 +163,15 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	keys := b.SecretKeys()
 	adminPort := b.Spec.Protocols.Admin.Port
 
+	// pgsql tables on a cluster that isn't listening on pgsql is almost
+	// certainly a user error; we still push (the admin tables exist either
+	// way) but surface it loudly.
+	pgsqlMismatch := pgsqlConfigured(&cfg) && !b.Spec.Protocols.PostgreSQL.Enabled
+	if pgsqlMismatch {
+		r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "PgsqlDisabled",
+			"spec declares pgsql servers/users/rules but the referenced cluster has protocols.pgsql.enabled=false")
+	}
+
 	// 2) Read cluster admin Secret. We connect with the "radmin" account, not
 	// "admin": ProxySQL hardcodes the "admin" user to localhost-only, so a
 	// remote (pod-network) admin connection as "admin" is rejected with
@@ -258,7 +267,12 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionTrue, "Synced",
 			fmt.Sprintf("config applied to %d/%d replicas", len(addrs), len(addrs)))
 		r.setCfgCondition(&cfg, cfgCondProgressing, metav1.ConditionFalse, "Steady", "")
-		meta.RemoveStatusCondition(&cfg.Status.Conditions, cfgCondDegraded)
+		if pgsqlMismatch {
+			r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "PgsqlDisabled",
+				"spec declares pgsql servers/users/rules but the referenced cluster has protocols.pgsql.enabled=false")
+		} else {
+			meta.RemoveStatusCondition(&cfg.Status.Conditions, cfgCondDegraded)
+		}
 		if err := r.Status().Update(ctx, &cfg); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -386,6 +400,11 @@ func (r *ProxySQLConfigReconciler) discoverPodAddresses(ctx context.Context, clu
 	// Deterministic order for logs/status.
 	sort.Strings(out)
 	return out, nil
+}
+
+// pgsqlConfigured reports whether the spec declares any pgsql-side state.
+func pgsqlConfigured(cfg *proxysqlv1alpha1.ProxySQLConfig) bool {
+	return len(cfg.Spec.PostgreSQLServers)+len(cfg.Spec.PostgreSQLUsers)+len(cfg.Spec.PostgreSQLQueryRules) > 0
 }
 
 func isPodReady(p *corev1.Pod) bool {

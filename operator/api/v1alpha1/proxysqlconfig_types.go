@@ -34,25 +34,46 @@ type ProxySQLConfigSpec struct {
 
 	// MySQL backend topology.
 	// +optional
+	// +listType=map
+	// +listMapKey=hostgroup
+	// +listMapKey=hostname
+	// +listMapKey=port
 	MySQLServers []MySQLServer `json:"mysqlServers,omitempty"`
 	// +optional
+	// +listType=map
+	// +listMapKey=username
 	MySQLUsers []MySQLUser `json:"mysqlUsers,omitempty"`
 	// +optional
+	// +listType=map
+	// +listMapKey=ruleId
 	MySQLQueryRules []MySQLQueryRule `json:"mysqlQueryRules,omitempty"`
 	// +optional
+	// +listType=map
+	// +listMapKey=writerHostgroup
 	MySQLReplicationHostgroups []MySQLReplicationHostgroup `json:"mysqlReplicationHostgroups,omitempty"`
 
 	// PostgreSQL backend topology (ProxySQL 3.x).
 	// +optional
+	// +listType=map
+	// +listMapKey=hostgroup
+	// +listMapKey=hostname
+	// +listMapKey=port
 	PostgreSQLServers []PostgreSQLServer `json:"pgsqlServers,omitempty"`
 	// +optional
+	// +listType=map
+	// +listMapKey=username
 	PostgreSQLUsers []PostgreSQLUser `json:"pgsqlUsers,omitempty"`
 	// +optional
+	// +listType=map
+	// +listMapKey=ruleId
 	PostgreSQLQueryRules []PostgreSQLQueryRule `json:"pgsqlQueryRules,omitempty"`
 
 	// ProxySQLServers identifies peer nodes for ProxySQL Cluster sync.
 	// When empty, the operator auto-populates from the ProxySQLCluster's StatefulSet pods.
 	// +optional
+	// +listType=map
+	// +listMapKey=hostname
+	// +listMapKey=port
 	ProxySQLServers []ProxySQLServerEntry `json:"proxysqlServers,omitempty"`
 
 	// ProxySQL variable overrides. Pushed via admin SQL UPDATE.

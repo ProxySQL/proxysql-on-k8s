@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -426,6 +427,129 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 				"the drifted replica failed the re-push, so nothing is synced")
 			Expect(cur.Status.LastSyncTime.Time).To(BeTemporally("~", past.Time, time.Second),
 				"LastSyncTime must not advance when drift was found but not fixed")
+		})
+	})
+
+	Context("admission validation", func() {
+		const ns = "default"
+
+		pwRef := corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "adm-user-pw"},
+			Key:                  "password",
+		}
+
+		It("rejects duplicate mysql usernames", func() {
+			ctx := context.Background()
+			cfg := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "adm-dup-user", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: "adm-cluster"},
+					MySQLUsers: []proxysqlv1alpha1.MySQLUser{
+						{Username: "app", PasswordSecretRef: pwRef},
+						{Username: "app", PasswordSecretRef: pwRef},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cfg)).NotTo(Succeed(),
+				"two mysqlUsers entries with the same username must be rejected at admission")
+		})
+
+		It("rejects duplicate ruleIds in mysqlQueryRules", func() {
+			ctx := context.Background()
+			cfg := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "adm-dup-rule", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: "adm-cluster"},
+					MySQLQueryRules: []proxysqlv1alpha1.MySQLQueryRule{
+						{RuleID: 1, MatchDigest: "^SELECT"},
+						{RuleID: 1, MatchDigest: "^UPDATE"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cfg)).NotTo(Succeed(),
+				"two mysqlQueryRules entries with the same ruleId must be rejected at admission")
+		})
+
+		It("rejects duplicate (hostgroup,hostname,port) in mysqlServers", func() {
+			ctx := context.Background()
+			cfg := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "adm-dup-server", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: "adm-cluster"},
+					MySQLServers: []proxysqlv1alpha1.MySQLServer{
+						{Hostgroup: 0, Hostname: "db-0.db", Port: 3306},
+						{Hostgroup: 0, Hostname: "db-0.db", Port: 3306},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cfg)).NotTo(Succeed(),
+				"two mysqlServers rows with the same server identity must be rejected at admission")
+		})
+	})
+
+	Context("pgsql mismatch condition", func() {
+		const ns = "default"
+
+		It("sets Degraded=PgsqlDisabled when pgsql tables target a cluster without pgsql", func() {
+			ctx := context.Background()
+			const name = "pgmm-cfg"
+			const clusterName = "pgmm-cluster"
+
+			// Cluster with pgsql disabled (the zero value of protocols.pgsql.enabled).
+			cluster := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			adminSec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
+				Data: map[string][]byte{
+					b.SecretKeys().RadminPassword: []byte("radmin-pass"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, adminSec) })
+
+			cfg := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: clusterName},
+					PostgreSQLServers: []proxysqlv1alpha1.PostgreSQLServer{
+						{Hostgroup: 0, Hostname: "pg-0.pg"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
+			DeferCleanup(func() {
+				var cur proxysqlv1alpha1.ProxySQLConfig
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err != nil {
+					return
+				}
+				cur.Finalizers = nil
+				_ = k8sClient.Update(ctx, &cur)
+				_ = k8sClient.Delete(ctx, &cur)
+			})
+
+			r := &ProxySQLConfigReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			// No ready pods exist, so the reconcile stops at NoReadyReplicas —
+			// the pgsql-mismatch condition must already be set (and persisted)
+			// by that point.
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var cur proxysqlv1alpha1.ProxySQLConfig
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur)).To(Succeed())
+			degraded := meta.FindStatusCondition(cur.Status.Conditions, cfgCondDegraded)
+			Expect(degraded).NotTo(BeNil(), "Degraded condition must be set")
+			Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
+			Expect(degraded.Reason).To(Equal("PgsqlDisabled"))
 		})
 	})
 

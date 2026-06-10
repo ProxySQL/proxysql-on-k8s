@@ -107,6 +107,9 @@ spec:
                   - ruleId
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - ruleId
+                x-kubernetes-list-type: map
               mysqlReplicationHostgroups:
                 items:
                   description: MySQLReplicationHostgroup maps to mysql_replication_hostgroups.
@@ -133,6 +136,9 @@ spec:
                   - writerHostgroup
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - writerHostgroup
+                x-kubernetes-list-type: map
               mysqlServers:
                 description: MySQL backend topology.
                 items:
@@ -169,6 +175,11 @@ spec:
                   - hostname
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - hostgroup
+                - hostname
+                - port
+                x-kubernetes-list-type: map
               mysqlUsers:
                 items:
                   description: MySQLUser maps to a row in the ProxySQL mysql_users
@@ -223,6 +234,9 @@ spec:
                   - username
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - username
+                x-kubernetes-list-type: map
               mysqlVariables:
                 additionalProperties:
                   type: string
@@ -249,6 +263,9 @@ spec:
                   - ruleId
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - ruleId
+                x-kubernetes-list-type: map
               pgsqlServers:
                 description: PostgreSQL backend topology (ProxySQL 3.x).
                 items:
@@ -276,6 +293,11 @@ spec:
                   - hostname
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - hostgroup
+                - hostname
+                - port
+                x-kubernetes-list-type: map
               pgsqlUsers:
                 items:
                   description: PostgreSQLUser maps to pgsql_users.
@@ -318,6 +340,9 @@ spec:
                   - username
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - username
+                x-kubernetes-list-type: map
               pgsqlVariables:
                 additionalProperties:
                   type: string
@@ -344,6 +369,10 @@ spec:
                   - hostname
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - hostname
+                - port
+                x-kubernetes-list-type: map
             required:
             - clusterRef
             type: object
