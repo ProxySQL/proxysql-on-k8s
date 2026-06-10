@@ -90,8 +90,8 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.DurationVar(&configResyncInterval, "config-resync-interval", 2*time.Minute,
-		"How often the ProxySQLConfig reconciler re-asserts desired state on every "+
-			"replica even when nothing changed, to self-heal out-of-band runtime drift.")
+		"How often the ProxySQLConfig reconciler reads runtime state back from each "+
+			"replica and re-pushes any that drifted, to self-heal out-of-band runtime drift.")
 	opts := zap.Options{
 		Development: true,
 	}

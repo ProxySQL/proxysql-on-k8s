@@ -691,6 +691,10 @@ func (in *ProxySQLConfigStatus) DeepCopyInto(out *ProxySQLConfigStatus) {
 		in, out := &in.LastSyncTime, &out.LastSyncTime
 		*out = (*in).DeepCopy()
 	}
+	if in.LastRuntimeCheckTime != nil {
+		in, out := &in.LastRuntimeCheckTime, &out.LastRuntimeCheckTime
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))

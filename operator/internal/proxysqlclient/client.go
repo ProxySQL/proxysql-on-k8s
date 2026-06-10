@@ -80,6 +80,38 @@ func (c *Client) Exec(ctx context.Context, query string, args ...any) error {
 	return nil
 }
 
+// Query runs a SELECT and returns all rows as strings. ProxySQL's admin
+// interface returns everything as text anyway; string rows keep the caller
+// trivial and the fake trivial-er.
+func (c *Client) Query(ctx context.Context, query string) ([][]string, error) {
+	rows, err := c.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("%s: query %q: %w", c.addr, snippet(query), err)
+	}
+	defer func() { _ = rows.Close() }()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	var out [][]string
+	for rows.Next() {
+		raw := make([]sql.RawBytes, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range raw {
+			ptrs[i] = &raw[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		rec := make([]string, len(cols))
+		for i, v := range raw {
+			rec[i] = string(v)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
 // snippet returns a short prefix of q for use in error messages — full
 // queries can be hundreds of lines after batched inserts.
 func snippet(q string) string {

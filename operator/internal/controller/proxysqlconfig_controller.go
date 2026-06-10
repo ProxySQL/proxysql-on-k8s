@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -49,8 +50,9 @@ type ProxySQLConfigReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	// ResyncInterval bounds how long out-of-band runtime drift can persist
-	// before a full re-push re-asserts desired state. Zero means use the
-	// default (defaultDriftResyncInterval).
+	// before the reconciler reads runtime state back from each replica and
+	// re-pushes only the ones that drifted. Zero means use the default
+	// (defaultDriftResyncInterval).
 	ResyncInterval time.Duration
 }
 
@@ -77,6 +79,13 @@ const (
 	cfgCondDegraded     = "Degraded"
 	cfgCondClusterFound = "ClusterFound"
 
+	// cfgFinalizer guards ProxySQLConfig deletion: the operator clears the
+	// managed admin tables on every ready replica before letting the CR go.
+	cfgFinalizer = "proxysql.com/config-cleanup"
+	// skipCleanupAnnotation ("true") skips the SQL cleanup on deletion. The
+	// escape hatch when the cluster is wedged or unreachable forever.
+	skipCleanupAnnotation = "proxysql.com/skip-cleanup"
+
 	// requeueAfterSuccess: after a successful sync, requeue at this cadence as
 	// a safety net (catches Pod restarts that wiped runtime tables before
 	// ProxySQL Cluster sync caught up).
@@ -88,9 +97,9 @@ const (
 	// The hash short-circuit skips the SQL push when desired config, replica
 	// set, and generation are unchanged — which is cheap but means a pod whose
 	// runtime tables were mutated externally (or never converged) would never
-	// be corrected. To stay level-based, we force a full re-push (bypassing the
-	// short-circuit) once this much wall-clock has elapsed since the last
-	// successful sync; the periodic requeue then re-asserts desired state.
+	// be corrected. To stay level-based, once this much wall-clock has elapsed
+	// since the last sync we read runtime state back from every replica and
+	// re-push only the ones that drifted (bypassing the short-circuit).
 	defaultDriftResyncInterval = 2 * time.Minute
 )
 
@@ -103,10 +112,14 @@ const (
 //  4. Resolve each MySQL/PostgreSQL user's password from its referenced Secret.
 //  5. Discover ready ProxySQL pods via label selector.
 //  6. Compute a SHA-256 over the resolved Desired; short-circuit if it matches
-//     status.LastAppliedHash AND every ready pod was synced.
-//  7. For each ready pod, open a SQL connection to its admin port and run
+//     status.LastAppliedHash AND every ready pod was synced AND the drift
+//     resync interval hasn't elapsed. When only the interval elapsed, read
+//     runtime state back from each replica and narrow the push to the
+//     replicas that actually drifted (read-back failure counts as drift).
+//  7. For each target pod, open a SQL connection to its admin port and run
 //     the full Sync (DELETE/INSERT/LOAD/SAVE per table + variables).
-//  8. Update status (LastAppliedHash, LastSyncTime, SyncedReplicas, Conditions).
+//  8. Update status (LastAppliedHash, LastSyncTime, SyncedReplicas,
+//     DriftedReplicas, ShunnedBackends, LastRuntimeCheckTime, Conditions).
 //
 // Write strategy: write-to-all. ProxySQL Cluster sync would also propagate
 // changes, but explicitly writing to every replica makes SyncedReplicas
@@ -120,6 +133,15 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if !cfg.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, &cfg)
+	}
+	if controllerutil.AddFinalizer(&cfg, cfgFinalizer) {
+		if err := r.Update(ctx, &cfg); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// 1) Resolve target cluster.
@@ -140,6 +162,15 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	b := builders.New(&cluster, r.Scheme, builders.Passwords{})
 	keys := b.SecretKeys()
 	adminPort := b.Spec.Protocols.Admin.Port
+
+	// pgsql tables on a cluster that isn't listening on pgsql is almost
+	// certainly a user error; we still push (the admin tables exist either
+	// way) but surface it loudly.
+	pgsqlMismatch := pgsqlConfigured(&cfg) && !b.Spec.Protocols.PostgreSQL.Enabled
+	if pgsqlMismatch {
+		r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "PgsqlDisabled",
+			"spec declares pgsql servers/users/rules but the referenced cluster has protocols.pgsql.enabled=false")
+	}
 
 	// 2) Read cluster admin Secret. We connect with the "radmin" account, not
 	// "admin": ProxySQL hardcodes the "admin" user to localhost-only, so a
@@ -184,36 +215,63 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// the short-circuit. Including the address set means a recreated pod (new
 	// IP, empty runtime tables) changes the fingerprint and forces a re-push.
 	//
-	// We skip the SQL push only when nothing observable changed AND we re-pushed
-	// recently. The driftResyncInterval clause keeps the operator level-based:
-	// without it, runtime drift that doesn't change the spec/replica-set/
-	// generation (e.g. an externally-mutated admin table) would be skipped
-	// forever, since the hash and replica count still match.
+	// We skip the SQL push only when nothing observable changed AND we asserted
+	// desired state recently. The driftResyncInterval clause keeps the operator
+	// level-based: without it, runtime drift that doesn't change the spec/
+	// replica-set/generation (e.g. an externally-mutated admin table) would be
+	// skipped forever, since the hash and replica count still match.
 	hash := syncFingerprint(desired, addrs)
-	dueForResync := resyncDue(cfg.Status.LastSyncTime, time.Now(), r.resyncInterval())
-	allHealthy := !dueForResync &&
-		cfg.Status.LastAppliedHash == hash &&
+	unchanged := cfg.Status.LastAppliedHash == hash &&
 		cfg.Status.SyncedReplicas == int32(len(addrs)) &&
 		cfg.Status.ObservedGeneration == cfg.Generation
-	if allHealthy {
+	dueForResync := resyncDue(cfg.Status.LastSyncTime, time.Now(), r.resyncInterval())
+
+	if unchanged && !dueForResync {
 		log.V(1).Info("ProxySQLConfig unchanged; skipping SQL push", "hash", hash, "replicas", len(addrs))
 		return ctrl.Result{RequeueAfter: requeueAfterSuccess}, nil
 	}
 
+	pushAddrs := addrs
+	if unchanged && dueForResync {
+		// Informed resync: nothing about the spec or replica set changed, so
+		// instead of blind-pushing everything, read runtime state back and
+		// re-push only the replicas that actually drifted.
+		drifted, shunned := r.verifyReplicas(ctx, addrs, radminPassword, desired)
+		now := metav1.NewTime(time.Now())
+		cfg.Status.LastRuntimeCheckTime = &now
+		cfg.Status.ShunnedBackends = shunned
+		cfg.Status.DriftedReplicas = int32(len(drifted))
+		if len(drifted) == 0 {
+			// Converged everywhere: verification counts as asserting desired
+			// state, so advance the resync clock.
+			cfg.Status.LastSyncTime = &now
+			if err := r.Status().Update(ctx, &cfg); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: requeueAfterSuccess}, nil
+		}
+		pushAddrs = drifted
+	}
+
 	// 6) Fan out writes.
-	synced, syncErrs := r.applyToReplicas(ctx, addrs, radminPassword, desired)
+	synced, syncErrs := r.applyToReplicas(ctx, pushAddrs, radminPassword, desired)
 
 	// 7) Status.
 	cfg.Status.ObservedGeneration = cfg.Generation
-	cfg.Status.SyncedReplicas = int32(synced)
-	if synced == len(addrs) && len(syncErrs) == 0 {
+	if synced == len(pushAddrs) && len(syncErrs) == 0 {
+		cfg.Status.SyncedReplicas = int32(len(addrs))
+		cfg.Status.DriftedReplicas = 0
 		cfg.Status.LastAppliedHash = hash
 		now := metav1.NewTime(time.Now())
 		cfg.Status.LastSyncTime = &now
 		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionTrue, "Synced",
-			fmt.Sprintf("config applied to %d/%d replicas", synced, len(addrs)))
+			fmt.Sprintf("config applied to %d/%d replicas", len(addrs), len(addrs)))
 		r.setCfgCondition(&cfg, cfgCondProgressing, metav1.ConditionFalse, "Steady", "")
-		meta.RemoveStatusCondition(&cfg.Status.Conditions, cfgCondDegraded)
+		// The PgsqlDisabled Degraded condition was already set above when it
+		// applies; only clear Degraded when it doesn't.
+		if !pgsqlMismatch {
+			meta.RemoveStatusCondition(&cfg.Status.Conditions, cfgCondDegraded)
+		}
 		if err := r.Status().Update(ctx, &cfg); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -221,10 +279,17 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// Partial or full failure.
+	cfg.Status.SyncedReplicas = int32(len(addrs) - len(pushAddrs) + synced)
 	r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "PartialSync",
-		fmt.Sprintf("synced %d/%d replicas", synced, len(addrs)))
-	r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "SyncErrors",
-		joinErrs(syncErrs))
+		fmt.Sprintf("synced %d/%d replicas (%d re-push targets, %d succeeded)",
+			len(addrs)-len(pushAddrs)+synced, len(addrs), len(pushAddrs), synced))
+	// Degraded is a single condition: when a pgsql mismatch coexists with sync
+	// errors, fold the warning into the message so it isn't silently dropped.
+	degradedMsg := joinErrs(syncErrs)
+	if pgsqlMismatch {
+		degradedMsg = "pgsql declared but protocols.pgsql.enabled=false on cluster; " + degradedMsg
+	}
+	r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "SyncErrors", degradedMsg)
 	if err := r.Status().Update(ctx, &cfg); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -341,6 +406,11 @@ func (r *ProxySQLConfigReconciler) discoverPodAddresses(ctx context.Context, clu
 	return out, nil
 }
 
+// pgsqlConfigured reports whether the spec declares any pgsql-side state.
+func pgsqlConfigured(cfg *proxysqlv1alpha1.ProxySQLConfig) bool {
+	return len(cfg.Spec.PostgreSQLServers)+len(cfg.Spec.PostgreSQLUsers)+len(cfg.Spec.PostgreSQLQueryRules) > 0
+}
+
 func isPodReady(p *corev1.Pod) bool {
 	for _, c := range p.Status.Conditions {
 		if c.Type == corev1.PodReady {
@@ -374,6 +444,106 @@ func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []
 		ok++
 	}
 	return ok, errs
+}
+
+// verifyReplicas reads runtime state back from each replica and returns the
+// addresses whose state drifted from desired, plus the total SHUNNED backend
+// count. A replica whose read-back fails is treated as drifted: we cannot
+// prove it converged, so it goes back through the push path.
+func (r *ProxySQLConfigReconciler) verifyReplicas(ctx context.Context, addrs []string, password string, d *proxysqlclient.Desired) (drifted []string, shunned int32) {
+	log := logf.FromContext(ctx)
+	for _, addr := range addrs {
+		pxc, err := proxysqlclient.New(addr, "radmin", password)
+		if err != nil {
+			drifted = append(drifted, addr)
+			continue
+		}
+		rs, err := proxysqlclient.ReadRuntime(ctx, pxc)
+		_ = pxc.Close()
+		if err != nil {
+			log.V(1).Info("runtime read-back failed; treating replica as drifted", "addr", addr, "error", err.Error())
+			drifted = append(drifted, addr)
+			continue
+		}
+		shunned += rs.ShunnedCount()
+		if diffs := d.Drift(rs); len(diffs) > 0 {
+			log.Info("runtime drift detected", "addr", addr, "diffs", joinTrunc(diffs, 256))
+			drifted = append(drifted, addr)
+		}
+	}
+	return drifted, shunned
+}
+
+// finalize clears the managed admin tables on every ready replica, then
+// releases the finalizer. Policy: never wedge deletion when the operator
+// cannot possibly clean up — absent cluster, absent admin Secret, or missing
+// radmin key all mean we can't authenticate, and holding the finalizer
+// forever is worse than leaking config. DO hold the finalizer while the
+// cluster exists with no ready pods (releasing would leak config onto pods
+// that come back); the skip-cleanup annotation is the escape hatch for every
+// stuck-deletion case.
+func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	if !controllerutil.ContainsFinalizer(cfg, cfgFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	if cfg.Annotations[skipCleanupAnnotation] == "true" {
+		log.Info("skip-cleanup annotation set; releasing finalizer without cleanup")
+		return r.releaseFinalizer(ctx, cfg)
+	}
+
+	var cluster proxysqlv1alpha1.ProxySQLCluster
+	clusterKey := types.NamespacedName{Name: cfg.Spec.ClusterRef.Name, Namespace: cfg.Namespace}
+	if err := r.Get(ctx, clusterKey, &cluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.releaseFinalizer(ctx, cfg)
+		}
+		return ctrl.Result{}, err
+	}
+
+	b := builders.New(&cluster, r.Scheme, builders.Passwords{})
+	var adminSec corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: b.SecretName(), Namespace: cluster.Namespace}, &adminSec); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.releaseFinalizer(ctx, cfg)
+		}
+		return ctrl.Result{}, err
+	}
+	radminPassword := string(adminSec.Data[b.SecretKeys().RadminPassword])
+	if radminPassword == "" {
+		log.Info("admin secret is missing the radmin key; releasing finalizer without cleanup",
+			"secret", adminSec.Name, "key", b.SecretKeys().RadminPassword)
+		return r.releaseFinalizer(ctx, cfg)
+	}
+
+	addrs, err := r.discoverPodAddresses(ctx, &cluster, b.Spec.Protocols.Admin.Port)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(addrs) == 0 {
+		log.Info("cleanup pending: cluster exists but has no ready pods; retrying",
+			"cluster", cluster.Name, "escapeHatch", skipCleanupAnnotation)
+		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+
+	// An empty Desired DELETEs every managed table and LOAD/SAVEs each
+	// section. Variables are left as-is: ProxySQL has no "unset", and
+	// resetting values blind would be worse than leaving them.
+	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword, &proxysqlclient.Desired{})
+	if cleaned != len(addrs) {
+		log.Info("cleanup incomplete; retrying", "cleaned", cleaned, "total", len(addrs), "errors", joinErrs(errs))
+		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+	return r.releaseFinalizer(ctx, cfg)
+}
+
+func (r *ProxySQLConfigReconciler) releaseFinalizer(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig) (ctrl.Result, error) {
+	if controllerutil.RemoveFinalizer(cfg, cfgFinalizer) {
+		if err := r.Update(ctx, cfg); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *ProxySQLConfigReconciler) setCfgCondition(cfg *proxysqlv1alpha1.ProxySQLConfig, t string, s metav1.ConditionStatus, reason, msg string) {
@@ -414,11 +584,12 @@ func syncFingerprint(d *proxysqlclient.Desired, addrs []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// resyncDue reports whether a full re-push is overdue: true if we've never
-// synced (last == nil) or at least interval has elapsed since the last
-// successful sync. This forces the reconciler past the hash short-circuit
-// periodically so externally-drifted runtime state is re-asserted (level-based
-// reconciliation) rather than skipped forever.
+// resyncDue reports whether a drift check is overdue: true if we've never
+// synced (last == nil) or at least interval has elapsed since the last time
+// desired state was asserted (written or verified). This forces the reconciler
+// past the hash short-circuit periodically so externally-drifted runtime state
+// is detected and re-pushed (level-based reconciliation) rather than skipped
+// forever.
 func resyncDue(last *metav1.Time, now time.Time, interval time.Duration) bool {
 	return last == nil || now.Sub(last.Time) >= interval
 }
@@ -459,11 +630,14 @@ func joinTrunc(parts []string, max int) string {
 //     changes (status flip, admin secret rotation, replica count change).
 //   - Pods: re-reconcile when a ProxySQL pod becomes Ready or restarts, so
 //     fresh pods get config pushed without waiting for the 30s safety requeue.
+//   - Secrets: re-reconcile configs when a referenced password Secret or the
+//     target cluster's admin Secret changes, so rotation converges immediately.
 func (r *ProxySQLConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&proxysqlv1alpha1.ProxySQLConfig{}).
 		Watches(&proxysqlv1alpha1.ProxySQLCluster{}, handler.EnqueueRequestsFromMapFunc(r.configsForCluster)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.configsForPod)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.configsForSecret)).
 		Named("proxysqlconfig").
 		Complete(r)
 }
@@ -506,4 +680,57 @@ func (r *ProxySQLConfigReconciler) configsForPod(ctx context.Context, obj client
 		}
 	}
 	return out
+}
+
+// configsForSecret maps a Secret event to every ProxySQLConfig that consumes
+// it — either as a user passwordSecretRef or as the admin Secret of the
+// cluster the config targets. This makes password rotation converge on the
+// next reconcile instead of waiting for the drift resync interval.
+func (r *ProxySQLConfigReconciler) configsForSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	sec, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	var configs proxysqlv1alpha1.ProxySQLConfigList
+	if err := r.List(ctx, &configs, client.InNamespace(sec.Namespace)); err != nil {
+		return nil
+	}
+	if len(configs.Items) == 0 {
+		return nil
+	}
+	// Clusters whose derived admin-secret name matches this Secret. On list
+	// failure, degrade gracefully: log and still return user-ref matches.
+	adminOf := map[string]bool{}
+	var clusters proxysqlv1alpha1.ProxySQLClusterList
+	if err := r.List(ctx, &clusters, client.InNamespace(sec.Namespace)); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to list ProxySQLClusters while mapping Secret event; admin-secret matches will be skipped",
+			"secret", sec.Name, "namespace", sec.Namespace)
+	} else {
+		for i := range clusters.Items {
+			if builders.New(&clusters.Items[i], r.Scheme, builders.Passwords{}).SecretName() == sec.Name {
+				adminOf[clusters.Items[i].Name] = true
+			}
+		}
+	}
+	var out []reconcile.Request
+	for _, c := range configs.Items {
+		if adminOf[c.Spec.ClusterRef.Name] || configReferencesSecret(&c, sec.Name) {
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: c.Name, Namespace: c.Namespace}})
+		}
+	}
+	return out
+}
+
+func configReferencesSecret(c *proxysqlv1alpha1.ProxySQLConfig, name string) bool {
+	for _, u := range c.Spec.MySQLUsers {
+		if u.PasswordSecretRef.Name == name {
+			return true
+		}
+	}
+	for _, u := range c.Spec.PostgreSQLUsers {
+		if u.PasswordSecretRef.Name == name {
+			return true
+		}
+	}
+	return false
 }

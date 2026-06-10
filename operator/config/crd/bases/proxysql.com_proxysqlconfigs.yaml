@@ -23,6 +23,9 @@ spec:
     - jsonPath: .status.syncedReplicas
       name: Synced
       type: integer
+    - jsonPath: .status.driftedReplicas
+      name: Drifted
+      type: integer
     - jsonPath: .status.lastSyncTime
       name: Last-Sync
       type: date
@@ -104,6 +107,9 @@ spec:
                   - ruleId
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - ruleId
+                x-kubernetes-list-type: map
               mysqlReplicationHostgroups:
                 items:
                   description: MySQLReplicationHostgroup maps to mysql_replication_hostgroups.
@@ -130,6 +136,9 @@ spec:
                   - writerHostgroup
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - writerHostgroup
+                x-kubernetes-list-type: map
               mysqlServers:
                 description: MySQL backend topology.
                 items:
@@ -166,6 +175,11 @@ spec:
                   - hostname
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - hostgroup
+                - hostname
+                - port
+                x-kubernetes-list-type: map
               mysqlUsers:
                 items:
                   description: MySQLUser maps to a row in the ProxySQL mysql_users
@@ -220,6 +234,9 @@ spec:
                   - username
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - username
+                x-kubernetes-list-type: map
               mysqlVariables:
                 additionalProperties:
                   type: string
@@ -246,6 +263,9 @@ spec:
                   - ruleId
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - ruleId
+                x-kubernetes-list-type: map
               pgsqlServers:
                 description: PostgreSQL backend topology (ProxySQL 3.x).
                 items:
@@ -273,6 +293,11 @@ spec:
                   - hostname
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - hostgroup
+                - hostname
+                - port
+                x-kubernetes-list-type: map
               pgsqlUsers:
                 items:
                   description: PostgreSQLUser maps to pgsql_users.
@@ -315,6 +340,9 @@ spec:
                   - username
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - username
+                x-kubernetes-list-type: map
               pgsqlVariables:
                 additionalProperties:
                   type: string
@@ -341,6 +369,10 @@ spec:
                   - hostname
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - hostname
+                - port
+                x-kubernetes-list-type: map
             required:
             - clusterRef
             type: object
@@ -409,17 +441,38 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              driftedReplicas:
+                description: |-
+                  DriftedReplicas is the number of ready replicas whose runtime tables
+                  diverged from the desired config at the last runtime check. 0 when
+                  everything converged.
+                format: int32
+                type: integer
               lastAppliedHash:
                 description: LastAppliedHash is a SHA of the spec last successfully
                   pushed to the cluster.
                 type: string
+              lastRuntimeCheckTime:
+                description: |-
+                  LastRuntimeCheckTime is when the operator last read runtime state back
+                  from the replicas.
+                format: date-time
+                type: string
               lastSyncTime:
-                description: LastSyncTime is when the operator last successfully wrote
-                  to the cluster.
+                description: |-
+                  LastSyncTime is when the operator last asserted desired state on the
+                  cluster — either by writing it, or by verifying via runtime read-back
+                  that no replica had drifted.
                 format: date-time
                 type: string
               observedGeneration:
                 format: int64
+                type: integer
+              shunnedBackends:
+                description: |-
+                  ShunnedBackends is the total number of backend server rows in SHUNNED
+                  state across all replicas at the last runtime check.
+                format: int32
                 type: integer
               syncedReplicas:
                 description: SyncedReplicas is the number of ProxySQL pods that received
