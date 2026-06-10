@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -317,6 +318,114 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			Expect(err).NotTo(HaveOccurred(), "config must still exist")
 			Expect(cur.Finalizers).To(ContainElement("proxysql.com/config-cleanup"),
 				"finalizer must be held while cleanup is failing")
+		})
+	})
+
+	Context("informed drift resync", func() {
+		const ns = "default"
+
+		It("runs the runtime check and reports drift when read-back fails", func() {
+			ctx := context.Background()
+			const name = "resync-cfg"
+			const clusterName = "resync-cluster"
+
+			cluster := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			adminSec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
+				Data: map[string][]byte{
+					b.SecretKeys().RadminPassword: []byte("radmin-pass"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, adminSec) })
+
+			// A Ready pod whose IP is loopback: nothing listens on the admin
+			// port, so both the runtime read-back and the subsequent re-push
+			// are refused.
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "resync-pod",
+					Namespace: ns,
+					Labels:    map[string]string{"proxysql.com/cluster": clusterName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "proxysql",
+						Image: "proxysql/proxysql",
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))
+			})
+			pod.Status.PodIP = "127.0.0.1"
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			cfg := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: clusterName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
+			DeferCleanup(func() {
+				var cur proxysqlv1alpha1.ProxySQLConfig
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err != nil {
+					return
+				}
+				cur.Finalizers = nil
+				_ = k8sClient.Update(ctx, &cur)
+				_ = k8sClient.Delete(ctx, &cur)
+			})
+
+			r := &ProxySQLConfigReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			// Pre-seed status as "previously fully synced, resync overdue":
+			// LastAppliedHash must match the fingerprint the controller will
+			// compute, so derive it the same way (buildDesired + the pod's
+			// admin address).
+			desired, err := r.buildDesired(ctx, cfg)
+			Expect(err).NotTo(HaveOccurred())
+			addr := fmt.Sprintf("127.0.0.1:%d", b.Spec.Protocols.Admin.Port)
+			past := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+			cfg.Status.LastAppliedHash = syncFingerprint(desired, []string{addr})
+			cfg.Status.SyncedReplicas = 1
+			cfg.Status.ObservedGeneration = cfg.Generation
+			cfg.Status.LastSyncTime = &past
+			Expect(k8sClient.Status().Update(ctx, cfg)).To(Succeed())
+
+			res, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(5*time.Second),
+				"drifted replica re-push failed, so the reconcile must requeue transiently")
+
+			var cur proxysqlv1alpha1.ProxySQLConfig
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur)).To(Succeed())
+			Expect(cur.Status.DriftedReplicas).To(Equal(int32(1)),
+				"read-back failure must count the replica as drifted")
+			Expect(cur.Status.LastRuntimeCheckTime).NotTo(BeNil(),
+				"the runtime check timestamp must be recorded")
+			Expect(cur.Status.ShunnedBackends).To(Equal(int32(0)))
+			Expect(cur.Status.SyncedReplicas).To(Equal(int32(0)),
+				"the drifted replica failed the re-push, so nothing is synced")
+			Expect(cur.Status.LastSyncTime.Time).To(BeTemporally("~", past.Time, time.Second),
+				"LastSyncTime must not advance when drift was found but not fixed")
 		})
 	})
 

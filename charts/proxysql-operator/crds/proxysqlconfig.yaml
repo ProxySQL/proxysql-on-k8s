@@ -23,6 +23,9 @@ spec:
     - jsonPath: .status.syncedReplicas
       name: Synced
       type: integer
+    - jsonPath: .status.driftedReplicas
+      name: Drifted
+      type: integer
     - jsonPath: .status.lastSyncTime
       name: Last-Sync
       type: date
@@ -409,17 +412,38 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              driftedReplicas:
+                description: |-
+                  DriftedReplicas is the number of ready replicas whose runtime tables
+                  diverged from the desired config at the last runtime check. 0 when
+                  everything converged.
+                format: int32
+                type: integer
               lastAppliedHash:
                 description: LastAppliedHash is a SHA of the spec last successfully
                   pushed to the cluster.
                 type: string
+              lastRuntimeCheckTime:
+                description: |-
+                  LastRuntimeCheckTime is when the operator last read runtime state back
+                  from the replicas.
+                format: date-time
+                type: string
               lastSyncTime:
-                description: LastSyncTime is when the operator last successfully wrote
-                  to the cluster.
+                description: |-
+                  LastSyncTime is when the operator last asserted desired state on the
+                  cluster — either by writing it, or by verifying via runtime read-back
+                  that no replica had drifted.
                 format: date-time
                 type: string
               observedGeneration:
                 format: int64
+                type: integer
+              shunnedBackends:
+                description: |-
+                  ShunnedBackends is the total number of backend server rows in SHUNNED
+                  state across all replicas at the last runtime check.
+                format: int32
                 type: integer
               syncedReplicas:
                 description: SyncedReplicas is the number of ProxySQL pods that received

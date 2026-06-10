@@ -204,13 +204,31 @@ type ProxySQLConfigStatus struct {
 	// +optional
 	LastAppliedHash string `json:"lastAppliedHash,omitempty"`
 
-	// LastSyncTime is when the operator last successfully wrote to the cluster.
+	// LastSyncTime is when the operator last asserted desired state on the
+	// cluster — either by writing it, or by verifying via runtime read-back
+	// that no replica had drifted.
 	// +optional
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 
 	// SyncedReplicas is the number of ProxySQL pods that received the latest config.
 	// +optional
 	SyncedReplicas int32 `json:"syncedReplicas,omitempty"`
+
+	// DriftedReplicas is the number of ready replicas whose runtime tables
+	// diverged from the desired config at the last runtime check. 0 when
+	// everything converged.
+	// +optional
+	DriftedReplicas int32 `json:"driftedReplicas,omitempty"`
+
+	// ShunnedBackends is the total number of backend server rows in SHUNNED
+	// state across all replicas at the last runtime check.
+	// +optional
+	ShunnedBackends int32 `json:"shunnedBackends,omitempty"`
+
+	// LastRuntimeCheckTime is when the operator last read runtime state back
+	// from the replicas.
+	// +optional
+	LastRuntimeCheckTime *metav1.Time `json:"lastRuntimeCheckTime,omitempty"`
 
 	// Conditions follow standard K8s conventions:
 	//   Ready, Progressing, Degraded, ClusterFound
@@ -225,6 +243,7 @@ type ProxySQLConfigStatus struct {
 // +kubebuilder:resource:shortName=pxcfg
 // +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.clusterRef.name`
 // +kubebuilder:printcolumn:name="Synced",type=integer,JSONPath=`.status.syncedReplicas`
+// +kubebuilder:printcolumn:name="Drifted",type=integer,JSONPath=`.status.driftedReplicas`
 // +kubebuilder:printcolumn:name="Last-Sync",type=date,JSONPath=`.status.lastSyncTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
