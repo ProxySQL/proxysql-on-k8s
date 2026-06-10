@@ -170,7 +170,8 @@ type ProtocolSpec struct {
 	// Enabled toggles this protocol's listener. When nil, the protocol's own
 	// default applies: admin and mysql default to on, pgsql and web default
 	// to off, and a non-zero Port implies enabled. An explicitly set value
-	// always wins, even when Port is set.
+	// always wins, even when Port is set — except admin, which is always on
+	// (the operator needs it to push config) and ignores enabled=false.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 	// +optional

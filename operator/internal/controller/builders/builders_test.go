@@ -118,6 +118,34 @@ func TestDefaultedSpec_MySQLExplicitFalse_StaysDisabled(t *testing.T) {
 	}
 }
 
+func TestDefaultedSpec_PgsqlWebExplicitFalseWithPort_StaysDisabled(t *testing.T) {
+	c := newCluster("c", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.PostgreSQL.Enabled = boolPtr(false)
+		c.Spec.Protocols.PostgreSQL.Port = 5432
+		c.Spec.Protocols.Web.Enabled = boolPtr(false)
+		c.Spec.Protocols.Web.Port = 6080
+	})
+	spec := DefaultedSpec(c)
+	if spec.Protocols.PostgreSQL.IsEnabled() {
+		t.Error("explicit pgsql enabled=false must win over a non-zero port")
+	}
+	if spec.Protocols.Web.IsEnabled() {
+		t.Error("explicit web enabled=false must win over a non-zero port")
+	}
+}
+
+func TestDefaultedSpec_AdminAlwaysEnabled(t *testing.T) {
+	// The admin listener cannot be disabled: the operator depends on it to
+	// push ProxySQLConfig. An explicit false is deliberately overridden.
+	c := newCluster("c", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.Admin.Enabled = boolPtr(false)
+	})
+	spec := DefaultedSpec(c)
+	if !spec.Protocols.Admin.IsEnabled() {
+		t.Error("admin.enabled=false must be overridden: admin is always on")
+	}
+}
+
 func TestBuilder_MySQLDisabled_OmittedEverywhere(t *testing.T) {
 	c := newCluster("nomysql", func(c *proxysqlv1alpha1.ProxySQLCluster) {
 		c.Spec.Protocols.MySQL.Enabled = boolPtr(false)
