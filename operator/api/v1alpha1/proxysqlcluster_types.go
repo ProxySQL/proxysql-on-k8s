@@ -126,6 +126,15 @@ type LoggingSpec struct {
 	// QueryLog enables ProxySQL's eventslog (all MySQL-protocol queries) and
 	// ships it. Currently the sidecar's only input, so admission rejects
 	// enabled=true with queryLog=false until more inputs exist.
+	//
+	// LIMITATION: the eventslog variables live in the bootstrap cnf, and on a
+	// persistence-enabled cluster ProxySQL's own proxysql.db wins over the
+	// cnf after the first start. Toggling queryLog OFF therefore does not
+	// stop an already-running eventslog there: run
+	//   UPDATE global_variables SET variable_value='false'
+	//     WHERE variable_name='mysql-eventslog_default_log';
+	//   LOAD MYSQL VARIABLES TO RUNTIME; SAVE MYSQL VARIABLES TO DISK;
+	// on the admin port (or set it via ProxySQLConfig.mysqlVariables).
 	// +optional
 	QueryLog bool `json:"queryLog,omitempty"`
 

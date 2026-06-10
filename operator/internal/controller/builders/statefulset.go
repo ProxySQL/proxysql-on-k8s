@@ -17,8 +17,6 @@ limitations under the License.
 package builders
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"maps"
 	"strconv"
 
@@ -233,12 +231,6 @@ func (b *Builder) keepaliveSysctls() []corev1.Sysctl {
 		out = append(out, corev1.Sysctl{Name: "net.ipv4.tcp_keepalive_probes", Value: strconv.Itoa(int(*ka.Probes))})
 	}
 	return out
-}
-
-// Sha256 returns the hex SHA-256 of s, used for the cnf checksum annotation.
-func Sha256(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
 }
 
 func ptrInt64(v int64) *int64 { return &v }
