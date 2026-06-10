@@ -794,3 +794,136 @@ func TestRandomPassword_Length(t *testing.T) {
 		t.Errorf("password length=%d, want 32", len(p))
 	}
 }
+
+func int32Ptr(v int32) *int32 { return &v }
+
+func TestBuilder_Service_DefaultsHaveNoAnnotationsOrAffinity(t *testing.T) {
+	b := New(newCluster(clusterName), newScheme(t), Passwords{})
+
+	svc := b.Service()
+	if len(svc.Annotations) != 0 {
+		t.Errorf("default Service annotations: got %v, want none", svc.Annotations)
+	}
+	if svc.Spec.SessionAffinity != "" {
+		t.Errorf("default Service sessionAffinity: got %q, want unset", svc.Spec.SessionAffinity)
+	}
+	if svc.Spec.SessionAffinityConfig != nil {
+		t.Errorf("default Service sessionAffinityConfig: got %+v, want nil", svc.Spec.SessionAffinityConfig)
+	}
+}
+
+func TestBuilder_Service_AnnotationsOnRegularOnly(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Service.Annotations = map[string]string{
+			"service.beta.kubernetes.io/aws-load-balancer-type": "nlb",
+		}
+	})
+	b := New(c, newScheme(t), Passwords{})
+
+	svc := b.Service()
+	if got := svc.Annotations["service.beta.kubernetes.io/aws-load-balancer-type"]; got != "nlb" {
+		t.Errorf("regular Service annotation: got %q, want %q", got, "nlb")
+	}
+	// Labels must survive alongside annotations.
+	if svc.Labels["proxysql.com/cluster"] != clusterName {
+		t.Errorf("regular Service labels lost: %v", svc.Labels)
+	}
+
+	headless := b.HeadlessService()
+	if len(headless.Annotations) != 0 {
+		t.Errorf("headless Service must not get spec.service annotations, got %v", headless.Annotations)
+	}
+}
+
+func TestBuilder_Service_SessionAffinity(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Service.SessionAffinityTimeoutSeconds = int32Ptr(300)
+	})
+	b := New(c, newScheme(t), Passwords{})
+
+	svc := b.Service()
+	if svc.Spec.SessionAffinity != corev1.ServiceAffinityClientIP {
+		t.Fatalf("sessionAffinity: got %q, want ClientIP", svc.Spec.SessionAffinity)
+	}
+	if svc.Spec.SessionAffinityConfig == nil ||
+		svc.Spec.SessionAffinityConfig.ClientIP == nil ||
+		svc.Spec.SessionAffinityConfig.ClientIP.TimeoutSeconds == nil ||
+		*svc.Spec.SessionAffinityConfig.ClientIP.TimeoutSeconds != 300 {
+		t.Errorf("sessionAffinityConfig: got %+v, want ClientIP timeout 300", svc.Spec.SessionAffinityConfig)
+	}
+
+	headless := b.HeadlessService()
+	if headless.Spec.SessionAffinity != "" || headless.Spec.SessionAffinityConfig != nil {
+		t.Errorf("headless Service must not get session affinity, got %q / %+v",
+			headless.Spec.SessionAffinity, headless.Spec.SessionAffinityConfig)
+	}
+}
+
+func TestBuilder_StatefulSet_NoKeepalive_NoSysctls(t *testing.T) {
+	b := New(newCluster(clusterName), newScheme(t), Passwords{})
+	ss := b.StatefulSet("sum")
+
+	sc := ss.Spec.Template.Spec.SecurityContext
+	if sc == nil {
+		t.Fatal("pod security context should be defaulted, got nil")
+	}
+	if len(sc.Sysctls) != 0 {
+		t.Errorf("no keepalive configured: sysctls should be absent, got %v", sc.Sysctls)
+	}
+}
+
+func TestBuilder_StatefulSet_TCPKeepaliveSysctls(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Networking.TCPKeepalive.Time = int32Ptr(120)
+		c.Spec.Networking.TCPKeepalive.Interval = int32Ptr(30)
+		c.Spec.Networking.TCPKeepalive.Probes = int32Ptr(5)
+	})
+	b := New(c, newScheme(t), Passwords{})
+	ss := b.StatefulSet("sum")
+
+	sc := ss.Spec.Template.Spec.SecurityContext
+	if sc == nil {
+		t.Fatal("pod security context is nil")
+	}
+	got := map[string]string{}
+	for _, s := range sc.Sysctls {
+		got[s.Name] = s.Value
+	}
+	want := map[string]string{
+		"net.ipv4.tcp_keepalive_time":   "120",
+		"net.ipv4.tcp_keepalive_intvl":  "30",
+		"net.ipv4.tcp_keepalive_probes": "5",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("sysctl %s: got %q, want %q", k, got[k], v)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("unexpected extra sysctls: %v", got)
+	}
+	// PSA-restricted security context must remain intact alongside sysctls.
+	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		t.Error("runAsNonRoot lost when sysctls are set")
+	}
+}
+
+func TestBuilder_StatefulSet_PartialKeepalive_OnlySetSysctls(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Networking.TCPKeepalive.Time = int32Ptr(600)
+	})
+	b := New(c, newScheme(t), Passwords{})
+	ss := b.StatefulSet("sum")
+
+	sc := ss.Spec.Template.Spec.SecurityContext
+	if len(sc.Sysctls) != 1 {
+		t.Fatalf("want exactly 1 sysctl, got %v", sc.Sysctls)
+	}
+	if sc.Sysctls[0].Name != "net.ipv4.tcp_keepalive_time" || sc.Sysctls[0].Value != "600" {
+		t.Errorf("got %+v, want net.ipv4.tcp_keepalive_time=600", sc.Sysctls[0])
+	}
+	// The builder must not mutate the defaulted spec's shared security context.
+	if len(b.Spec.PodSecurityContext.Sysctls) != 0 {
+		t.Errorf("builder mutated b.Spec.PodSecurityContext: %v", b.Spec.PodSecurityContext.Sysctls)
+	}
+}

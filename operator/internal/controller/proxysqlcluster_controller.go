@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -291,6 +292,16 @@ func (r *ProxySQLClusterReconciler) ensureService(ctx context.Context, owner *pr
 	existing.Namespace = desired.Namespace
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
 		existing.Labels = desired.Labels
+		// Annotations MERGE (unlike labels): cloud controllers write their
+		// own annotations onto LB Services and wiping them every reconcile
+		// would fight those controllers. Spec keys win; foreign keys are
+		// preserved. Consequence: a key removed from spec.service.annotations
+		// lingers on the Service until removed by hand — documented in the
+		// API field comment.
+		if len(desired.Annotations) > 0 && existing.Annotations == nil {
+			existing.Annotations = map[string]string{}
+		}
+		maps.Copy(existing.Annotations, desired.Annotations)
 		// Preserve immutable fields: ClusterIP, ClusterIPs.
 		clusterIP := existing.Spec.ClusterIP
 		clusterIPs := existing.Spec.ClusterIPs

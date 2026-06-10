@@ -1255,6 +1255,42 @@ spec:
                         type: string
                     type: object
                 type: object
+              networking:
+                description: Networking tunes pod-level networking (TCP keepalive
+                  sysctls).
+                properties:
+                  tcpKeepalive:
+                    description: |-
+                      TCPKeepalive sets the net.ipv4.tcp_keepalive_* sysctls on the pod.
+                      These three sysctls are in the Kubernetes safe-sysctl set since v1.29
+                      (KEP-3105) and are admitted under PSA `restricted`; on older clusters
+                      the kubelet rejects them unless listed in --allowed-unsafe-sysctls.
+                    properties:
+                      interval:
+                        description: 'Interval is net.ipv4.tcp_keepalive_intvl: seconds
+                          between probes.'
+                        format: int32
+                        maximum: 32767
+                        minimum: 1
+                        type: integer
+                      probes:
+                        description: |-
+                          Probes is net.ipv4.tcp_keepalive_probes: unanswered probes before the
+                          connection is dropped.
+                        format: int32
+                        maximum: 127
+                        minimum: 1
+                        type: integer
+                      time:
+                        description: |-
+                          Time is net.ipv4.tcp_keepalive_time: seconds a connection stays idle
+                          before keepalive probes start.
+                        format: int32
+                        maximum: 32767
+                        minimum: 1
+                        type: integer
+                    type: object
+                type: object
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -1683,6 +1719,29 @@ spec:
                       otherwise to an implementation-defined value. Requests cannot exceed Limits.
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
+                type: object
+              service:
+                description: |-
+                  Service customizes the client-facing (regular) Service. The headless
+                  Service used by the StatefulSet is not affected.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations are merged onto the Service (cloud LB configuration).
+                      Spec keys win; annotations written by other controllers are preserved.
+                      A key removed from this map lingers on the Service until removed by
+                      hand (the operator cannot tell a removed spec key from a foreign one).
+                    type: object
+                  sessionAffinityTimeoutSeconds:
+                    description: |-
+                      SessionAffinityTimeoutSeconds enables ClientIP session affinity with
+                      this timeout when set (1..86400).
+                    format: int32
+                    maximum: 86400
+                    minimum: 1
+                    type: integer
                 type: object
               tolerations:
                 description: Tolerations for pod scheduling.

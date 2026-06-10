@@ -243,6 +243,63 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 		})
 	})
 
+	When("the user sets networking knobs (#28)", func() {
+		const name = "pxc-netknobs"
+
+		It("applies service annotations, session affinity, and keepalive sysctls — and updates annotations on change", func() {
+			ctx := context.Background()
+			timeout := int32(300)
+			kaTime := int32(120)
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Service.Annotations = map[string]string{"example.com/lb": "internal"}
+				c.Spec.Service.SessionAffinityTimeoutSeconds = &timeout
+				c.Spec.Networking.TCPKeepalive.Time = &kaTime
+			})
+			reconcileAndExpectSuccess(name)
+
+			var svc, headless corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &svc)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-headless", Namespace: ns}, &headless)).To(Succeed())
+
+			Expect(svc.Annotations).To(HaveKeyWithValue("example.com/lb", "internal"))
+			Expect(svc.Spec.SessionAffinity).To(Equal(corev1.ServiceAffinityClientIP))
+			Expect(svc.Spec.SessionAffinityConfig).NotTo(BeNil())
+			Expect(*svc.Spec.SessionAffinityConfig.ClientIP.TimeoutSeconds).To(Equal(int32(300)))
+
+			// The headless Service stays untouched by spec.service.
+			Expect(headless.Annotations).NotTo(HaveKey("example.com/lb"))
+			Expect(headless.Spec.SessionAffinity).NotTo(Equal(corev1.ServiceAffinityClientIP))
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Spec.Template.Spec.SecurityContext.Sysctls).To(ConsistOf(
+				corev1.Sysctl{Name: "net.ipv4.tcp_keepalive_time", Value: "120"},
+			))
+
+			// Change the annotation value: ensureService must propagate it
+			// (annotations live in ObjectMeta, not in the copied Spec).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.Annotations = map[string]string{"example.com/lb": "internet-facing"}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &svc)).To(Succeed())
+			Expect(svc.Annotations).To(HaveKeyWithValue("example.com/lb", "internet-facing"))
+
+			// Merge semantics contract: a key removed from the spec lingers
+			// on the Service (the operator cannot tell a removed spec key
+			// from one written by a cloud controller, and wiping foreign
+			// annotations would fight LB controllers).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.Annotations = nil
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &svc)).To(Succeed())
+			Expect(svc.Annotations).To(HaveKey("example.com/lb"),
+				"removed spec annotation must linger on the Service (merge semantics)")
+		})
+	})
+
 	When("the user provides a pre-existing auth Secret", func() {
 		const name = "pxc-external-secret"
 		const secretName = "byo-admin-creds"

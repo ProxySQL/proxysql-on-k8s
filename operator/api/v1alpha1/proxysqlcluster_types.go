@@ -94,6 +94,68 @@ type ProxySQLClusterSpec struct {
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
 	// +optional
 	PodLabels map[string]string `json:"podLabels,omitempty"`
+
+	// Service customizes the client-facing (regular) Service. The headless
+	// Service used by the StatefulSet is not affected.
+	// +optional
+	Service ServiceSpec `json:"service,omitempty"`
+
+	// Networking tunes pod-level networking (TCP keepalive sysctls).
+	// +optional
+	Networking NetworkingSpec `json:"networking,omitempty"`
+}
+
+// ServiceSpec customizes the client-facing (regular) Service.
+type ServiceSpec struct {
+	// Annotations are merged onto the Service (cloud LB configuration).
+	// Spec keys win; annotations written by other controllers are preserved.
+	// A key removed from this map lingers on the Service until removed by
+	// hand (the operator cannot tell a removed spec key from a foreign one).
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// SessionAffinityTimeoutSeconds enables ClientIP session affinity with
+	// this timeout when set (1..86400).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=86400
+	SessionAffinityTimeoutSeconds *int32 `json:"sessionAffinityTimeoutSeconds,omitempty"`
+}
+
+// NetworkingSpec tunes pod-level networking behavior.
+type NetworkingSpec struct {
+	// TCPKeepalive sets the net.ipv4.tcp_keepalive_* sysctls on the pod.
+	// These three sysctls are in the Kubernetes safe-sysctl set since v1.29
+	// (KEP-3105) and are admitted under PSA `restricted`; on older clusters
+	// the kubelet rejects them unless listed in --allowed-unsafe-sysctls.
+	// +optional
+	TCPKeepalive TCPKeepaliveSpec `json:"tcpKeepalive,omitempty"`
+}
+
+// TCPKeepaliveSpec maps to the net.ipv4.tcp_keepalive_{time,intvl,probes}
+// kernel sysctls. Unset fields keep the node's kernel default. Bounds are
+// conservative API-level limits; the kernel itself imposes no practical
+// upper bound.
+type TCPKeepaliveSpec struct {
+	// Time is net.ipv4.tcp_keepalive_time: seconds a connection stays idle
+	// before keepalive probes start.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=32767
+	Time *int32 `json:"time,omitempty"`
+
+	// Interval is net.ipv4.tcp_keepalive_intvl: seconds between probes.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=32767
+	Interval *int32 `json:"interval,omitempty"`
+
+	// Probes is net.ipv4.tcp_keepalive_probes: unanswered probes before the
+	// connection is dropped.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=127
+	Probes *int32 `json:"probes,omitempty"`
 }
 
 // ImageSpec selects a container image and pull policy.

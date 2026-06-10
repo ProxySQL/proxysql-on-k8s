@@ -23,13 +23,16 @@ import (
 )
 
 // Service builds the load-balanced ClusterIP Service exposing MySQL, PostgreSQL,
-// the admin port, and (optionally) the metrics and web UI ports.
+// the admin port, and (optionally) the metrics and web UI ports. spec.service
+// annotations and session affinity apply here only — never to the headless
+// Service.
 func (b *Builder) Service() *corev1.Service {
-	return &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      b.Name(),
-			Namespace: b.Namespace(),
-			Labels:    b.Labels(),
+			Name:        b.Name(),
+			Namespace:   b.Namespace(),
+			Labels:      b.Labels(),
+			Annotations: b.Spec.Service.Annotations,
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeClusterIP,
@@ -37,6 +40,14 @@ func (b *Builder) Service() *corev1.Service {
 			Ports:    b.servicePorts(false),
 		},
 	}
+	if t := b.Spec.Service.SessionAffinityTimeoutSeconds; t != nil {
+		timeout := *t
+		svc.Spec.SessionAffinity = corev1.ServiceAffinityClientIP
+		svc.Spec.SessionAffinityConfig = &corev1.SessionAffinityConfig{
+			ClientIP: &corev1.ClientIPConfig{TimeoutSeconds: &timeout},
+		}
+	}
+	return svc
 }
 
 // HeadlessService builds the headless Service used as the StatefulSet's
