@@ -394,10 +394,13 @@ func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []
 }
 
 // finalize clears the managed admin tables on every ready replica, then
-// releases the finalizer. Policy: never wedge deletion on an absent cluster
-// or admin Secret; DO hold the finalizer while the cluster exists but has no
-// ready pods (releasing it would leak config onto pods that come back) — the
-// skip-cleanup annotation is the escape hatch for that case.
+// releases the finalizer. Policy: never wedge deletion when the operator
+// cannot possibly clean up — absent cluster, absent admin Secret, or missing
+// radmin key all mean we can't authenticate, and holding the finalizer
+// forever is worse than leaking config. DO hold the finalizer while the
+// cluster exists with no ready pods (releasing would leak config onto pods
+// that come back); the skip-cleanup annotation is the escape hatch for every
+// stuck-deletion case.
 func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	if !controllerutil.ContainsFinalizer(cfg, cfgFinalizer) {
@@ -426,6 +429,11 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 		return ctrl.Result{}, err
 	}
 	radminPassword := string(adminSec.Data[b.SecretKeys().RadminPassword])
+	if radminPassword == "" {
+		log.Info("admin secret is missing the radmin key; releasing finalizer without cleanup",
+			"secret", adminSec.Name, "key", b.SecretKeys().RadminPassword)
+		return r.releaseFinalizer(ctx, cfg)
+	}
 
 	addrs, err := r.discoverPodAddresses(ctx, &cluster, b.Spec.Protocols.Admin.Port)
 	if err != nil {

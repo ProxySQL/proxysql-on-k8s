@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -119,7 +120,7 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 		// makeConfig creates a ProxySQLConfig pointing at clusterName and
 		// registers cleanup that strips any finalizer so the suite never
 		// accumulates terminating objects.
-		makeConfig := func(name, clusterName string, mut ...func(*proxysqlv1alpha1.ProxySQLConfig)) *proxysqlv1alpha1.ProxySQLConfig {
+		makeConfig := func(name, clusterName string, mut ...func(*proxysqlv1alpha1.ProxySQLConfig)) {
 			ctx := context.Background()
 			c := &proxysqlv1alpha1.ProxySQLConfig{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -140,7 +141,6 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 				_ = k8sClient.Update(ctx, &cur)
 				_ = k8sClient.Delete(ctx, &cur)
 			})
-			return c
 		}
 
 		getConfig := func(name string) (*proxysqlv1alpha1.ProxySQLConfig, error) {
@@ -164,11 +164,15 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 		It("removes the finalizer on delete when the cluster is absent", func() {
 			ctx := context.Background()
 			const name = "fin-absent"
-			cfg := makeConfig(name, "nonexistent")
+			makeConfig(name, "nonexistent")
 
 			_, err := reconcileOnce(name)
 			Expect(err).NotTo(HaveOccurred())
 
+			// Re-fetch: the reconcile above added the finalizer, so the
+			// original pointer is stale.
+			cfg, err := getConfig(name)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
 
 			_, err = reconcileOnce(name)
@@ -181,13 +185,17 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 		It("honors the skip-cleanup annotation", func() {
 			ctx := context.Background()
 			const name = "fin-skip"
-			cfg := makeConfig(name, "nonexistent", func(c *proxysqlv1alpha1.ProxySQLConfig) {
+			makeConfig(name, "nonexistent", func(c *proxysqlv1alpha1.ProxySQLConfig) {
 				c.Annotations = map[string]string{"proxysql.com/skip-cleanup": "true"}
 			})
 
 			_, err := reconcileOnce(name)
 			Expect(err).NotTo(HaveOccurred())
 
+			// Re-fetch: the reconcile above added the finalizer, so the
+			// original pointer is stale.
+			cfg, err := getConfig(name)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
 
 			_, err = reconcileOnce(name)
@@ -219,11 +227,15 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, adminSec) })
 
-			cfg := makeConfig(name, clusterName)
+			makeConfig(name, clusterName)
 
 			_, err := reconcileOnce(name)
 			Expect(err).NotTo(HaveOccurred())
 
+			// Re-fetch: the reconcile above added the finalizer, so the
+			// original pointer is stale.
+			cfg, err := getConfig(name)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
 
 			res, err := reconcileOnce(name)
@@ -235,6 +247,76 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			Expect(err).NotTo(HaveOccurred(), "config must still exist")
 			Expect(cur.Finalizers).To(ContainElement("proxysql.com/config-cleanup"),
 				"finalizer must be held until cleanup succeeds or skip-cleanup is set")
+		})
+
+		It("retries when cleanup fails on a ready pod", func() {
+			ctx := context.Background()
+			const name = "fin-retry"
+			const clusterName = "fin-cluster-retry"
+
+			cluster := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			adminSec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
+				Data: map[string][]byte{
+					b.SecretKeys().RadminPassword: []byte("radmin-pass"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, adminSec) })
+
+			// A Ready pod whose IP is loopback: discoverPodAddresses returns
+			// 127.0.0.1:<adminPort>, where nothing listens, so the cleanup
+			// SQL connection is refused and applyToReplicas reports 0 cleaned.
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fin-retry-pod",
+					Namespace: ns,
+					Labels:    map[string]string{"proxysql.com/cluster": clusterName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "proxysql",
+						Image: "proxysql/proxysql",
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))
+			})
+			pod.Status.PodIP = "127.0.0.1"
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			makeConfig(name, clusterName)
+
+			_, err := reconcileOnce(name)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Re-fetch: the reconcile above added the finalizer, so the
+			// original pointer is stale.
+			cfg, err := getConfig(name)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
+
+			res, err := reconcileOnce(name)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(5*time.Second),
+				"partial cleanup must be retried, not released")
+
+			cur, err := getConfig(name)
+			Expect(err).NotTo(HaveOccurred(), "config must still exist")
+			Expect(cur.Finalizers).To(ContainElement("proxysql.com/config-cleanup"),
+				"finalizer must be held while cleanup is failing")
 		})
 	})
 })
