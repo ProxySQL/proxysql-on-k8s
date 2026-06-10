@@ -23,7 +23,7 @@ import (
 )
 
 // Service builds the load-balanced ClusterIP Service exposing MySQL, PostgreSQL,
-// the admin port, and (optionally) the metrics port.
+// the admin port, and (optionally) the metrics and web UI ports.
 func (b *Builder) Service() *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -60,7 +60,7 @@ func (b *Builder) HeadlessService() *corev1.Service {
 }
 
 // servicePorts returns the port list for either the regular or headless
-// Service. Headless never exposes metrics.
+// Service. Headless never exposes metrics or web.
 func (b *Builder) servicePorts(headless bool) []corev1.ServicePort {
 	var ports []corev1.ServicePort
 

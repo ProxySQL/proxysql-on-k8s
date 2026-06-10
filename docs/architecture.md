@@ -49,7 +49,10 @@ talks to ProxySQL, and the reasoning behind the major design choices.
 ### `ProxySQLCluster` — the pods
 
 What it represents: a set of ProxySQL pods exposing some combination of
-MySQL / PostgreSQL / admin / metrics ports.
+MySQL / PostgreSQL / admin / metrics ports, plus (optionally) ProxySQL's
+built-in HTTPS stats web UI via `spec.protocols.web` (default off, port
+6080 — setting a port implies enabled). The web port is published on the
+regular Service only, never the headless one.
 
 Owned objects (all with `OwnerReference{controller=true, blockOwnerDeletion=true}`):
 
@@ -57,15 +60,29 @@ Owned objects (all with `OwnerReference{controller=true, blockOwnerDeletion=true
 | --- | --- | --- |
 | `Secret` | `<cluster>` *or* `spec.auth.secretName` | `admin-password`, `radmin-password`, `monitor-password`. Operator-minted when `spec.auth.secretName` is empty; user-managed otherwise. |
 | `ConfigMap` | `<cluster>` | Bootstrap `proxysql.cnf` — only enough to start the admin port. Backends, users, query rules all come from `ProxySQLConfig`. |
-| `Service` | `<cluster>` | ClusterIP. Exposes the enabled protocol ports + metrics. |
+| `Service` | `<cluster>` | ClusterIP. Exposes the enabled protocol ports + metrics + the stats web UI (when enabled). |
 | `Service` | `<cluster>-headless` | `ClusterIP=None`, `publishNotReadyAddresses=true`. Used as the StatefulSet's `serviceName` so pods get stable DNS for ProxySQL Cluster sync. |
 | `StatefulSet` | `<cluster>` | The pods. Annotated with `proxysql.com/cnf-checksum` so a content change triggers a rolling restart. PVC template optional (`spec.persistence.enabled`). |
 | `PodDisruptionBudget` | `<cluster>` | `minAvailable = replicas - 1` by default. Omitted when `replicas ≤ 1`. |
 | `ServiceMonitor` (unstructured) | `<cluster>` | Only when `spec.metrics.serviceMonitor.enabled=true`. Best-effort: a missing prometheus-operator CRD does **not** fail the reconcile; it just sets a `ServiceMonitorReady=False` condition. |
 
-Status: `ObservedGeneration`, `Replicas`, `ReadyReplicas`, `AdminSecretName`,
-and the standard `Available` / `Progressing` / `Degraded` conditions
-following the K8s API conventions.
+Status: `ObservedGeneration`, `Replicas`, `ReadyReplicas`,
+`UpdatedReplicas` (pods at the current StatefulSet revision),
+`AdminSecretName`, and the standard `Available` / `Progressing` /
+`Degraded` conditions following the K8s API conventions. Two fields
+exist specifically for programmatic consumers (platform dashboards,
+external pollers):
+
+- `status.phase` — a coarse single-word projection of the conditions:
+  `Pending` | `Creating` | `Running` | `Updating` | `Degraded` |
+  `Failed`. Conditions remain the source of truth; `Failed` is reserved
+  for terminal states the operator can positively identify (today it
+  reports `Degraded` for the error states it observes). Also surfaced
+  as a `Phase` printer column on `kubectl get pxc`.
+- `status.endpoints` — the in-cluster DNS `host:port` for every enabled
+  surface (`mysql`, `pgsql`, `admin`, `web`, `metrics`), pointing at the
+  regular Service. A field is empty when that surface is disabled, so a
+  consumer never has to re-derive Service names and defaulted ports.
 
 ### `ProxySQLConfig` — the declarative configuration
 
@@ -102,7 +119,10 @@ exist either way) but sets a `Degraded` condition with reason
 ```
 fetch CR
   └─► resolve admin Secret
-        ├─ exists?  → read passwords (backfill any missing keys when operator-owned)
+        ├─ exists, operator-owned   → read passwords (backfill any missing keys)
+        ├─ exists, externally owned → match against one of the two accepted
+        │                             schemas (see below); validate credentials
+        │                             against the cnf grammar
         └─ missing? → mint 32-char hex passwords, create Secret (errors out if SecretName was set externally)
 
 build a Builder with defaulted spec + passwords
@@ -115,12 +135,43 @@ ensure PDB           (or delete operator-owned one when replicas≤1 / disabled)
 ensure ServiceMonitor (best-effort; condition-surfaced)
 
 update status from the live StatefulSet
+  (replicas counts, phase, endpoints, conditions)
 ```
 
 Triggers (`SetupWithManager`):
 
 - `For(ProxySQLCluster)` — the CR itself
 - `Owns(StatefulSet, Service, Secret, ConfigMap, PodDisruptionBudget)` — re-reconcile when an owned object drifts
+
+#### Admin Secret schemas
+
+When `spec.auth.secretName` points at an externally managed Secret, the
+operator accepts two data schemas, in precedence order:
+
+1. **Operator schema** — `admin-password` / `radmin-password` /
+   `monitor-password` (key names overridable via `spec.auth.keys`). All
+   three keys are required. A *partial* operator schema — the admin or
+   radmin key present without the others — is an explicit error, never a
+   fall-through: silently substituting the username/password schema
+   would discard credentials the user explicitly configured.
+2. **Platform schema** — `username` / `password`, the shape most
+   platform tooling and database operators already emit. Admin and
+   radmin share the password; `monitor-password` may be added as an
+   optional override (its presence alone does not count as "partial
+   operator schema"). A username other than `admin`/`radmin` becomes an
+   additional remote-capable credential in the cnf's
+   `admin_credentials`, so the platform's own credential keeps working
+   against the admin port.
+
+Either way, credentials are validated *before* cnf rendering: usernames
+must match `^[A-Za-z0-9_.-]+$`, and passwords must not contain `"`,
+`;`, or control characters. These aren't arbitrary policy — cnf values
+live inside double-quoted strings and `admin_credentials` is split on
+`;`, so such values would corrupt the rendered config and could never
+have worked anyway. The same resolution path
+(`builders.PasswordsFromSecret`) is used by the `ProxySQLConfig`
+reconciler when it needs the radmin password, so both controllers agree
+on what a given Secret means.
 
 ### `ProxySQLConfigReconciler`
 
@@ -197,7 +248,7 @@ impossible":
 
 | Situation | Behavior |
 | --- | --- |
-| Target cluster gone, admin Secret gone, or radmin key missing | Cleanup is impossible (nothing to clean / can't authenticate) — release the finalizer, let the CR go. |
+| Target cluster gone, admin Secret gone, or Secret matching no accepted credential schema | Cleanup is impossible (nothing to clean / can't authenticate) — release the finalizer, let the CR go. |
 | Cluster exists but has no ready pods | Hold + retry (5s). Releasing here would leak config onto pods that come back. |
 | Some replicas fail cleanup | Hold + retry until every ready replica is cleaned. |
 | Annotation `proxysql.com/skip-cleanup: "true"` | Skip cleanup entirely and release. The escape hatch for every stuck-deletion case (wedged cluster, permanently unreachable pods). |
@@ -308,3 +359,11 @@ Probes:
 count". `Progressing` is on whenever the cluster isn't at steady
 state. `Degraded` is set on specific recoverable error paths but
 removed once the next reconcile succeeds.
+
+`status.phase` is a deliberately coarse projection of the same state
+for consumers that want one word instead of a condition list: no
+StatefulSet yet ⇒ `Pending`; exists with zero ready replicas ⇒
+`Creating` (even during a total outage of a previously-running
+cluster — the coarseness is the point); all ready at the current
+revision ⇒ `Running`; otherwise ⇒ `Updating`; error paths ⇒
+`Degraded`. Anything finer-grained should read the conditions.
