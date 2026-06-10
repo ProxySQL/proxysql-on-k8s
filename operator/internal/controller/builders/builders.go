@@ -33,6 +33,7 @@ const (
 	DefaultMySQLPort       int32 = 6033
 	DefaultPostgreSQLPort  int32 = 6133
 	DefaultMetricsPort     int32 = 6070
+	DefaultWebPort         int32 = 6080
 	DefaultProxySQLImage         = "proxysql/proxysql"
 	DefaultProxySQLTag           = "3.0"
 	DefaultPersistenceSize       = "1Gi"
@@ -189,6 +190,15 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 	}
 	if spec.Protocols.PostgreSQL.Enabled && spec.Protocols.PostgreSQL.Port == 0 {
 		spec.Protocols.PostgreSQL.Port = DefaultPostgreSQLPort
+	}
+
+	// Web UI: disabled by default; enabled only if explicitly toggled or
+	// port set.
+	if spec.Protocols.Web.Port != 0 {
+		spec.Protocols.Web.Enabled = true
+	}
+	if spec.Protocols.Web.Enabled && spec.Protocols.Web.Port == 0 {
+		spec.Protocols.Web.Port = DefaultWebPort
 	}
 
 	// Persistence default: enabled, 1Gi.

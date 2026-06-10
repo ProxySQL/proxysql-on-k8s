@@ -41,6 +41,10 @@ admin_variables=
   restapi_enabled=true
   restapi_port={{ .MetricsPort }}
 {{- end }}
+{{- if .WebEnabled }}
+  web_enabled=true
+  web_port={{ .WebPort }}
+{{- end }}
 {{- if .ClusterSync }}
   cluster_username="radmin"
   cluster_password="{{ .RadminPassword }}"
@@ -104,6 +108,8 @@ type cnfData struct {
 	PostgreSQLPort    int32
 	MetricsEnabled    bool
 	MetricsPort       int32
+	WebEnabled        bool
+	WebPort           int32
 	ClusterSync       bool
 	ProxySQLServers   []string
 }
@@ -128,6 +134,8 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 		PostgreSQLPort:    b.Spec.Protocols.PostgreSQL.Port,
 		MetricsEnabled:    isTrue(b.Spec.Metrics.Enabled),
 		MetricsPort:       b.Spec.Metrics.Port,
+		WebEnabled:        b.Spec.Protocols.Web.Enabled,
+		WebPort:           b.Spec.Protocols.Web.Port,
 		ClusterSync:       len(proxysqlServers) > 0,
 		ProxySQLServers:   proxysqlServers,
 	}

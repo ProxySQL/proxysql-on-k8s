@@ -1578,6 +1578,19 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  web:
+                    description: |-
+                      Web exposes ProxySQL's built-in HTTPS stats web UI (admin web_enabled /
+                      web_port). Disabled by default; a non-zero port implies enabled.
+                    properties:
+                      enabled:
+                        type: boolean
+                      port:
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    type: object
                 type: object
               replicas:
                 default: 3

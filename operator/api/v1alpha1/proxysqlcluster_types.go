@@ -159,6 +159,10 @@ type ProtocolsSpec struct {
 	PostgreSQL ProtocolSpec `json:"pgsql,omitempty"`
 	// +optional
 	Admin ProtocolSpec `json:"admin,omitempty"`
+	// Web exposes ProxySQL's built-in HTTPS stats web UI (admin web_enabled /
+	// web_port). Disabled by default; a non-zero port implies enabled.
+	// +optional
+	Web ProtocolSpec `json:"web,omitempty"`
 }
 
 // ProtocolSpec configures one listening protocol.

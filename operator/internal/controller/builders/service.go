@@ -96,5 +96,13 @@ func (b *Builder) servicePorts(headless bool) []corev1.ServicePort {
 			Protocol:   corev1.ProtocolTCP,
 		})
 	}
+	if !headless && b.Spec.Protocols.Web.Enabled {
+		ports = append(ports, corev1.ServicePort{
+			Name:       "web",
+			Port:       b.Spec.Protocols.Web.Port,
+			TargetPort: intstr.FromString("web"),
+			Protocol:   corev1.ProtocolTCP,
+		})
+	}
 	return ports
 }

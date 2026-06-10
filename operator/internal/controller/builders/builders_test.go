@@ -30,6 +30,9 @@ import (
 
 const clusterName = "pxc"
 
+// webPortName is the named port for the ProxySQL web stats UI.
+const webPortName = "web"
+
 func newScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -369,6 +372,105 @@ func TestBuilder_ServiceMonitor_Shape(t *testing.T) {
 	ep := endpoints[0].(map[string]any)
 	if ep["port"] != "metrics" || ep["interval"] != "15s" || ep["path"] != "/metrics" {
 		t.Errorf("endpoint wrong: %v", ep)
+	}
+}
+
+func TestDefaultedSpec_WebUI(t *testing.T) {
+	// disabled by default
+	spec := DefaultedSpec(newCluster("c"))
+	if spec.Protocols.Web.Enabled {
+		t.Errorf("web UI must default to disabled")
+	}
+
+	// enabled without port => default 6080
+	c := newCluster("c", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.Web.Enabled = true
+	})
+	spec = DefaultedSpec(c)
+	if spec.Protocols.Web.Port != DefaultWebPort {
+		t.Errorf("web port = %d, want %d", spec.Protocols.Web.Port, DefaultWebPort)
+	}
+
+	// non-zero port implies enabled (same convention as MySQL/PostgreSQL)
+	c = newCluster("c", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.Web.Port = 6081
+	})
+	spec = DefaultedSpec(c)
+	if !spec.Protocols.Web.Enabled || spec.Protocols.Web.Port != 6081 {
+		t.Errorf("port-implies-enabled failed: %+v", spec.Protocols.Web)
+	}
+}
+
+func TestBootstrapCnf_WebUI(t *testing.T) {
+	c := newCluster("web-test", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.Web.Enabled = true
+	})
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	for _, want := range []string{"web_enabled=true", "web_port=6080"} {
+		if !strings.Contains(cnf, want) {
+			t.Errorf("cnf missing %q:\n%s", want, cnf)
+		}
+	}
+	// and absent when disabled
+	b2 := New(newCluster("web-off"), newScheme(t), Passwords{})
+	cnf2, err := b2.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	if strings.Contains(cnf2, "web_enabled") {
+		t.Errorf("cnf must not mention web_enabled when disabled:\n%s", cnf2)
+	}
+}
+
+func TestServicePorts_WebUI(t *testing.T) {
+	c := newCluster("web-svc", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.Web.Enabled = true
+	})
+	b := New(c, newScheme(t), Passwords{})
+	svc := b.Service()
+	found := false
+	for _, p := range svc.Spec.Ports {
+		if p.Name == webPortName && p.Port == DefaultWebPort {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("regular Service missing web port: %+v", svc.Spec.Ports)
+	}
+	// headless never exposes web (same policy as metrics)
+	for _, p := range b.HeadlessService().Spec.Ports {
+		if p.Name == webPortName {
+			t.Errorf("headless Service must not expose web")
+		}
+	}
+}
+
+func TestStatefulSet_WebUIContainerPort(t *testing.T) {
+	c := newCluster("web-sts", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.Web.Enabled = true
+	})
+	b := New(c, newScheme(t), Passwords{})
+	sts := b.StatefulSet("checksum")
+	found := false
+	for _, p := range sts.Spec.Template.Spec.Containers[0].Ports {
+		if p.Name == webPortName && p.ContainerPort == DefaultWebPort {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("container missing web port: %+v", sts.Spec.Template.Spec.Containers[0].Ports)
+	}
+
+	// absent when disabled
+	b2 := New(newCluster("web-sts-off"), newScheme(t), Passwords{})
+	for _, p := range b2.StatefulSet("checksum").Spec.Template.Spec.Containers[0].Ports {
+		if p.Name == webPortName {
+			t.Errorf("container must not declare web port when disabled")
+		}
 	}
 }
 

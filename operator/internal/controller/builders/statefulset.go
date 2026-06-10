@@ -122,6 +122,9 @@ func (b *Builder) container() corev1.Container {
 	if isTrue(b.Spec.Metrics.Enabled) {
 		ports = append(ports, corev1.ContainerPort{Name: "metrics", ContainerPort: b.Spec.Metrics.Port, Protocol: corev1.ProtocolTCP})
 	}
+	if b.Spec.Protocols.Web.Enabled {
+		ports = append(ports, corev1.ContainerPort{Name: "web", ContainerPort: b.Spec.Protocols.Web.Port, Protocol: corev1.ProtocolTCP})
+	}
 
 	return corev1.Container{
 		Name:            "proxysql",
