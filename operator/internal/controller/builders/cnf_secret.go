@@ -36,6 +36,19 @@ func (b *Builder) CnfSecret() (*corev1.Secret, error) {
 	if err != nil {
 		return nil, err
 	}
+	data := map[string][]byte{
+		"proxysql.cnf": []byte(cnf),
+	}
+	// The Fluent Bit sidecar config rides along as a second key: one fewer
+	// object to own, and the file contains no secrets (sink credentials reach
+	// the sidecar as env vars from secretKeyRef).
+	if b.LoggingEnabled() {
+		flbConf, err := b.FluentBitConf()
+		if err != nil {
+			return nil, err
+		}
+		data["fluent-bit.conf"] = []byte(flbConf)
+	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      b.CnfSecretName(),
@@ -43,8 +56,6 @@ func (b *Builder) CnfSecret() (*corev1.Secret, error) {
 			Labels:    b.Labels(),
 		},
 		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"proxysql.cnf": []byte(cnf),
-		},
+		Data: data,
 	}, nil
 }

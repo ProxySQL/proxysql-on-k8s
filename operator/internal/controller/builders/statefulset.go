@@ -28,9 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// StatefulSet builds the desired-state StatefulSet. cnfChecksum is the SHA of
-// the rendered proxysql.cnf; included as a pod-template annotation so config
-// changes trigger a rolling restart.
+// StatefulSet builds the desired-state StatefulSet. cnfChecksum is the
+// deterministic SHA over every cnf Secret key (proxysql.cnf, plus
+// fluent-bit.conf when logging is enabled); included as a pod-template
+// annotation so config changes trigger a rolling restart.
 func (b *Builder) StatefulSet(cnfChecksum string) *appsv1.StatefulSet {
 	labels := b.Labels()
 	selector := b.SelectorLabels()
@@ -116,6 +117,13 @@ func (b *Builder) podSpec() corev1.PodSpec {
 		})
 	}
 
+	// Optional Fluent Bit log-shipping sidecar (spec.logging): a regular
+	// container plus the shared logs emptyDir and its config projection.
+	if b.LoggingEnabled() {
+		spec.Containers = append(spec.Containers, b.fluentBitContainer())
+		spec.Volumes = append(spec.Volumes, b.loggingVolumes()...)
+	}
+
 	return spec
 }
 
@@ -169,12 +177,23 @@ func (b *Builder) container() corev1.Container {
 			PeriodSeconds:       5,
 			FailureThreshold:    3,
 		},
-		Resources: b.Spec.Resources,
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "config", MountPath: "/etc/proxysql", ReadOnly: true},
-			{Name: "data", MountPath: "/var/lib/proxysql"},
-		},
+		Resources:    b.Spec.Resources,
+		VolumeMounts: b.proxysqlVolumeMounts(),
 	}
+}
+
+// proxysqlVolumeMounts returns the main container's mounts. The logs
+// emptyDir is added only when the logging sidecar is enabled: ProxySQL
+// writes the eventslog there and Fluent Bit tails it.
+func (b *Builder) proxysqlVolumeMounts() []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{Name: "config", MountPath: "/etc/proxysql", ReadOnly: true},
+		{Name: "data", MountPath: "/var/lib/proxysql"},
+	}
+	if b.LoggingEnabled() {
+		mounts = append(mounts, corev1.VolumeMount{Name: "logs", MountPath: logsMountPath})
+	}
+	return mounts
 }
 
 func (b *Builder) dataPVC() corev1.PersistentVolumeClaim {

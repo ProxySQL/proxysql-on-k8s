@@ -122,7 +122,9 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	cnfChecksum := builders.Sha256(string(cnfSecret.Data["proxysql.cnf"]))
+	// Checksum over every cnf Secret key (proxysql.cnf + fluent-bit.conf when
+	// logging is enabled) so any config change rolls the pods.
+	cnfChecksum := builders.CnfChecksum(cnfSecret.Data)
 	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(cnfChecksum)); err != nil {
 		return ctrl.Result{}, err
 	}

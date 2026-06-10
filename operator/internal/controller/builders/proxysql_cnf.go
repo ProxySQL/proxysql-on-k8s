@@ -69,6 +69,12 @@ mysql_variables=
   monitor_username="monitor"
   monitor_password="{{ .MonitorPassword }}"
   threads=4
+{{- if .QueryLogEnabled }}
+  eventslog_filename="/var/log/proxysql/queries"
+  eventslog_default_log=1
+  eventslog_format=2
+  eventslog_filesize=52428800
+{{- end }}
 }
 {{- end }}
 
@@ -110,6 +116,7 @@ type cnfData struct {
 	PostgreSQLPort     int32
 	MetricsEnabled     bool
 	MetricsPort        int32
+	QueryLogEnabled    bool
 	WebEnabled         bool
 	WebPort            int32
 	ClusterSync        bool
@@ -138,6 +145,7 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 		PostgreSQLPort:     b.Spec.Protocols.PostgreSQL.Port,
 		MetricsEnabled:     isTrue(b.Spec.Metrics.Enabled),
 		MetricsPort:        b.Spec.Metrics.Port,
+		QueryLogEnabled:    b.LoggingEnabled() && b.Spec.Logging.QueryLog,
 		WebEnabled:         b.Spec.Protocols.Web.IsEnabled(),
 		WebPort:            b.Spec.Protocols.Web.Port,
 		ClusterSync:        len(proxysqlServers) > 0,

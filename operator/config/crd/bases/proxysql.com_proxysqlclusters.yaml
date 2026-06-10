@@ -1225,6 +1225,194 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              logging:
+                description: |-
+                  Logging configures the optional Fluent Bit sidecar that ships
+                  ProxySQL's query log (eventslog) to stdout, S3, or an HTTP collector.
+                  Default off.
+                properties:
+                  bufferSize:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      BufferSize bounds the logs emptyDir (sizeLimit) and the Fluent Bit
+                      filesystem buffer. Default 1Gi.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  enabled:
+                    description: Enabled adds the fluent-bit sidecar. Default off.
+                    type: boolean
+                  http:
+                    description: HTTP configures the HTTP sink. Required iff sinkType=http.
+                    properties:
+                      authTokenSecretRef:
+                        description: |-
+                          AuthTokenSecretRef names a Secret (key: token) sent as
+                          `Authorization: Bearer <token>`. Optional; never inline — the token
+                          reaches the sidecar as an env var.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      host:
+                        description: Host is the collector hostname.
+                        minLength: 1
+                        type: string
+                      port:
+                        description: Port defaults to 443 when tls=true, else 80.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                      tls:
+                        description: TLS enables HTTPS towards the collector.
+                        type: boolean
+                      uri:
+                        description: URI is the request path. Defaults to "/".
+                        type: string
+                    required:
+                    - host
+                    type: object
+                  image:
+                    default: fluent/fluent-bit:4.0.3
+                    description: Image is the Fluent Bit image. Pinned default; never
+                      `latest`.
+                    type: string
+                  queryLog:
+                    description: |-
+                      QueryLog enables ProxySQL's eventslog (all MySQL-protocol queries) and
+                      ships it. Currently the sidecar's only input, so admission rejects
+                      enabled=true with queryLog=false until more inputs exist.
+                    type: boolean
+                  resources:
+                    description: |-
+                      Resources for the sidecar. Defaults: requests 50m/64Mi, limits
+                      200m/128Mi.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  s3:
+                    description: S3 configures the S3 sink. Required iff sinkType=s3.
+                    properties:
+                      bucket:
+                        description: Bucket is the destination bucket name.
+                        minLength: 1
+                        type: string
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef names a Secret with keys access-key-id /
+                          secret-access-key. Credentials are NEVER inline in the CR; they reach
+                          the sidecar as env vars.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      endpoint:
+                        description: Endpoint overrides the S3 endpoint for S3-compatible
+                          object stores.
+                        type: string
+                      prefix:
+                        description: Prefix is the object key prefix. Defaults to
+                          /proxysql/<cluster>.
+                        type: string
+                      region:
+                        description: Region is the AWS region of the bucket.
+                        minLength: 1
+                        type: string
+                    required:
+                    - bucket
+                    - credentialsSecretRef
+                    - region
+                    type: object
+                  sinkType:
+                    default: stdout
+                    description: SinkType selects where the log is shipped.
+                    enum:
+                    - stdout
+                    - s3
+                    - http
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: logging.queryLog is the only input; enable it or disable
+                    logging
+                  rule: '!(has(self.enabled) && self.enabled) || (has(self.queryLog)
+                    && self.queryLog)'
+                - message: sinkType=s3 requires the s3 block
+                  rule: '!(has(self.sinkType) && self.sinkType == ''s3'') || has(self.s3)'
+                - message: sinkType=http requires the http block
+                  rule: '!(has(self.sinkType) && self.sinkType == ''http'') || has(self.http)'
               metrics:
                 description: Metrics controls the ProxySQL REST/Prometheus exporter
                   port and optional ServiceMonitor.

@@ -346,6 +346,12 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 		spec.PodDisruptionBudget.Enabled = &t
 	}
 
+	// Logging sidecar defaults (only when the sub-spec is present; nil means
+	// the sidecar is off and stays nil).
+	if spec.Logging != nil {
+		defaultLogging(spec.Logging, c.Name)
+	}
+
 	// PSA-restricted-compatible default security contexts.
 	if spec.PodSecurityContext == nil {
 		nonRoot := true
@@ -372,4 +378,46 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 	}
 
 	return spec
+}
+
+// defaultLogging applies the documented defaults to a non-nil LoggingSpec:
+// stdout sink, pinned Fluent Bit image, 1Gi buffer, 50m/64Mi requests with
+// 200m/128Mi limits, and per-sink fallbacks (S3 prefix, HTTP port/URI).
+func defaultLogging(l *proxysqlv1alpha1.LoggingSpec, clusterName string) {
+	if l.SinkType == "" {
+		l.SinkType = "stdout"
+	}
+	if l.Image == "" {
+		l.Image = DefaultFluentBitImage
+	}
+	if l.BufferSize.IsZero() {
+		l.BufferSize = resource.MustParse(DefaultLogBufferSize)
+	}
+	if l.Resources.Requests == nil {
+		l.Resources.Requests = corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("50m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		}
+	}
+	if l.Resources.Limits == nil {
+		l.Resources.Limits = corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("200m"),
+			corev1.ResourceMemory: resource.MustParse("128Mi"),
+		}
+	}
+	if l.S3 != nil && l.S3.Prefix == "" {
+		l.S3.Prefix = "/proxysql/" + clusterName
+	}
+	if l.HTTP != nil {
+		if l.HTTP.Port == 0 {
+			if l.HTTP.TLS {
+				l.HTTP.Port = 443
+			} else {
+				l.HTTP.Port = 80
+			}
+		}
+		if l.HTTP.URI == "" {
+			l.HTTP.URI = "/"
+		}
+	}
 }

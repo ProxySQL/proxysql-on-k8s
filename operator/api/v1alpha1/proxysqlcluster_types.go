@@ -103,6 +103,111 @@ type ProxySQLClusterSpec struct {
 	// Networking tunes pod-level networking (TCP keepalive sysctls).
 	// +optional
 	Networking NetworkingSpec `json:"networking,omitempty"`
+
+	// Logging configures the optional Fluent Bit sidecar that ships
+	// ProxySQL's query log (eventslog) to stdout, S3, or an HTTP collector.
+	// Default off.
+	// +optional
+	Logging *LoggingSpec `json:"logging,omitempty"`
+}
+
+// LoggingSpec configures the optional Fluent Bit log-shipping sidecar.
+// Per convention, default-off booleans stay plain bool (`*bool` is reserved
+// for default-true fields).
+//
+// +kubebuilder:validation:XValidation:rule="!(has(self.enabled) && self.enabled) || (has(self.queryLog) && self.queryLog)",message="logging.queryLog is the only input; enable it or disable logging"
+// +kubebuilder:validation:XValidation:rule="!(has(self.sinkType) && self.sinkType == 's3') || has(self.s3)",message="sinkType=s3 requires the s3 block"
+// +kubebuilder:validation:XValidation:rule="!(has(self.sinkType) && self.sinkType == 'http') || has(self.http)",message="sinkType=http requires the http block"
+type LoggingSpec struct {
+	// Enabled adds the fluent-bit sidecar. Default off.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// QueryLog enables ProxySQL's eventslog (all MySQL-protocol queries) and
+	// ships it. Currently the sidecar's only input, so admission rejects
+	// enabled=true with queryLog=false until more inputs exist.
+	// +optional
+	QueryLog bool `json:"queryLog,omitempty"`
+
+	// SinkType selects where the log is shipped.
+	// +optional
+	// +kubebuilder:validation:Enum=stdout;s3;http
+	// +kubebuilder:default=stdout
+	SinkType string `json:"sinkType,omitempty"`
+
+	// S3 configures the S3 sink. Required iff sinkType=s3.
+	// +optional
+	S3 *S3SinkSpec `json:"s3,omitempty"`
+
+	// HTTP configures the HTTP sink. Required iff sinkType=http.
+	// +optional
+	HTTP *HTTPSinkSpec `json:"http,omitempty"`
+
+	// Image is the Fluent Bit image. Pinned default; never `latest`.
+	// +optional
+	// +kubebuilder:default="fluent/fluent-bit:4.0.3"
+	Image string `json:"image,omitempty"`
+
+	// Resources for the sidecar. Defaults: requests 50m/64Mi, limits
+	// 200m/128Mi.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// BufferSize bounds the logs emptyDir (sizeLimit) and the Fluent Bit
+	// filesystem buffer. Default 1Gi.
+	// +optional
+	BufferSize resource.Quantity `json:"bufferSize,omitempty"`
+}
+
+// S3SinkSpec ships the query log to an S3 (or S3-compatible) bucket.
+type S3SinkSpec struct {
+	// Bucket is the destination bucket name.
+	// +kubebuilder:validation:MinLength=1
+	Bucket string `json:"bucket"`
+
+	// Region is the AWS region of the bucket.
+	// +kubebuilder:validation:MinLength=1
+	Region string `json:"region"`
+
+	// Prefix is the object key prefix. Defaults to /proxysql/<cluster>.
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// Endpoint overrides the S3 endpoint for S3-compatible object stores.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// CredentialsSecretRef names a Secret with keys access-key-id /
+	// secret-access-key. Credentials are NEVER inline in the CR; they reach
+	// the sidecar as env vars.
+	CredentialsSecretRef corev1.LocalObjectReference `json:"credentialsSecretRef"`
+}
+
+// HTTPSinkSpec ships the query log to a generic HTTP collector.
+type HTTPSinkSpec struct {
+	// Host is the collector hostname.
+	// +kubebuilder:validation:MinLength=1
+	Host string `json:"host"`
+
+	// Port defaults to 443 when tls=true, else 80.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port,omitempty"`
+
+	// URI is the request path. Defaults to "/".
+	// +optional
+	URI string `json:"uri,omitempty"`
+
+	// TLS enables HTTPS towards the collector.
+	// +optional
+	TLS bool `json:"tls,omitempty"`
+
+	// AuthTokenSecretRef names a Secret (key: token) sent as
+	// `Authorization: Bearer <token>`. Optional; never inline — the token
+	// reaches the sidecar as an env var.
+	// +optional
+	AuthTokenSecretRef *corev1.LocalObjectReference `json:"authTokenSecretRef,omitempty"`
 }
 
 // ServiceSpec customizes the client-facing (regular) Service.
