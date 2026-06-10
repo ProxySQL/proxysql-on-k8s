@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -76,6 +77,13 @@ const (
 	cfgCondProgressing  = "Progressing"
 	cfgCondDegraded     = "Degraded"
 	cfgCondClusterFound = "ClusterFound"
+
+	// cfgFinalizer guards ProxySQLConfig deletion: the operator clears the
+	// managed admin tables on every ready replica before letting the CR go.
+	cfgFinalizer = "proxysql.com/config-cleanup"
+	// skipCleanupAnnotation ("true") skips the SQL cleanup on deletion. The
+	// escape hatch when the cluster is wedged or unreachable forever.
+	skipCleanupAnnotation = "proxysql.com/skip-cleanup"
 
 	// requeueAfterSuccess: after a successful sync, requeue at this cadence as
 	// a safety net (catches Pod restarts that wiped runtime tables before
@@ -120,6 +128,15 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if !cfg.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, &cfg)
+	}
+	if controllerutil.AddFinalizer(&cfg, cfgFinalizer) {
+		if err := r.Update(ctx, &cfg); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// 1) Resolve target cluster.
@@ -374,6 +391,70 @@ func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []
 		ok++
 	}
 	return ok, errs
+}
+
+// finalize clears the managed admin tables on every ready replica, then
+// releases the finalizer. Policy: never wedge deletion on an absent cluster
+// or admin Secret; DO hold the finalizer while the cluster exists but has no
+// ready pods (releasing it would leak config onto pods that come back) — the
+// skip-cleanup annotation is the escape hatch for that case.
+func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	if !controllerutil.ContainsFinalizer(cfg, cfgFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	if cfg.Annotations[skipCleanupAnnotation] == "true" {
+		log.Info("skip-cleanup annotation set; releasing finalizer without cleanup")
+		return r.releaseFinalizer(ctx, cfg)
+	}
+
+	var cluster proxysqlv1alpha1.ProxySQLCluster
+	clusterKey := types.NamespacedName{Name: cfg.Spec.ClusterRef.Name, Namespace: cfg.Namespace}
+	if err := r.Get(ctx, clusterKey, &cluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.releaseFinalizer(ctx, cfg)
+		}
+		return ctrl.Result{}, err
+	}
+
+	b := builders.New(&cluster, r.Scheme, builders.Passwords{})
+	var adminSec corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: b.SecretName(), Namespace: cluster.Namespace}, &adminSec); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.releaseFinalizer(ctx, cfg)
+		}
+		return ctrl.Result{}, err
+	}
+	radminPassword := string(adminSec.Data[b.SecretKeys().RadminPassword])
+
+	addrs, err := r.discoverPodAddresses(ctx, &cluster, b.Spec.Protocols.Admin.Port)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(addrs) == 0 {
+		log.Info("cleanup pending: cluster exists but has no ready pods; retrying",
+			"cluster", cluster.Name, "escapeHatch", skipCleanupAnnotation)
+		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+
+	// An empty Desired DELETEs every managed table and LOAD/SAVEs each
+	// section. Variables are left as-is: ProxySQL has no "unset", and
+	// resetting values blind would be worse than leaving them.
+	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword, &proxysqlclient.Desired{})
+	if cleaned != len(addrs) {
+		log.Info("cleanup incomplete; retrying", "cleaned", cleaned, "total", len(addrs), "errors", joinErrs(errs))
+		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+	return r.releaseFinalizer(ctx, cfg)
+}
+
+func (r *ProxySQLConfigReconciler) releaseFinalizer(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig) (ctrl.Result, error) {
+	if controllerutil.RemoveFinalizer(cfg, cfgFinalizer) {
+		if err := r.Update(ctx, cfg); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *ProxySQLConfigReconciler) setCfgCondition(cfg *proxysqlv1alpha1.ProxySQLConfig, t string, s metav1.ConditionStatus, reason, msg string) {
