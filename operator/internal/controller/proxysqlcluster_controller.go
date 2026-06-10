@@ -291,6 +291,11 @@ func (r *ProxySQLClusterReconciler) ensureService(ctx context.Context, owner *pr
 	existing.Namespace = desired.Namespace
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
 		existing.Labels = desired.Labels
+		// Annotations are overwritten wholesale, mirroring label handling:
+		// annotations added out-of-band directly on the Service are
+		// intentionally not preserved — spec.service.annotations is the
+		// source of truth.
+		existing.Annotations = desired.Annotations
 		// Preserve immutable fields: ClusterIP, ClusterIPs.
 		clusterIP := existing.Spec.ClusterIP
 		clusterIPs := existing.Spec.ClusterIPs

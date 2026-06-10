@@ -60,9 +60,9 @@ Owned objects (all with `OwnerReference{controller=true, blockOwnerDeletion=true
 | --- | --- | --- |
 | `Secret` | `<cluster>` *or* `spec.auth.secretName` | `admin-password`, `radmin-password`, `monitor-password`. Operator-minted when `spec.auth.secretName` is empty; user-managed otherwise. |
 | `Secret` | `<cluster>-cnf` | Bootstrap `proxysql.cnf` — only enough to start the admin port. A Secret because the rendered cnf embeds the admin/radmin/monitor passwords. Backends, users, query rules all come from `ProxySQLConfig`. |
-| `Service` | `<cluster>` | ClusterIP. Exposes the enabled protocol ports + metrics + the stats web UI (when enabled). |
+| `Service` | `<cluster>` | ClusterIP. Exposes the enabled protocol ports + metrics + the stats web UI (when enabled). `spec.service.annotations` (cloud LB configuration) and `spec.service.sessionAffinityTimeoutSeconds` (ClientIP session affinity) apply to this Service only, never the headless one. Annotations are owned wholesale by the spec — out-of-band edits are overwritten, mirroring label handling. |
 | `Service` | `<cluster>-headless` | `ClusterIP=None`, `publishNotReadyAddresses=true`. Used as the StatefulSet's `serviceName` so pods get stable DNS for ProxySQL Cluster sync. |
-| `StatefulSet` | `<cluster>` | The pods. Annotated with `proxysql.com/cnf-checksum` so a content change triggers a rolling restart. PVC template optional (`spec.persistence.enabled`). |
+| `StatefulSet` | `<cluster>` | The pods. Annotated with `proxysql.com/cnf-checksum` so a content change triggers a rolling restart. PVC template optional (`spec.persistence.enabled`). `spec.networking.tcpKeepalive {time,interval,probes}` renders as pod-level `securityContext.sysctls` (`net.ipv4.tcp_keepalive_{time,intvl,probes}`) — all three are in the Kubernetes safe-sysctl set since v1.29 (KEP-3105), so they're admitted under PSA `restricted`; on pre-1.29 clusters the kubelet rejects them unless allowed via `--allowed-unsafe-sysctls`. |
 | `PodDisruptionBudget` | `<cluster>` | `minAvailable = replicas - 1` by default. Omitted when `replicas ≤ 1`. |
 | `ServiceMonitor` (unstructured) | `<cluster>` | Only when `spec.metrics.serviceMonitor.enabled=true`. Best-effort: a missing prometheus-operator CRD does **not** fail the reconcile; it just sets a `ServiceMonitorReady=False` condition. |
 

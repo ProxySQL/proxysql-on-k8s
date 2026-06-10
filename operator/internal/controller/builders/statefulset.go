@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"maps"
+	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -74,9 +75,17 @@ func (b *Builder) StatefulSet(cnfChecksum string) *appsv1.StatefulSet {
 }
 
 func (b *Builder) podSpec() corev1.PodSpec {
+	podSecurityContext := b.Spec.PodSecurityContext
+	if sysctls := b.keepaliveSysctls(); len(sysctls) > 0 {
+		// Copy before appending: the defaulted spec's security context is
+		// shared and builders must stay side-effect free.
+		podSecurityContext = podSecurityContext.DeepCopy()
+		podSecurityContext.Sysctls = append(podSecurityContext.Sysctls, sysctls...)
+	}
+
 	spec := corev1.PodSpec{
 		ImagePullSecrets:              b.Spec.ImagePullSecrets,
-		SecurityContext:               b.Spec.PodSecurityContext,
+		SecurityContext:               podSecurityContext,
 		NodeSelector:                  b.Spec.NodeSelector,
 		Tolerations:                   b.Spec.Tolerations,
 		Affinity:                      b.Spec.Affinity,
@@ -186,6 +195,25 @@ func (b *Builder) dataPVC() corev1.PersistentVolumeClaim {
 		pvc.Spec.StorageClassName = b.Spec.Persistence.StorageClass
 	}
 	return pvc
+}
+
+// keepaliveSysctls renders spec.networking.tcpKeepalive into pod-level
+// sysctls. All three are in the Kubernetes safe-sysctl set since v1.29
+// (KEP-3105), so they are admitted under PSA `restricted` without any
+// kubelet --allowed-unsafe-sysctls configuration.
+func (b *Builder) keepaliveSysctls() []corev1.Sysctl {
+	ka := b.Spec.Networking.TCPKeepalive
+	var out []corev1.Sysctl
+	if ka.Time != nil {
+		out = append(out, corev1.Sysctl{Name: "net.ipv4.tcp_keepalive_time", Value: strconv.Itoa(int(*ka.Time))})
+	}
+	if ka.Interval != nil {
+		out = append(out, corev1.Sysctl{Name: "net.ipv4.tcp_keepalive_intvl", Value: strconv.Itoa(int(*ka.Interval))})
+	}
+	if ka.Probes != nil {
+		out = append(out, corev1.Sysctl{Name: "net.ipv4.tcp_keepalive_probes", Value: strconv.Itoa(int(*ka.Probes))})
+	}
+	return out
 }
 
 // Sha256 returns the hex SHA-256 of s, used for the cnf checksum annotation.
