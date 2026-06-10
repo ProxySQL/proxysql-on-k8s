@@ -166,7 +166,7 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// pgsql tables on a cluster that isn't listening on pgsql is almost
 	// certainly a user error; we still push (the admin tables exist either
 	// way) but surface it loudly.
-	pgsqlMismatch := pgsqlConfigured(&cfg) && !b.Spec.Protocols.PostgreSQL.Enabled
+	pgsqlMismatch := pgsqlConfigured(&cfg) && !b.Spec.Protocols.PostgreSQL.IsEnabled()
 	if pgsqlMismatch {
 		r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "PgsqlDisabled",
 			"spec declares pgsql servers/users/rules but the referenced cluster has protocols.pgsql.enabled=false")

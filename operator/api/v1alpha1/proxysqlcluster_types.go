@@ -167,13 +167,23 @@ type ProtocolsSpec struct {
 
 // ProtocolSpec configures one listening protocol.
 type ProtocolSpec struct {
+	// Enabled toggles this protocol's listener. When nil, the protocol's own
+	// default applies: admin and mysql default to on, pgsql and web default
+	// to off, and a non-zero Port implies enabled. An explicitly set value
+	// always wins, even when Port is set — except admin, which is always on
+	// (the operator needs it to push config) and ignores enabled=false.
 	// +optional
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled *bool `json:"enabled,omitempty"`
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
 }
+
+// IsEnabled reports the resolved enabled state; nil counts as false.
+// DefaultedSpec normalizes Enabled to non-nil, so post-defaulting reads are
+// exact.
+func (p ProtocolSpec) IsEnabled() bool { return p.Enabled != nil && *p.Enabled }
 
 // MetricsSpec configures the ProxySQL Prometheus exporter (REST API).
 type MetricsSpec struct {
