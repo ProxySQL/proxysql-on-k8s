@@ -319,4 +319,88 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 				"finalizer must be held while cleanup is failing")
 		})
 	})
+
+	Context("secret watch mapping", func() {
+		const ns = "default"
+
+		// makeConfig creates a ProxySQLConfig pointing at clusterName and
+		// registers cleanup that strips any finalizer so the suite never
+		// accumulates terminating objects.
+		makeConfig := func(name, clusterName string, mut ...func(*proxysqlv1alpha1.ProxySQLConfig)) {
+			ctx := context.Background()
+			c := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: clusterName},
+				},
+			}
+			for _, m := range mut {
+				m(c)
+			}
+			Expect(k8sClient.Create(ctx, c)).To(Succeed())
+			DeferCleanup(func() {
+				var cur proxysqlv1alpha1.ProxySQLConfig
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err != nil {
+					return
+				}
+				cur.Finalizers = nil
+				_ = k8sClient.Update(ctx, &cur)
+				_ = k8sClient.Delete(ctx, &cur)
+			})
+		}
+
+		It("maps a referenced password Secret to its ProxySQLConfigs", func() {
+			ctx := context.Background()
+			makeConfig("secmap-cfg", "secmap-cluster", func(c *proxysqlv1alpha1.ProxySQLConfig) {
+				c.Spec.MySQLUsers = []proxysqlv1alpha1.MySQLUser{{
+					Username: "app",
+					PasswordSecretRef: corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "app-user-pw"},
+						Key:                  "password",
+					},
+				}}
+			})
+
+			r := &ProxySQLConfigReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			reqs := r.configsForSecret(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "app-user-pw", Namespace: ns},
+			})
+			Expect(reqs).To(ContainElement(reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "secmap-cfg", Namespace: ns},
+			}), "a Secret referenced by passwordSecretRef must map to the config")
+
+			reqs = r.configsForSecret(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "unrelated-pw", Namespace: ns},
+			})
+			Expect(reqs).NotTo(ContainElement(reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "secmap-cfg", Namespace: ns},
+			}), "an unrelated Secret must not map to the config")
+		})
+
+		It("maps a cluster admin Secret to configs targeting that cluster", func() {
+			ctx := context.Background()
+			cluster := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "secmap-cluster", Namespace: ns},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+
+			makeConfig("secmap-cfg", "secmap-cluster")
+
+			r := &ProxySQLConfigReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			b := builders.New(cluster, r.Scheme, builders.Passwords{})
+			reqs := r.configsForSecret(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
+			})
+			Expect(reqs).To(ContainElement(reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "secmap-cfg", Namespace: ns},
+			}), "the target cluster's admin Secret must map to the config")
+		})
+	})
 })

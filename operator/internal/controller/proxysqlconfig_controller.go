@@ -548,11 +548,14 @@ func joinTrunc(parts []string, max int) string {
 //     changes (status flip, admin secret rotation, replica count change).
 //   - Pods: re-reconcile when a ProxySQL pod becomes Ready or restarts, so
 //     fresh pods get config pushed without waiting for the 30s safety requeue.
+//   - Secrets: re-reconcile configs when a referenced password Secret or the
+//     target cluster's admin Secret changes, so rotation converges immediately.
 func (r *ProxySQLConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&proxysqlv1alpha1.ProxySQLConfig{}).
 		Watches(&proxysqlv1alpha1.ProxySQLCluster{}, handler.EnqueueRequestsFromMapFunc(r.configsForCluster)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.configsForPod)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.configsForSecret)).
 		Named("proxysqlconfig").
 		Complete(r)
 }
@@ -595,4 +598,53 @@ func (r *ProxySQLConfigReconciler) configsForPod(ctx context.Context, obj client
 		}
 	}
 	return out
+}
+
+// configsForSecret maps a Secret event to every ProxySQLConfig that consumes
+// it — either as a user passwordSecretRef or as the admin Secret of the
+// cluster the config targets. This makes password rotation converge on the
+// next reconcile instead of waiting for the drift resync interval.
+func (r *ProxySQLConfigReconciler) configsForSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	sec, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	var configs proxysqlv1alpha1.ProxySQLConfigList
+	if err := r.List(ctx, &configs, client.InNamespace(sec.Namespace)); err != nil {
+		return nil
+	}
+	if len(configs.Items) == 0 {
+		return nil
+	}
+	// Clusters whose derived admin-secret name matches this Secret.
+	adminOf := map[string]bool{}
+	var clusters proxysqlv1alpha1.ProxySQLClusterList
+	if err := r.List(ctx, &clusters, client.InNamespace(sec.Namespace)); err == nil {
+		for i := range clusters.Items {
+			if builders.New(&clusters.Items[i], r.Scheme, builders.Passwords{}).SecretName() == sec.Name {
+				adminOf[clusters.Items[i].Name] = true
+			}
+		}
+	}
+	var out []reconcile.Request
+	for _, c := range configs.Items {
+		if adminOf[c.Spec.ClusterRef.Name] || configReferencesSecret(&c, sec.Name) {
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: c.Name, Namespace: c.Namespace}})
+		}
+	}
+	return out
+}
+
+func configReferencesSecret(c *proxysqlv1alpha1.ProxySQLConfig, name string) bool {
+	for _, u := range c.Spec.MySQLUsers {
+		if u.PasswordSecretRef.Name == name {
+			return true
+		}
+	}
+	for _, u := range c.Spec.PostgreSQLUsers {
+		if u.PasswordSecretRef.Name == name {
+			return true
+		}
+	}
+	return false
 }
