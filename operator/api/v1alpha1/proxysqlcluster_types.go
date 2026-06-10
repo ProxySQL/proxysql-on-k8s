@@ -159,6 +159,10 @@ type ProtocolsSpec struct {
 	PostgreSQL ProtocolSpec `json:"pgsql,omitempty"`
 	// +optional
 	Admin ProtocolSpec `json:"admin,omitempty"`
+	// Web exposes ProxySQL's built-in HTTPS stats web UI (admin web_enabled /
+	// web_port). Disabled by default; a non-zero port implies enabled.
+	// +optional
+	Web ProtocolSpec `json:"web,omitempty"`
 }
 
 // ProtocolSpec configures one listening protocol.
@@ -223,6 +227,24 @@ type ProxySQLClusterStatus struct {
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
+	// UpdatedReplicas is the number of pods at the current StatefulSet
+	// revision.
+	// +optional
+	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
+
+	// Phase is a coarse, single-word projection of the conditions for
+	// dashboards and external pollers. Conditions remain the source of truth.
+	// One of: Pending, Creating, Running, Updating, Degraded, Failed.
+	// (Failed is reserved; the operator currently reports Degraded for error
+	// states it can observe.)
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
+	// Endpoints are the in-cluster DNS endpoints (host:port) for every
+	// enabled surface.
+	// +optional
+	Endpoints *ClusterEndpoints `json:"endpoints,omitempty"`
+
 	// AdminSecretName is the Secret the operator wired in (created or referenced).
 	// +optional
 	AdminSecretName string `json:"adminSecretName,omitempty"`
@@ -235,11 +257,37 @@ type ProxySQLClusterStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// ClusterEndpoints lists in-cluster DNS endpoints (host:port) per surface.
+// A field is empty when that surface is disabled.
+type ClusterEndpoints struct {
+	// +optional
+	MySQL string `json:"mysql,omitempty"`
+	// +optional
+	PostgreSQL string `json:"pgsql,omitempty"`
+	// +optional
+	Admin string `json:"admin,omitempty"`
+	// +optional
+	Web string `json:"web,omitempty"`
+	// +optional
+	Metrics string `json:"metrics,omitempty"`
+}
+
+// Phase values for ProxySQLClusterStatus.Phase.
+const (
+	PhasePending  = "Pending"
+	PhaseCreating = "Creating"
+	PhaseRunning  = "Running"
+	PhaseUpdating = "Updating"
+	PhaseDegraded = "Degraded"
+	PhaseFailed   = "Failed"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=pxc
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ProxySQLCluster is the Schema for the proxysqlclusters API.

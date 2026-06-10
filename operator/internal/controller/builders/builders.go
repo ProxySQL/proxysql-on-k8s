@@ -20,6 +20,10 @@ limitations under the License.
 package builders
 
 import (
+	"fmt"
+	"regexp"
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,6 +37,7 @@ const (
 	DefaultMySQLPort       int32 = 6033
 	DefaultPostgreSQLPort  int32 = 6133
 	DefaultMetricsPort     int32 = 6070
+	DefaultWebPort         int32 = 6080
 	DefaultProxySQLImage         = "proxysql/proxysql"
 	DefaultProxySQLTag           = "3.0"
 	DefaultPersistenceSize       = "1Gi"
@@ -45,12 +50,117 @@ const (
 	SecretKeyMonitorPassword = "monitor-password"
 )
 
-// Passwords holds the plaintext admin/radmin/monitor credentials the operator
-// renders into the bootstrap ConfigMap.
+// Passwords holds the plaintext credentials the operator renders into the
+// bootstrap ConfigMap. ExtraAdminUser/ExtraAdminPassword carry an additional
+// remote-capable admin credential derived from a username/password-shaped
+// external Secret (empty when unused).
 type Passwords struct {
 	Admin   string
 	Radmin  string
 	Monitor string
+
+	ExtraAdminUser     string
+	ExtraAdminPassword string
+}
+
+// cnfUsernameRe constrains usernames rendered into the bootstrap cnf's
+// admin_credentials value (a double-quoted string of ';'-separated
+// "user:pass" pairs). Only conservative identifier characters are allowed.
+var cnfUsernameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// validCnfPassword rejects passwords that cannot be represented safely in
+// the bootstrap proxysql.cnf. Cnf grammar: values live inside double-quoted
+// strings, and admin_credentials is additionally split on ';' — so a '"',
+// ';', any control character (< 0x20), or DEL would corrupt the rendered
+// config or break ProxySQL's credential splitting. Such values could never
+// work anyway, so rejecting them loses nothing.
+func validCnfPassword(s string) error {
+	for _, r := range s {
+		switch {
+		case r == '"' || r == ';':
+			return fmt.Errorf("contains forbidden character %q", r)
+		case r < 0x20 || r == 0x7f:
+			return fmt.Errorf("contains a control character (%#x)", r)
+		}
+	}
+	return nil
+}
+
+// PasswordsFromSecret resolves credentials from an auth Secret's data,
+// accepting two schemas in precedence order:
+//  1. the operator schema (keys per AuthKeys) — all three keys required;
+//  2. the common platform schema: "username"/"password" (+ optional
+//     monitor key). Admin and radmin share the password; a username other
+//     than admin/radmin becomes an extra admin credential in the cnf.
+//
+// A partial operator schema (the admin or radmin key present without the
+// other two) errors to prevent silent credential substitution: falling
+// through to the username/password schema would discard explicitly
+// configured keys. The monitor key alone is not "partial" — it's the
+// documented optional override for schema 2.
+//
+// All returned credentials are validated against the cnf grammar (values
+// live inside double-quoted strings split on ';'); see validCnfPassword.
+func PasswordsFromSecret(data map[string][]byte, keys proxysqlv1alpha1.AuthKeys) (Passwords, error) {
+	admin := string(data[keys.AdminPassword])
+	radmin := string(data[keys.RadminPassword])
+	monitor := string(data[keys.MonitorPassword])
+
+	if admin != "" || radmin != "" {
+		var missing []string
+		if admin == "" {
+			missing = append(missing, keys.AdminPassword)
+		}
+		if radmin == "" {
+			missing = append(missing, keys.RadminPassword)
+		}
+		if monitor == "" {
+			missing = append(missing, keys.MonitorPassword)
+		}
+		if len(missing) > 0 {
+			return Passwords{}, fmt.Errorf(
+				"auth secret has a partial operator schema: missing key(s) %s",
+				strings.Join(missing, ", "))
+		}
+		for key, val := range map[string]string{
+			keys.AdminPassword:   admin,
+			keys.RadminPassword:  radmin,
+			keys.MonitorPassword: monitor,
+		} {
+			if err := validCnfPassword(val); err != nil {
+				return Passwords{}, fmt.Errorf("auth secret key %q: %w", key, err)
+			}
+		}
+		return Passwords{Admin: admin, Radmin: radmin, Monitor: monitor}, nil
+	}
+
+	user := string(data["username"])
+	pass := string(data["password"])
+	if user != "" && pass != "" {
+		if !cnfUsernameRe.MatchString(user) {
+			return Passwords{}, fmt.Errorf(
+				"auth secret key \"username\" must match %s", cnfUsernameRe.String())
+		}
+		if err := validCnfPassword(pass); err != nil {
+			return Passwords{}, fmt.Errorf("auth secret key \"password\": %w", err)
+		}
+		pw := Passwords{Admin: pass, Radmin: pass, Monitor: pass}
+		if monitor != "" {
+			if err := validCnfPassword(monitor); err != nil {
+				return Passwords{}, fmt.Errorf("auth secret key %q: %w", keys.MonitorPassword, err)
+			}
+			pw.Monitor = monitor
+		}
+		if user != "admin" && user != "radmin" {
+			pw.ExtraAdminUser = user
+			pw.ExtraAdminPassword = pass
+		}
+		return pw, nil
+	}
+
+	return Passwords{}, fmt.Errorf(
+		"auth secret matches neither schema: need %s/%s/%s, or username/password",
+		keys.AdminPassword, keys.RadminPassword, keys.MonitorPassword)
 }
 
 // Builder constructs the K8s objects owned by a ProxySQLCluster.
@@ -189,6 +299,15 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 	}
 	if spec.Protocols.PostgreSQL.Enabled && spec.Protocols.PostgreSQL.Port == 0 {
 		spec.Protocols.PostgreSQL.Port = DefaultPostgreSQLPort
+	}
+
+	// Web UI: disabled by default; enabled only if explicitly toggled or
+	// port set.
+	if spec.Protocols.Web.Port != 0 {
+		spec.Protocols.Web.Enabled = true
+	}
+	if spec.Protocols.Web.Enabled && spec.Protocols.Web.Port == 0 {
+		spec.Protocols.Web.Port = DefaultWebPort
 	}
 
 	// Persistence default: enabled, 1Gi.

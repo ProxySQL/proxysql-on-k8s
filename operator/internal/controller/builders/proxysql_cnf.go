@@ -35,11 +35,15 @@ datadir="/var/lib/proxysql"
 
 admin_variables=
 {
-  admin_credentials="admin:{{ .AdminPassword }};radmin:{{ .RadminPassword }}"
+  admin_credentials="admin:{{ .AdminPassword }};radmin:{{ .RadminPassword }}{{ if .ExtraAdminUser }};{{ .ExtraAdminUser }}:{{ .ExtraAdminPassword }}{{ end }}"
   mysql_ifaces="0.0.0.0:{{ .AdminPort }}"
 {{- if .MetricsEnabled }}
   restapi_enabled=true
   restapi_port={{ .MetricsPort }}
+{{- end }}
+{{- if .WebEnabled }}
+  web_enabled=true
+  web_port={{ .WebPort }}
 {{- end }}
 {{- if .ClusterSync }}
   cluster_username="radmin"
@@ -93,19 +97,23 @@ proxysql_servers=
 
 // cnfData is the input to bootstrapCnfTemplate.
 type cnfData struct {
-	ClusterName       string
-	AdminPassword     string
-	RadminPassword    string
-	MonitorPassword   string
-	AdminPort         int32
-	MySQLEnabled      bool
-	MySQLPort         int32
-	PostgreSQLEnabled bool
-	PostgreSQLPort    int32
-	MetricsEnabled    bool
-	MetricsPort       int32
-	ClusterSync       bool
-	ProxySQLServers   []string
+	ClusterName        string
+	AdminPassword      string
+	RadminPassword     string
+	MonitorPassword    string
+	ExtraAdminUser     string
+	ExtraAdminPassword string
+	AdminPort          int32
+	MySQLEnabled       bool
+	MySQLPort          int32
+	PostgreSQLEnabled  bool
+	PostgreSQLPort     int32
+	MetricsEnabled     bool
+	MetricsPort        int32
+	WebEnabled         bool
+	WebPort            int32
+	ClusterSync        bool
+	ProxySQLServers    []string
 }
 
 // BootstrapCnf renders the minimal proxysql.cnf for this cluster.
@@ -117,19 +125,23 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 		return "", fmt.Errorf("parse cnf template: %w", err)
 	}
 	data := cnfData{
-		ClusterName:       b.Name(),
-		AdminPassword:     b.Pw.Admin,
-		RadminPassword:    b.Pw.Radmin,
-		MonitorPassword:   b.Pw.Monitor,
-		AdminPort:         b.Spec.Protocols.Admin.Port,
-		MySQLEnabled:      b.Spec.Protocols.MySQL.Enabled,
-		MySQLPort:         b.Spec.Protocols.MySQL.Port,
-		PostgreSQLEnabled: b.Spec.Protocols.PostgreSQL.Enabled,
-		PostgreSQLPort:    b.Spec.Protocols.PostgreSQL.Port,
-		MetricsEnabled:    isTrue(b.Spec.Metrics.Enabled),
-		MetricsPort:       b.Spec.Metrics.Port,
-		ClusterSync:       len(proxysqlServers) > 0,
-		ProxySQLServers:   proxysqlServers,
+		ClusterName:        b.Name(),
+		AdminPassword:      b.Pw.Admin,
+		RadminPassword:     b.Pw.Radmin,
+		MonitorPassword:    b.Pw.Monitor,
+		ExtraAdminUser:     b.Pw.ExtraAdminUser,
+		ExtraAdminPassword: b.Pw.ExtraAdminPassword,
+		AdminPort:          b.Spec.Protocols.Admin.Port,
+		MySQLEnabled:       b.Spec.Protocols.MySQL.Enabled,
+		MySQLPort:          b.Spec.Protocols.MySQL.Port,
+		PostgreSQLEnabled:  b.Spec.Protocols.PostgreSQL.Enabled,
+		PostgreSQLPort:     b.Spec.Protocols.PostgreSQL.Port,
+		MetricsEnabled:     isTrue(b.Spec.Metrics.Enabled),
+		MetricsPort:        b.Spec.Metrics.Port,
+		WebEnabled:         b.Spec.Protocols.Web.Enabled,
+		WebPort:            b.Spec.Protocols.Web.Port,
+		ClusterSync:        len(proxysqlServers) > 0,
+		ProxySQLServers:    proxysqlServers,
 	}
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, data); err != nil {
