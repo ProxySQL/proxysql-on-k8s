@@ -50,8 +50,9 @@ type ProxySQLConfigReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	// ResyncInterval bounds how long out-of-band runtime drift can persist
-	// before a full re-push re-asserts desired state. Zero means use the
-	// default (defaultDriftResyncInterval).
+	// before the reconciler reads runtime state back from each replica and
+	// re-pushes only the ones that drifted. Zero means use the default
+	// (defaultDriftResyncInterval).
 	ResyncInterval time.Duration
 }
 
@@ -267,7 +268,8 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Partial or full failure.
 	cfg.Status.SyncedReplicas = int32(len(addrs) - len(pushAddrs) + synced)
 	r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "PartialSync",
-		fmt.Sprintf("synced %d/%d replicas", synced, len(pushAddrs)))
+		fmt.Sprintf("synced %d/%d replicas (%d re-push targets, %d succeeded)",
+			len(addrs)-len(pushAddrs)+synced, len(addrs), len(pushAddrs), synced))
 	r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "SyncErrors",
 		joinErrs(syncErrs))
 	if err := r.Status().Update(ctx, &cfg); err != nil {

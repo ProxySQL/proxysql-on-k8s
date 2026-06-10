@@ -28,8 +28,10 @@ import (
 // silently counted as healthy.
 func TestVerifyReplicasUnreachableIsDrifted(t *testing.T) {
 	r := &ProxySQLConfigReconciler{}
-	// Ports 1 and 2 are privileged and unbound in any sane test environment,
-	// so both dials are refused.
+	// sql.Open (inside proxysqlclient.New) does not dial — the TCP attempt
+	// happens on the first query inside ReadRuntime, which fails with
+	// ECONNREFUSED: ports 1 and 2 are privileged and unbound in any sane
+	// test environment.
 	addrs := []string{"127.0.0.1:1", "127.0.0.1:2"}
 
 	drifted, shunned := r.verifyReplicas(context.Background(), addrs, "pw", &proxysqlclient.Desired{})
