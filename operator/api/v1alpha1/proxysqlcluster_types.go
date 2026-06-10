@@ -133,8 +133,9 @@ type NetworkingSpec struct {
 }
 
 // TCPKeepaliveSpec maps to the net.ipv4.tcp_keepalive_{time,intvl,probes}
-// kernel sysctls. Unset fields keep the node's kernel default. Bounds match
-// the kernel's accepted ranges.
+// kernel sysctls. Unset fields keep the node's kernel default. Bounds are
+// conservative API-level limits; the kernel itself imposes no practical
+// upper bound.
 type TCPKeepaliveSpec struct {
 	// Time is net.ipv4.tcp_keepalive_time: seconds a connection stays idle
 	// before keepalive probes start.

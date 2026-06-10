@@ -285,6 +285,18 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &svc)).To(Succeed())
 			Expect(svc.Annotations).To(HaveKeyWithValue("example.com/lb", "internet-facing"))
+
+			// Merge semantics contract: a key removed from the spec lingers
+			// on the Service (the operator cannot tell a removed spec key
+			// from one written by a cloud controller, and wiping foreign
+			// annotations would fight LB controllers).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.Annotations = nil
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &svc)).To(Succeed())
+			Expect(svc.Annotations).To(HaveKey("example.com/lb"),
+				"removed spec annotation must linger on the Service (merge semantics)")
 		})
 	})
 
