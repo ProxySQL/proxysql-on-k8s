@@ -61,13 +61,13 @@ func TestDefaultedSpec_AppliesDefaults(t *testing.T) {
 	if spec.Image.Repository != DefaultProxySQLImage || spec.Image.Tag != DefaultProxySQLTag {
 		t.Errorf("Image default: got %s:%s", spec.Image.Repository, spec.Image.Tag)
 	}
-	if !spec.Protocols.Admin.Enabled || spec.Protocols.Admin.Port != DefaultAdminPort {
+	if !spec.Protocols.Admin.IsEnabled() || spec.Protocols.Admin.Port != DefaultAdminPort {
 		t.Errorf("Admin protocol should be enabled at default port, got %+v", spec.Protocols.Admin)
 	}
-	if !spec.Protocols.MySQL.Enabled || spec.Protocols.MySQL.Port != DefaultMySQLPort {
+	if !spec.Protocols.MySQL.IsEnabled() || spec.Protocols.MySQL.Port != DefaultMySQLPort {
 		t.Errorf("MySQL should default to enabled at %d, got %+v", DefaultMySQLPort, spec.Protocols.MySQL)
 	}
-	if spec.Protocols.PostgreSQL.Enabled {
+	if spec.Protocols.PostgreSQL.IsEnabled() {
 		t.Errorf("PostgreSQL should default to disabled, got %+v", spec.Protocols.PostgreSQL)
 	}
 	if spec.PodSecurityContext == nil || spec.PodSecurityContext.RunAsNonRoot == nil || !*spec.PodSecurityContext.RunAsNonRoot {
@@ -83,11 +83,66 @@ func TestDefaultedSpec_PostgreSQLEnabledImplicitlyByPort(t *testing.T) {
 		c.Spec.Protocols.PostgreSQL.Port = 5555
 	})
 	spec := DefaultedSpec(c)
-	if !spec.Protocols.PostgreSQL.Enabled {
+	if !spec.Protocols.PostgreSQL.IsEnabled() {
 		t.Error("setting a PostgreSQL port should implicitly enable PostgreSQL")
 	}
 	if spec.Protocols.PostgreSQL.Port != 5555 {
 		t.Errorf("explicit port should be preserved, got %d", spec.Protocols.PostgreSQL.Port)
+	}
+}
+
+func TestDefaultedSpec_MySQLExplicitFalse_StaysDisabled(t *testing.T) {
+	c := newCluster("c", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.MySQL.Enabled = boolPtr(false)
+	})
+	spec := DefaultedSpec(c)
+	if spec.Protocols.MySQL.IsEnabled() {
+		t.Error("explicit mysql enabled=false must survive defaulting (#31)")
+	}
+
+	// Explicit false wins even when a port is set (port-implies-enabled only
+	// applies when Enabled is nil).
+	c = newCluster("c", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.MySQL.Enabled = boolPtr(false)
+		c.Spec.Protocols.MySQL.Port = 3306
+	})
+	spec = DefaultedSpec(c)
+	if spec.Protocols.MySQL.IsEnabled() {
+		t.Error("explicit mysql enabled=false must win over a non-zero port")
+	}
+
+	// Regression guard: nil Enabled still defaults to on.
+	spec = DefaultedSpec(newCluster("c"))
+	if !spec.Protocols.MySQL.IsEnabled() || spec.Protocols.MySQL.Port != DefaultMySQLPort {
+		t.Errorf("nil mysql.enabled must default to enabled at %d, got %+v", DefaultMySQLPort, spec.Protocols.MySQL)
+	}
+}
+
+func TestBuilder_MySQLDisabled_OmittedEverywhere(t *testing.T) {
+	c := newCluster("nomysql", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.MySQL.Enabled = boolPtr(false)
+	})
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+
+	for _, p := range b.Service().Spec.Ports {
+		if p.Name == "mysql" {
+			t.Errorf("Service must not expose mysql port when disabled: %+v", p)
+		}
+	}
+	for _, p := range b.StatefulSet("checksum").Spec.Template.Spec.Containers[0].Ports {
+		if p.Name == "mysql" {
+			t.Errorf("container must not declare mysql port when disabled: %+v", p)
+		}
+	}
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	if strings.Contains(cnf, "mysql_variables") {
+		t.Errorf("cnf must not contain mysql_variables when mysql is disabled:\n%s", cnf)
+	}
+	if ep := b.Endpoints(); ep.MySQL != "" {
+		t.Errorf("MySQL endpoint should be empty when disabled, got %q", ep.MySQL)
 	}
 }
 
@@ -139,7 +194,7 @@ func TestBuilder_ConfigMap_ClusterSyncOnMultiReplica(t *testing.T) {
 
 func TestBuilder_ConfigMap_PostgreSQLMonitorCreds(t *testing.T) {
 	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
-		c.Spec.Protocols.PostgreSQL.Enabled = true
+		c.Spec.Protocols.PostgreSQL.Enabled = boolPtr(true)
 	})
 	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "monitorpw"})
 
@@ -181,7 +236,7 @@ func TestBuilder_ConfigMap_NoClusterSyncOnSingleReplica(t *testing.T) {
 
 func TestBuilder_StatefulSet_PortsMatchEnabledProtocols(t *testing.T) {
 	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
-		c.Spec.Protocols.PostgreSQL.Enabled = true
+		c.Spec.Protocols.PostgreSQL.Enabled = boolPtr(true)
 	})
 	b := New(c, newScheme(t), Passwords{})
 	ss := b.StatefulSet("checksum")
@@ -378,13 +433,13 @@ func TestBuilder_ServiceMonitor_Shape(t *testing.T) {
 func TestDefaultedSpec_WebUI(t *testing.T) {
 	// disabled by default
 	spec := DefaultedSpec(newCluster("c"))
-	if spec.Protocols.Web.Enabled {
+	if spec.Protocols.Web.IsEnabled() {
 		t.Errorf("web UI must default to disabled")
 	}
 
 	// enabled without port => default 6080
 	c := newCluster("c", func(c *proxysqlv1alpha1.ProxySQLCluster) {
-		c.Spec.Protocols.Web.Enabled = true
+		c.Spec.Protocols.Web.Enabled = boolPtr(true)
 	})
 	spec = DefaultedSpec(c)
 	if spec.Protocols.Web.Port != DefaultWebPort {
@@ -396,14 +451,14 @@ func TestDefaultedSpec_WebUI(t *testing.T) {
 		c.Spec.Protocols.Web.Port = 6081
 	})
 	spec = DefaultedSpec(c)
-	if !spec.Protocols.Web.Enabled || spec.Protocols.Web.Port != 6081 {
+	if !spec.Protocols.Web.IsEnabled() || spec.Protocols.Web.Port != 6081 {
 		t.Errorf("port-implies-enabled failed: %+v", spec.Protocols.Web)
 	}
 }
 
 func TestBootstrapCnf_WebUI(t *testing.T) {
 	c := newCluster("web-test", func(c *proxysqlv1alpha1.ProxySQLCluster) {
-		c.Spec.Protocols.Web.Enabled = true
+		c.Spec.Protocols.Web.Enabled = boolPtr(true)
 	})
 	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
 	cnf, err := b.BootstrapCnf(nil)
@@ -428,7 +483,7 @@ func TestBootstrapCnf_WebUI(t *testing.T) {
 
 func TestServicePorts_WebUI(t *testing.T) {
 	c := newCluster("web-svc", func(c *proxysqlv1alpha1.ProxySQLCluster) {
-		c.Spec.Protocols.Web.Enabled = true
+		c.Spec.Protocols.Web.Enabled = boolPtr(true)
 	})
 	b := New(c, newScheme(t), Passwords{})
 	svc := b.Service()
@@ -451,7 +506,7 @@ func TestServicePorts_WebUI(t *testing.T) {
 
 func TestStatefulSet_WebUIContainerPort(t *testing.T) {
 	c := newCluster("web-sts", func(c *proxysqlv1alpha1.ProxySQLCluster) {
-		c.Spec.Protocols.Web.Enabled = true
+		c.Spec.Protocols.Web.Enabled = boolPtr(true)
 	})
 	b := New(c, newScheme(t), Passwords{})
 	sts := b.StatefulSet("checksum")
@@ -477,7 +532,7 @@ func TestStatefulSet_WebUIContainerPort(t *testing.T) {
 func TestEndpoints(t *testing.T) {
 	c := newCluster("ep", func(c *proxysqlv1alpha1.ProxySQLCluster) {
 		c.Namespace = "ns1"
-		c.Spec.Protocols.Web.Enabled = true
+		c.Spec.Protocols.Web.Enabled = boolPtr(true)
 	})
 	b := New(c, newScheme(t), Passwords{})
 	got := b.Endpoints()
@@ -501,7 +556,7 @@ func TestEndpoints(t *testing.T) {
 func TestEndpoints_DisabledSurfacesEmpty(t *testing.T) {
 	f := false
 	c := newCluster("ep-off", func(c *proxysqlv1alpha1.ProxySQLCluster) {
-		c.Spec.Protocols.PostgreSQL.Enabled = true
+		c.Spec.Protocols.PostgreSQL.Enabled = boolPtr(true)
 		c.Spec.Metrics.Enabled = &f
 	})
 	b := New(c, newScheme(t), Passwords{})

@@ -64,7 +64,7 @@ func (b *Builder) HeadlessService() *corev1.Service {
 func (b *Builder) servicePorts(headless bool) []corev1.ServicePort {
 	var ports []corev1.ServicePort
 
-	if b.Spec.Protocols.MySQL.Enabled {
+	if b.Spec.Protocols.MySQL.IsEnabled() {
 		ports = append(ports, corev1.ServicePort{
 			Name:       "mysql",
 			Port:       b.Spec.Protocols.MySQL.Port,
@@ -72,7 +72,7 @@ func (b *Builder) servicePorts(headless bool) []corev1.ServicePort {
 			Protocol:   corev1.ProtocolTCP,
 		})
 	}
-	if b.Spec.Protocols.PostgreSQL.Enabled {
+	if b.Spec.Protocols.PostgreSQL.IsEnabled() {
 		ports = append(ports, corev1.ServicePort{
 			Name:       "pgsql",
 			Port:       b.Spec.Protocols.PostgreSQL.Port,
@@ -96,7 +96,7 @@ func (b *Builder) servicePorts(headless bool) []corev1.ServicePort {
 			Protocol:   corev1.ProtocolTCP,
 		})
 	}
-	if !headless && b.Spec.Protocols.Web.Enabled {
+	if !headless && b.Spec.Protocols.Web.IsEnabled() {
 		ports = append(ports, corev1.ServicePort{
 			Name:       "web",
 			Port:       b.Spec.Protocols.Web.Port,

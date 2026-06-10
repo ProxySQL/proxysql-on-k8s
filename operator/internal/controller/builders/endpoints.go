@@ -30,13 +30,13 @@ func (b *Builder) Endpoints() *proxysqlv1alpha1.ClusterEndpoints {
 	ep := &proxysqlv1alpha1.ClusterEndpoints{
 		Admin: fmt.Sprintf("%s:%d", host, b.Spec.Protocols.Admin.Port),
 	}
-	if b.Spec.Protocols.MySQL.Enabled {
+	if b.Spec.Protocols.MySQL.IsEnabled() {
 		ep.MySQL = fmt.Sprintf("%s:%d", host, b.Spec.Protocols.MySQL.Port)
 	}
-	if b.Spec.Protocols.PostgreSQL.Enabled {
+	if b.Spec.Protocols.PostgreSQL.IsEnabled() {
 		ep.PostgreSQL = fmt.Sprintf("%s:%d", host, b.Spec.Protocols.PostgreSQL.Port)
 	}
-	if b.Spec.Protocols.Web.Enabled {
+	if b.Spec.Protocols.Web.IsEnabled() {
 		ep.Web = fmt.Sprintf("%s:%d", host, b.Spec.Protocols.Web.Port)
 	}
 	if isTrue(b.Spec.Metrics.Enabled) {

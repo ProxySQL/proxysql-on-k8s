@@ -274,39 +274,37 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 		spec.Image.PullPolicy = corev1.PullIfNotPresent
 	}
 
+	// Protocol defaulting. An explicitly set Enabled always wins; when nil,
+	// admin/mysql default to on and pgsql/web default to off, with a
+	// non-zero port implying enabled. Enabled is always non-nil afterwards.
+
 	// Admin port: always enabled, default 6032.
-	spec.Protocols.Admin.Enabled = true
+	spec.Protocols.Admin.Enabled = boolPtr(true)
 	if spec.Protocols.Admin.Port == 0 {
 		spec.Protocols.Admin.Port = DefaultAdminPort
 	}
 
-	// MySQL: enabled by default, default port 6033. If a non-default port is
-	// set, treat that as an implicit Enabled=true.
-	if !spec.Protocols.MySQL.Enabled && spec.Protocols.MySQL.Port == 0 {
-		spec.Protocols.MySQL.Enabled = true
+	// MySQL: enabled by default, default port 6033.
+	if spec.Protocols.MySQL.Enabled == nil {
+		spec.Protocols.MySQL.Enabled = boolPtr(true)
 	}
-	if spec.Protocols.MySQL.Port != 0 {
-		spec.Protocols.MySQL.Enabled = true
-	}
-	if spec.Protocols.MySQL.Enabled && spec.Protocols.MySQL.Port == 0 {
+	if spec.Protocols.MySQL.IsEnabled() && spec.Protocols.MySQL.Port == 0 {
 		spec.Protocols.MySQL.Port = DefaultMySQLPort
 	}
 
-	// PostgreSQL: disabled by default; enabled only if explicitly toggled
-	// or port set.
-	if spec.Protocols.PostgreSQL.Port != 0 {
-		spec.Protocols.PostgreSQL.Enabled = true
+	// PostgreSQL: disabled by default; a non-zero port implies enabled.
+	if spec.Protocols.PostgreSQL.Enabled == nil {
+		spec.Protocols.PostgreSQL.Enabled = boolPtr(spec.Protocols.PostgreSQL.Port != 0)
 	}
-	if spec.Protocols.PostgreSQL.Enabled && spec.Protocols.PostgreSQL.Port == 0 {
+	if spec.Protocols.PostgreSQL.IsEnabled() && spec.Protocols.PostgreSQL.Port == 0 {
 		spec.Protocols.PostgreSQL.Port = DefaultPostgreSQLPort
 	}
 
-	// Web UI: disabled by default; enabled only if explicitly toggled or
-	// port set.
-	if spec.Protocols.Web.Port != 0 {
-		spec.Protocols.Web.Enabled = true
+	// Web UI: disabled by default; a non-zero port implies enabled.
+	if spec.Protocols.Web.Enabled == nil {
+		spec.Protocols.Web.Enabled = boolPtr(spec.Protocols.Web.Port != 0)
 	}
-	if spec.Protocols.Web.Enabled && spec.Protocols.Web.Port == 0 {
+	if spec.Protocols.Web.IsEnabled() && spec.Protocols.Web.Port == 0 {
 		spec.Protocols.Web.Port = DefaultWebPort
 	}
 

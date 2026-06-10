@@ -113,16 +113,16 @@ func (b *Builder) container() corev1.Container {
 	ports := []corev1.ContainerPort{
 		{Name: "admin", ContainerPort: b.Spec.Protocols.Admin.Port, Protocol: corev1.ProtocolTCP},
 	}
-	if b.Spec.Protocols.MySQL.Enabled {
+	if b.Spec.Protocols.MySQL.IsEnabled() {
 		ports = append(ports, corev1.ContainerPort{Name: "mysql", ContainerPort: b.Spec.Protocols.MySQL.Port, Protocol: corev1.ProtocolTCP})
 	}
-	if b.Spec.Protocols.PostgreSQL.Enabled {
+	if b.Spec.Protocols.PostgreSQL.IsEnabled() {
 		ports = append(ports, corev1.ContainerPort{Name: "pgsql", ContainerPort: b.Spec.Protocols.PostgreSQL.Port, Protocol: corev1.ProtocolTCP})
 	}
 	if isTrue(b.Spec.Metrics.Enabled) {
 		ports = append(ports, corev1.ContainerPort{Name: "metrics", ContainerPort: b.Spec.Metrics.Port, Protocol: corev1.ProtocolTCP})
 	}
-	if b.Spec.Protocols.Web.Enabled {
+	if b.Spec.Protocols.Web.IsEnabled() {
 		ports = append(ports, corev1.ContainerPort{Name: "web", ContainerPort: b.Spec.Protocols.Web.Port, Protocol: corev1.ProtocolTCP})
 	}
 
@@ -197,3 +197,6 @@ func ptrInt64(v int64) *int64 { return &v }
 
 // isTrue reports whether a *bool is non-nil and dereferences to true.
 func isTrue(p *bool) bool { return p != nil && *p }
+
+// boolPtr returns a pointer to v.
+func boolPtr(v bool) *bool { return &v }
