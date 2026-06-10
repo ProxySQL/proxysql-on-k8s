@@ -351,7 +351,7 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 
 		It("maps a referenced password Secret to its ProxySQLConfigs", func() {
 			ctx := context.Background()
-			makeConfig("secmap-cfg", "secmap-cluster", func(c *proxysqlv1alpha1.ProxySQLConfig) {
+			makeConfig("secmap-pw-cfg", "secmap-pw-cluster", func(c *proxysqlv1alpha1.ProxySQLConfig) {
 				c.Spec.MySQLUsers = []proxysqlv1alpha1.MySQLUser{{
 					Username: "app",
 					PasswordSecretRef: corev1.SecretKeySelector{
@@ -369,26 +369,26 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: "app-user-pw", Namespace: ns},
 			})
 			Expect(reqs).To(ContainElement(reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: "secmap-cfg", Namespace: ns},
+				NamespacedName: types.NamespacedName{Name: "secmap-pw-cfg", Namespace: ns},
 			}), "a Secret referenced by passwordSecretRef must map to the config")
 
 			reqs = r.configsForSecret(ctx, &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "unrelated-pw", Namespace: ns},
 			})
 			Expect(reqs).NotTo(ContainElement(reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: "secmap-cfg", Namespace: ns},
+				NamespacedName: types.NamespacedName{Name: "secmap-pw-cfg", Namespace: ns},
 			}), "an unrelated Secret must not map to the config")
 		})
 
 		It("maps a cluster admin Secret to configs targeting that cluster", func() {
 			ctx := context.Background()
 			cluster := &proxysqlv1alpha1.ProxySQLCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: "secmap-cluster", Namespace: ns},
+				ObjectMeta: metav1.ObjectMeta{Name: "secmap-admin-cluster", Namespace: ns},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
 
-			makeConfig("secmap-cfg", "secmap-cluster")
+			makeConfig("secmap-admin-cfg", "secmap-admin-cluster")
 
 			r := &ProxySQLConfigReconciler{
 				Client: k8sClient,
@@ -399,8 +399,15 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
 			})
 			Expect(reqs).To(ContainElement(reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: "secmap-cfg", Namespace: ns},
+				NamespacedName: types.NamespacedName{Name: "secmap-admin-cfg", Namespace: ns},
 			}), "the target cluster's admin Secret must map to the config")
+
+			reqs = r.configsForSecret(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "unrelated-admin-pw", Namespace: ns},
+			})
+			Expect(reqs).NotTo(ContainElement(reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "secmap-admin-cfg", Namespace: ns},
+			}), "an unrelated Secret must not map to the config")
 		})
 	})
 })

@@ -616,10 +616,14 @@ func (r *ProxySQLConfigReconciler) configsForSecret(ctx context.Context, obj cli
 	if len(configs.Items) == 0 {
 		return nil
 	}
-	// Clusters whose derived admin-secret name matches this Secret.
+	// Clusters whose derived admin-secret name matches this Secret. On list
+	// failure, degrade gracefully: log and still return user-ref matches.
 	adminOf := map[string]bool{}
 	var clusters proxysqlv1alpha1.ProxySQLClusterList
-	if err := r.List(ctx, &clusters, client.InNamespace(sec.Namespace)); err == nil {
+	if err := r.List(ctx, &clusters, client.InNamespace(sec.Namespace)); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to list ProxySQLClusters while mapping Secret event; admin-secret matches will be skipped",
+			"secret", sec.Name, "namespace", sec.Namespace)
+	} else {
 		for i := range clusters.Items {
 			if builders.New(&clusters.Items[i], r.Scheme, builders.Passwords{}).SecretName() == sec.Name {
 				adminOf[clusters.Items[i].Name] = true
