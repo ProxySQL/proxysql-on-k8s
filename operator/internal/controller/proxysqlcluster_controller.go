@@ -88,6 +88,7 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// 1) Resolve passwords (from existing Secret or mint + create).
 	pw, err := r.resolvePasswords(ctx, &cluster)
 	if err != nil {
+		cluster.Status.Phase = proxysqlv1alpha1.PhaseDegraded
 		r.setCondition(&cluster, condTypeDegraded, metav1.ConditionTrue, "AuthSecretError", err.Error())
 		_ = r.Status().Update(ctx, &cluster)
 		return ctrl.Result{}, err
@@ -370,7 +371,8 @@ func (r *ProxySQLClusterReconciler) ensureServiceMonitor(ctx context.Context, ow
 func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder) error {
 	var ss appsv1.StatefulSet
 	err := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
-	if err != nil && !apierrors.IsNotFound(err) {
+	notFound := apierrors.IsNotFound(err)
+	if err != nil && !notFound {
 		return err
 	}
 
@@ -381,7 +383,10 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.Replicas = desired
 	cluster.Status.ReadyReplicas = ss.Status.ReadyReplicas
+	cluster.Status.UpdatedReplicas = ss.Status.UpdatedReplicas
 	cluster.Status.AdminSecretName = b.SecretName()
+	cluster.Status.Endpoints = b.Endpoints()
+	cluster.Status.Phase = derivePhase(&ss, notFound, desired)
 
 	if ss.Status.ReadyReplicas == desired && desired > 0 {
 		r.setCondition(cluster, condTypeAvailable, metav1.ConditionTrue, "AllReplicasReady",
@@ -395,6 +400,26 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
 
 	return r.Status().Update(ctx, cluster)
+}
+
+// derivePhase projects StatefulSet state onto a single coarse phase string.
+// Conditions remain the source of truth; this exists for dashboards and
+// external pollers. Failed is reserved for future terminal states the
+// operator can positively identify. Note the deliberate coarseness: "SS
+// exists, 0 ready" maps to Creating even during a total outage of a
+// previously-running cluster.
+func derivePhase(ss *appsv1.StatefulSet, ssMissing bool, desired int32) string {
+	switch {
+	case ssMissing || ss.CreationTimestamp.IsZero():
+		return proxysqlv1alpha1.PhasePending
+	case ss.Status.ReadyReplicas == 0:
+		return proxysqlv1alpha1.PhaseCreating
+	case ss.Status.ReadyReplicas == desired &&
+		(ss.Status.UpdateRevision == "" || ss.Status.UpdateRevision == ss.Status.CurrentRevision):
+		return proxysqlv1alpha1.PhaseRunning
+	default:
+		return proxysqlv1alpha1.PhaseUpdating
+	}
 }
 
 func (r *ProxySQLClusterReconciler) setCondition(cluster *proxysqlv1alpha1.ProxySQLCluster, t string, s metav1.ConditionStatus, reason, msg string) {

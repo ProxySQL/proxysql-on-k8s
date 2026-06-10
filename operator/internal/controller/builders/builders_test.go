@@ -474,6 +474,49 @@ func TestStatefulSet_WebUIContainerPort(t *testing.T) {
 	}
 }
 
+func TestEndpoints(t *testing.T) {
+	c := newCluster("ep", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Namespace = "ns1"
+		c.Spec.Protocols.Web.Enabled = true
+	})
+	b := New(c, newScheme(t), Passwords{})
+	got := b.Endpoints()
+	if got.MySQL != "ep.ns1.svc:6033" { // mysql enabled by default
+		t.Errorf("MySQL endpoint = %q", got.MySQL)
+	}
+	if got.Admin != "ep.ns1.svc:6032" {
+		t.Errorf("Admin endpoint = %q", got.Admin)
+	}
+	if got.Web != "ep.ns1.svc:6080" {
+		t.Errorf("Web endpoint = %q", got.Web)
+	}
+	if got.Metrics != "ep.ns1.svc:6070" { // metrics on by default
+		t.Errorf("Metrics endpoint = %q", got.Metrics)
+	}
+	if got.PostgreSQL != "" { // pgsql off by default
+		t.Errorf("PostgreSQL endpoint should be empty, got %q", got.PostgreSQL)
+	}
+}
+
+func TestEndpoints_DisabledSurfacesEmpty(t *testing.T) {
+	f := false
+	c := newCluster("ep-off", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.PostgreSQL.Enabled = true
+		c.Spec.Metrics.Enabled = &f
+	})
+	b := New(c, newScheme(t), Passwords{})
+	got := b.Endpoints()
+	if got.PostgreSQL != "ep-off.default.svc:6133" {
+		t.Errorf("PostgreSQL endpoint = %q", got.PostgreSQL)
+	}
+	if got.Web != "" {
+		t.Errorf("Web endpoint should be empty when disabled, got %q", got.Web)
+	}
+	if got.Metrics != "" {
+		t.Errorf("Metrics endpoint should be empty when disabled, got %q", got.Metrics)
+	}
+}
+
 func TestRandomPassword_Length(t *testing.T) {
 	p, err := RandomPassword()
 	if err != nil {

@@ -23,6 +23,9 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -1767,11 +1770,35 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              endpoints:
+                description: |-
+                  Endpoints are the in-cluster DNS endpoints (host:port) for every
+                  enabled surface.
+                properties:
+                  admin:
+                    type: string
+                  metrics:
+                    type: string
+                  mysql:
+                    type: string
+                  pgsql:
+                    type: string
+                  web:
+                    type: string
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the most recent .metadata.generation
                   reconciled.
                 format: int64
                 type: integer
+              phase:
+                description: |-
+                  Phase is a coarse, single-word projection of the conditions for
+                  dashboards and external pollers. Conditions remain the source of truth.
+                  One of: Pending, Creating, Running, Updating, Degraded, Failed.
+                  (Failed is reserved; the operator currently reports Degraded for error
+                  states it can observe.)
+                type: string
               readyReplicas:
                 description: ReadyReplicas is the ready replica count of the underlying
                   StatefulSet.
@@ -1779,6 +1806,12 @@ spec:
                 type: integer
               replicas:
                 description: Replicas is the desired replica count.
+                format: int32
+                type: integer
+              updatedReplicas:
+                description: |-
+                  UpdatedReplicas is the number of pods at the current StatefulSet
+                  revision.
                 format: int32
                 type: integer
             type: object

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -184,6 +185,22 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(cluster.Status.AdminSecretName).To(Equal(name))
 		})
 
+		It("reports phase and endpoints", func() {
+			ctx := context.Background()
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			// envtest has no kubelet: the StatefulSet exists but no pod ever
+			// becomes ready, so the projected phase is Creating.
+			Expect(got.Status.Phase).To(Equal(proxysqlv1alpha1.PhaseCreating))
+			Expect(got.Status.UpdatedReplicas).To(Equal(int32(0)))
+			Expect(got.Status.Endpoints).NotTo(BeNil())
+			Expect(got.Status.Endpoints.Admin).To(Equal(name + "." + ns + ".svc:6032"))
+			Expect(got.Status.Endpoints.MySQL).To(Equal(name + "." + ns + ".svc:6033"))
+			Expect(got.Status.Endpoints.Metrics).To(Equal(name + "." + ns + ".svc:6070"))
+			Expect(got.Status.Endpoints.PostgreSQL).To(BeEmpty(), "pgsql disabled by default")
+			Expect(got.Status.Endpoints.Web).To(BeEmpty(), "web disabled by default")
+		})
+
 		It("is idempotent — a second reconcile keeps the same generation on owned objects", func() {
 			ctx := context.Background()
 			var first, second appsv1.StatefulSet
@@ -275,6 +292,43 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 		})
 	})
 })
+
+// TestDerivePhase exercises the coarse phase projection directly (plain table
+// test; no envtest objects involved).
+func TestDerivePhase(t *testing.T) {
+	now := metav1.Now()
+	created := func(ready, updated int32, current, update string) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{CreationTimestamp: now},
+			Status: appsv1.StatefulSetStatus{
+				ReadyReplicas:   ready,
+				UpdatedReplicas: updated,
+				CurrentRevision: current,
+				UpdateRevision:  update,
+			},
+		}
+	}
+
+	cases := []struct {
+		name    string
+		ss      *appsv1.StatefulSet
+		missing bool
+		desired int32
+		want    string
+	}{
+		{"missing StatefulSet", &appsv1.StatefulSet{}, true, 3, proxysqlv1alpha1.PhasePending},
+		{"zero ready replicas", created(0, 0, "rev-1", "rev-1"), false, 3, proxysqlv1alpha1.PhaseCreating},
+		{"all ready, same revision", created(3, 3, "rev-1", "rev-1"), false, 3, proxysqlv1alpha1.PhaseRunning},
+		{"rolling update in progress", created(2, 1, "rev-1", "rev-2"), false, 3, proxysqlv1alpha1.PhaseUpdating},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := derivePhase(tc.ss, tc.missing, tc.desired); got != tc.want {
+				t.Errorf("derivePhase() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 // isOwnedBy returns true when obj has owner as a controller ownerReference.
 func isOwnedBy(obj metav1.Object, owner *proxysqlv1alpha1.ProxySQLCluster) bool {
