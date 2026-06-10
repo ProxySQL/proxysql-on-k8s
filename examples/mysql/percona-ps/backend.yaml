@@ -20,22 +20,45 @@ stringData:
   replication: "REPLACE-ME-replication"
   heartbeat: "REPLACE-ME-heartbeat"
 ---
-# Three-node group-replication cluster. We disable HAProxy and the bundled
-# ProxySQL since we're running our own. orchestrator handles failover
-# announcements; PS exposes the current primary as a labeled Service.
+# Async replication, 1 primary + 1 replica — deliberately kind-sized.
+#
+# The three unsafeFlags below are what make this a DEMO topology:
+#   - mysqlSize:    the operator's safe minimum for async is 3 nodes
+#   - orchestrator: without orchestrator there is NO automated failover
+#   - proxy:        the operator normally insists on HAProxy for async;
+#                   here ProxySQL (managed by the ProxySQL operator) IS the
+#                   proxy layer, so we opt out of Percona's.
+# For production: size 3 + orchestrator (3 nodes) — and keep ProxySQL in
+# front for routing/multiplexing; the wiring below stays the same.
 apiVersion: ps.percona.com/v1
 kind: PerconaServerMySQL
 metadata:
   name: cluster1
   namespace: percona-ps-demo
 spec:
+  crVersion: 1.1.0
   secretsName: cluster1-secrets
+
+  unsafeFlags:
+    mysqlSize: true
+    orchestrator: true
+    proxy: true
+
+  # The default SmartUpdate strategy needs orchestrator; without it the CRD
+  # insists on plain RollingUpdate.
+  updateStrategy: RollingUpdate
+
   mysql:
-    clusterType: group-replication
-    size: 3
-    # Expose the current group-replication primary as a stable Service
-    # (cluster1-mysql-primary). The operator re-points it on failover, so a
-    # single mysql_servers row in ProxySQL always reaches the writer.
+    clusterType: async
+    size: 2
+    image: percona/percona-server:8.4.8-8.1
+    # The operator's default anti-affinity is REQUIRED one-pod-per-node,
+    # which can never schedule 2 pods on a single-node kind cluster. "none"
+    # disables it — drop this on a real multi-node cluster.
+    affinity:
+      antiAffinityTopologyKey: "none"
+    # Expose the current primary as a stable Service (cluster1-mysql-primary).
+    # The operator re-points it on promotion, so it's always the writer.
     exposePrimary:
       enabled: true
     volumeSpec:
@@ -43,11 +66,16 @@ spec:
         resources:
           requests:
             storage: 2Gi
+
   orchestrator:
-    enabled: true
-    size: 3
+    enabled: false
+
   proxy:
     haproxy:
       enabled: false
     router:
       enabled: false
+
+  backup:
+    enabled: false
+    image: percona/percona-xtrabackup:8.4.0-5.1

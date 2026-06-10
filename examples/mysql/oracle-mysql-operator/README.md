@@ -2,33 +2,37 @@
 
 ProxySQL in front of [Oracle's MySQL Operator for Kubernetes](https://github.com/mysql/mysql-operator).
 
+**ProxySQL replaces MySQL Router here.** The InnoDBCluster runs with
+`router.instances: 0` — ProxySQL talks straight to the MySQL instance via the
+operator's `mycluster-instances` headless Service and provides the access
+layer (connection multiplexing, query rules, stats) that Router would
+otherwise be.
+
+> **kind-sized demo.** One server instance keeps this light enough for a
+> laptop kind cluster. With `instances: 1` there's no Group Replication
+> failover, so everything sits in hostgroup 0. For real HA bump `instances`
+> to 3 and add the secondaries to hostgroup 1 — and note that ProxySQL-native
+> tracking of GR topology (`mysql_group_replication_hostgroups`) is on the
+> post-v2 CRD roadmap; until then, re-point hostgroup 0 manually or via the
+> operator's primary labels on failover.
+
 ## What this example creates
 
-- An `InnoDBCluster` (`mysql.oracle.com/v2`) with 3 instances + 1 MySQL Router pod.
+- A 1-instance `InnoDBCluster` (`mysql.oracle.com/v2`) with **0** Router pods
+  and self-signed TLS.
 - A `ProxySQLCluster` (3 replicas).
-- A `ProxySQLConfig` that targets the Router's R/W (6446) and R/O (6447) ports
-  as hostgroup 0 / 1 respectively. Letting Router decide which instance is
-  primary keeps the example simple; ProxySQL adds connection multiplexing,
-  query rules, and statistics on top.
-
-> If you need ProxySQL itself to monitor group-replication health (rather
-> than relying on the Router), the CRD field for `mysql_group_replication_hostgroups`
-> is on the post-v2 roadmap. Until then, this example is the simplest reliable
-> wiring.
+- A `ProxySQLConfig` with hostgroup 0 → `mycluster-0` over TLS (MySQL 8.4/9.x
+  accounts use `caching_sha2_password`, which wants a secure channel — note
+  the `useSSL: true` on the server entry).
 
 ## Install order
 
 ```bash
-# 1. Oracle MySQL Operator (once per cluster).
+# 1. Oracle MySQL Operator (once per cluster), pinned.
 helm repo add mysql-operator https://mysql.github.io/mysql-operator/
-helm install mysql-operator mysql-operator/mysql-operator -n mysql-operator --create-namespace
+helm install mysql-operator mysql-operator/mysql-operator --version 2.2.8 -n mysql-operator --create-namespace
 
-# 2. Namespace + backend root secret + InnoDBCluster.
-kubectl create namespace oracle-mysql-demo
-kubectl -n oracle-mysql-demo create secret generic mycluster-secret \
-  --from-literal=rootUser=root \
-  --from-literal=rootHost=% \
-  --from-literal=rootPassword="$(openssl rand -hex 16)"
+# 2. Namespace + root secret + InnoDBCluster.
 kubectl apply -f backend.yaml
 
 # 3. Wait for the InnoDBCluster to reach status ONLINE (can take ~3 min).
@@ -47,13 +51,10 @@ kubectl -n oracle-mysql-demo get proxysqlconfig pxcfg -w
 
 ```bash
 ROOT_PW=$(kubectl -n oracle-mysql-demo get secret mycluster-secret -o jsonpath='{.data.rootPassword}' | base64 -d)
-kubectl -n oracle-mysql-demo exec -it sts/proxysql -- \
-  mysql -h 127.0.0.1 -P 6033 -uroot -p"$ROOT_PW" \
-  -e "SELECT @@hostname, @@read_only"
+kubectl -n oracle-mysql-demo run -it --rm mysql-cli --image=mysql:8.4 --restart=Never --env=MYSQL_PWD="$ROOT_PW" -- \
+  mysql -h proxysql -P 6033 -uroot -e "SELECT @@hostname, @@version"
 ```
 
-The operator runs ProxySQL as a StatefulSet, so the exec target is
-`sts/proxysql`. Run it twice — you should see different hostnames as ProxySQL
-load-balances through Router. Or run the
-[sysbench loadgen](../../loadgen/sysbench.yaml) with
+You should get `mycluster-0` and the MySQL server version (9.x with operator
+chart 2.2.8). Or run the [sysbench loadgen](../../loadgen/sysbench.yaml) with
 `HOST=proxysql.oracle-mysql-demo.svc` for sustained traffic.

@@ -35,10 +35,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Validated end-to-end. Others (percona-ps, percona-pxc,
-        # oracle-mysql-operator, crunchy-pgo) are stubbed in smoke.sh and added
-        # here as their harness support lands.
-        example: [cloudnativepg, mariadb-operator]
+        # One leg per backend-operator cookbook under examples/ — all six
+        # validated end-to-end.
+        example:
+          [
+            cloudnativepg,
+            mariadb-operator,
+            percona-ps,
+            percona-pxc,
+            oracle-mysql-operator,
+            crunchy-pgo,
+          ]
     steps:
       - uses: actions/checkout@v4
 

@@ -11,10 +11,11 @@ metadata:
 spec:
   postgresVersion: 16
 
-  # Three Postgres instances under Patroni control.
+  # One Postgres instance keeps the example kind-sized. For real HA set
+  # replicas: 3 and add `hippo-replicas` to hostgroup 1 in proxysql.yaml.
   instances:
     - name: instance1
-      replicas: 3
+      replicas: 1
       dataVolumeClaimSpec:
         accessModes: [ReadWriteOnce]
         resources:
@@ -33,11 +34,25 @@ spec:
                 requests:
                   storage: 2Gi
 
-  # Declare an application user. PGO creates a Secret named
-  # `hippo-pguser-app` holding its password — ProxySQL references that
-  # secret directly.
+  # PGO's generated pg_hba only contains `hostssl` rules, i.e. it REQUIRES
+  # TLS from every client. The ProxySQL operator's `pgsqlServers` entries
+  # can't enable backend TLS yet (no useSSL field on the pgsql side), so we
+  # append a rule that also accepts non-TLS connections, password-checked
+  # with SCRAM. PGO still prepends its own mandatory entries (certificate
+  # auth for replication), so only ordinary client traffic is affected.
+  # Drop this once ProxySQL→Postgres TLS is wired through the CRD.
+  patroni:
+    dynamicConfiguration:
+      postgresql:
+        pg_hba:
+          - "host all all all scram-sha-256"
+
+  # Declare the users PGO should manage. Each gets a Secret named
+  # `hippo-pguser-<user>` holding its password — ProxySQL references those
+  # secrets directly. Declaring `postgres` makes PGO manage (and expose) the
+  # superuser's password too; without it no hippo-pguser-postgres exists.
   users:
     - name: app
       databases:
         - app
-      options: "LOGIN"
+    - name: postgres

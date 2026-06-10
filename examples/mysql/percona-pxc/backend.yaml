@@ -16,22 +16,33 @@ stringData:
   proxyadmin: "REPLACE-ME-proxyadmin"
   replication: "REPLACE-ME-replication"
 ---
+# A 3-node Galera cluster — 3 is the PXC quorum minimum and the operator's
+# safe default. (If even this is too heavy for your kind node, the operator
+# accepts `unsafeFlags.pxcSize: true` + `pxc.size: 1`, but that defeats the
+# point of Galera — demo-only.)
 apiVersion: pxc.percona.com/v1
 kind: PerconaXtraDBCluster
 metadata:
   name: cluster1
   namespace: percona-pxc-demo
 spec:
+  crVersion: 1.20.0
   secretsName: cluster1-secrets
   pxc:
     size: 3
-    image: percona/percona-xtradb-cluster:8.0.39-30.1
+    image: percona/percona-xtradb-cluster:8.4.8-8.1
+    # The operator's default anti-affinity is REQUIRED one-pod-per-node,
+    # which can never schedule 3 pods on a single-node kind cluster. "none"
+    # disables it — drop this on a real multi-node cluster.
+    affinity:
+      antiAffinityTopologyKey: "none"
     volumeSpec:
       persistentVolumeClaim:
         resources:
           requests:
-            storage: 5Gi
-  # We're providing our own ProxySQL via the operator — disable Percona's.
+            storage: 2Gi
+  # We're providing our own ProxySQL via the ProxySQL operator — disable
+  # Percona's bundled proxies. (The PXC operator allows running proxy-less.)
   haproxy:
     enabled: false
   proxysql:

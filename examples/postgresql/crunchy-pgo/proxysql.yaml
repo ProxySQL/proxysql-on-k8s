@@ -18,31 +18,23 @@ spec:
   clusterRef:
     name: proxysql
   pgsqlServers:
-    # PGO's `<cluster>-primary` Service tracks the current Patroni leader.
+    # PGO's `<cluster>-primary` Service tracks the current Patroni leader —
+    # Patroni re-points it on failover, so this row always reaches the writer.
+    # With a single instance (backend.yaml) there are no standbys; if you
+    # scale `replicas` up, add `hippo-replicas.crunchy-demo.svc.cluster.local`
+    # here as hostgroup 1 and split reads like the cloudnativepg example.
     - hostgroup: 0
       hostname: hippo-primary.crunchy-demo.svc.cluster.local
       port: 5432
       comment: "Patroni leader"
-    # `<cluster>-replicas` selects the standby instances only.
-    - hostgroup: 1
-      hostname: hippo-replicas.crunchy-demo.svc.cluster.local
-      port: 5432
-      comment: "Patroni standbys"
   pgsqlUsers:
     - username: app
-      defaultHostgroup: 1
+      defaultHostgroup: 0
       passwordSecretRef:
-        name: hippo-pguser-app
+        name: hippo-pguser-app # PGO-managed
         key: password
     - username: postgres
       defaultHostgroup: 0
       passwordSecretRef:
-        name: hippo-pguser-postgres
+        name: hippo-pguser-postgres # PGO-managed (requires `postgres` in spec.users)
         key: password
-  pgsqlQueryRules:
-    - ruleId: 100
-      active: true
-      matchPattern: "^(INSERT|UPDATE|DELETE|BEGIN|COMMIT|ROLLBACK)"
-      destinationHostgroup: 0
-      apply: true
-      comment: "mutating statements → primary"
