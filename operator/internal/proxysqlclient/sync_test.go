@@ -51,6 +51,7 @@ func TestSync_EmptyDesired_StillIssuesDeletesAndLoadSaves(t *testing.T) {
 	mustSee := []string{
 		"DELETE FROM mysql_servers",
 		"DELETE FROM mysql_replication_hostgroups",
+		"DELETE FROM mysql_hostgroup_attributes",
 		"DELETE FROM mysql_users",
 		"DELETE FROM mysql_query_rules",
 		"DELETE FROM pgsql_servers",
@@ -192,6 +193,173 @@ func TestSync_Quote_StripsNulAndControlBytes(t *testing.T) {
 	// A legitimate newline inside a comment must be preserved.
 	if !strings.Contains(insert, "'line1\nline2'") {
 		t.Errorf("newline in comment should be preserved; got %q", insert)
+	}
+}
+
+// findInsert returns the first recorded query that is an INSERT into table.
+func findInsert(t *testing.T, rec *recorder, table string) string {
+	t.Helper()
+	for _, q := range rec.queries {
+		if strings.HasPrefix(q, "INSERT INTO "+table+" ") {
+			return q
+		}
+	}
+	t.Fatalf("no INSERT into %s issued; queries=%v", table, rec.queries)
+	return ""
+}
+
+func TestSync_MySQLQueryRules_FullRule_RendersAllColumns(t *testing.T) {
+	rec := &recorder{}
+	active, apply, logQ, cacheEmpty := true, true, true, false
+	flagIn, flagOut := int32(5), int32(6)
+	dest, mirror := int32(2), int32(3)
+	cacheTTL, timeout, delay := int32(5000), int32(1000), int32(10)
+	d := &Desired{MySQLQueryRules: []MySQLQueryRule{{
+		RuleID: 10, Active: &active, Username: "app", SchemaName: "appdb",
+		FlagIn: &flagIn, MatchPattern: "^SELECT slow", MatchDigest: "dig",
+		FlagOut: &flagOut, ReplacePattern: "SELECT fast",
+		DestinationHostgroup: &dest, CacheTTL: &cacheTTL, CacheEmptyResult: &cacheEmpty,
+		Timeout: &timeout, Delay: &delay, MirrorHostgroup: &mirror,
+		ErrorMessage: "denied", Log: &logQ, Apply: &apply, Comment: "c",
+	}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insert := findInsert(t, rec, "mysql_query_rules")
+	want := "INSERT INTO mysql_query_rules (rule_id,active,username,schemaname,flagIN," +
+		"match_pattern,match_digest,flagOUT,replace_pattern,destination_hostgroup," +
+		"cache_ttl,cache_empty_result,timeout,delay,mirror_hostgroup,error_msg,log,apply,comment) VALUES " +
+		"(10,1,'app','appdb',5,'^SELECT slow','dig',6,'SELECT fast',2,5000,0,1000,10,3,'denied',1,1,'c')"
+	if insert != want {
+		t.Errorf("mysql_query_rules INSERT mismatch:\n got: %s\nwant: %s", insert, want)
+	}
+}
+
+func TestSync_MySQLQueryRules_EmptyRule_DefaultsAndNulls(t *testing.T) {
+	rec := &recorder{}
+	d := &Desired{MySQLQueryRules: []MySQLQueryRule{{RuleID: 7}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insert := findInsert(t, rec, "mysql_query_rules")
+	// flagIN is NOT NULL DEFAULT 0 → 0; all genuinely nullable columns
+	// (flagOUT, replace_pattern, destination_hostgroup, cache_ttl,
+	// cache_empty_result, timeout, delay, mirror_hostgroup, error_msg, log)
+	// must be NULL when unset. In particular replace_pattern='' would rewrite
+	// matching queries to an empty string and a non-NULL error_msg would block
+	// them — unset string fields must render as NULL, not ''.
+	want := "(7,1,'','',0,'','',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,'')"
+	if !strings.HasSuffix(insert, want) {
+		t.Errorf("mysql_query_rules empty-rule row mismatch:\n got: %s\nwant suffix: %s", insert, want)
+	}
+}
+
+func TestSync_PostgreSQLQueryRules_FullRule_RendersAllColumns(t *testing.T) {
+	rec := &recorder{}
+	active, apply, logQ, cacheEmpty := true, true, false, true
+	flagIn, flagOut := int32(4), int32(9)
+	dest, mirror := int32(1), int32(7)
+	cacheTTL, timeout, delay := int32(250), int32(2000), int32(5)
+	d := &Desired{PostgreSQLQueryRules: []PostgreSQLQueryRule{{
+		RuleID: 20, Active: &active, FlagIn: &flagIn, MatchPattern: "^SELECT pg",
+		FlagOut: &flagOut, ReplacePattern: "SELECT pg2",
+		DestinationHostgroup: &dest, CacheTTL: &cacheTTL, CacheEmptyResult: &cacheEmpty,
+		Timeout: &timeout, Delay: &delay, MirrorHostgroup: &mirror,
+		ErrorMessage: "nope", Log: &logQ, Apply: &apply, Comment: "pgc",
+	}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insert := findInsert(t, rec, "pgsql_query_rules")
+	want := "INSERT INTO pgsql_query_rules (rule_id,active,flagIN,match_pattern,flagOUT," +
+		"replace_pattern,destination_hostgroup,cache_ttl,cache_empty_result,timeout,delay," +
+		"mirror_hostgroup,error_msg,log,apply,comment) VALUES " +
+		"(20,1,4,'^SELECT pg',9,'SELECT pg2',1,250,1,2000,5,7,'nope',0,1,'pgc')"
+	if insert != want {
+		t.Errorf("pgsql_query_rules INSERT mismatch:\n got: %s\nwant: %s", insert, want)
+	}
+}
+
+func TestSync_PostgreSQLQueryRules_EmptyRule_DefaultsAndNulls(t *testing.T) {
+	rec := &recorder{}
+	d := &Desired{PostgreSQLQueryRules: []PostgreSQLQueryRule{{RuleID: 8}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insert := findInsert(t, rec, "pgsql_query_rules")
+	want := "(8,1,0,'',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,'')"
+	if !strings.HasSuffix(insert, want) {
+		t.Errorf("pgsql_query_rules empty-rule row mismatch:\n got: %s\nwant suffix: %s", insert, want)
+	}
+}
+
+func TestSync_MySQLHostgroupAttributes_FullRow_RendersAllColumns(t *testing.T) {
+	rec := &recorder{}
+	maxOnline, autocommit, freePct, throttle := int32(5), int32(1), int32(20), int32(500)
+	multiplex, warming := false, true
+	d := &Desired{MySQLHostgroupAttributes: []MySQLHostgroupAttributes{{
+		Hostgroup:           10,
+		MaxNumOnlineServers: &maxOnline, Autocommit: &autocommit,
+		FreeConnectionsPct: &freePct, InitConnect: "SET sql_mode=STRICT_ALL_TABLES",
+		Multiplex: &multiplex, ConnectionWarming: &warming,
+		ThrottleConnectionsPerSec: &throttle,
+		IgnoreSessionVariables:    `["sql_log_bin"]`,
+		Comment:                   "hg10",
+	}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insert := findInsert(t, rec, "mysql_hostgroup_attributes")
+	want := "INSERT INTO mysql_hostgroup_attributes (hostgroup_id,max_num_online_servers," +
+		"autocommit,free_connections_pct,init_connect,multiplex,connection_warming," +
+		"throttle_connections_per_sec,ignore_session_variables,comment) VALUES " +
+		"(10,5,1,20,'SET sql_mode=STRICT_ALL_TABLES',0,1,500,'[\"sql_log_bin\"]','hg10')"
+	if insert != want {
+		t.Errorf("mysql_hostgroup_attributes INSERT mismatch:\n got: %s\nwant: %s", insert, want)
+	}
+}
+
+func TestSync_MySQLHostgroupAttributes_EmptyRow_RendersColumnDefaults(t *testing.T) {
+	rec := &recorder{}
+	d := &Desired{MySQLHostgroupAttributes: []MySQLHostgroupAttributes{{Hostgroup: 7}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insert := findInsert(t, rec, "mysql_hostgroup_attributes")
+	// Every column is NOT NULL with a ProxySQL default; unset fields must emit
+	// those defaults (max_num_online_servers=1000000, autocommit=-1,
+	// free_connections_pct=10, multiplex=1, connection_warming=0,
+	// throttle_connections_per_sec=1000000, strings=''), never NULL.
+	want := "(7,1000000,-1,10,'',1,0,1000000,'','')"
+	if !strings.HasSuffix(insert, want) {
+		t.Errorf("mysql_hostgroup_attributes empty-row mismatch:\n got: %s\nwant suffix: %s", insert, want)
+	}
+}
+
+func TestSync_MySQLHostgroupAttributes_WrittenBeforeMySQLServersLoad(t *testing.T) {
+	// mysql_hostgroup_attributes is part of the MYSQL SERVERS load/save
+	// family (verified live: rows appear in runtime_mysql_hostgroup_attributes
+	// only after LOAD MYSQL SERVERS TO RUNTIME). The table write must
+	// therefore land before the shared mysql_servers_apply step.
+	rec := &recorder{}
+	d := &Desired{MySQLHostgroupAttributes: []MySQLHostgroupAttributes{{Hostgroup: 1}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insertIdx, loadIdx := -1, -1
+	for i, q := range rec.queries {
+		if strings.HasPrefix(q, "INSERT INTO mysql_hostgroup_attributes ") {
+			insertIdx = i
+		}
+		if q == "LOAD MYSQL SERVERS TO RUNTIME" {
+			loadIdx = i
+		}
+	}
+	if insertIdx < 0 || loadIdx < 0 {
+		t.Fatalf("missing insert (%d) or load (%d); queries=%v", insertIdx, loadIdx, rec.queries)
+	}
+	if insertIdx > loadIdx {
+		t.Errorf("mysql_hostgroup_attributes INSERT (idx %d) must precede LOAD MYSQL SERVERS TO RUNTIME (idx %d)", insertIdx, loadIdx)
 	}
 }
 

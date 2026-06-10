@@ -86,8 +86,9 @@ func (b *Builder) podSpec() corev1.PodSpec {
 			{
 				Name: "config",
 				VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: b.Name()},
+					// Secret, not ConfigMap: the rendered cnf embeds passwords.
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: b.CnfSecretName(),
 						Items: []corev1.KeyToPath{
 							{Key: "proxysql.cnf", Path: "proxysql.cnf"},
 						},

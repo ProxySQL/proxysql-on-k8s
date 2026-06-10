@@ -318,11 +318,28 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 			CheckType: h.CheckType, Comment: h.Comment,
 		})
 	}
+	for _, a := range cfg.Spec.MySQLHostgroupAttributes {
+		d.MySQLHostgroupAttributes = append(d.MySQLHostgroupAttributes, proxysqlclient.MySQLHostgroupAttributes{
+			Hostgroup:           a.Hostgroup,
+			MaxNumOnlineServers: a.MaxNumOnlineServers, Autocommit: a.Autocommit,
+			FreeConnectionsPct: a.FreeConnectionsPct, InitConnect: a.InitConnect,
+			Multiplex: a.Multiplex, ConnectionWarming: a.ConnectionWarming,
+			ThrottleConnectionsPerSec: a.ThrottleConnectionsPerSec,
+			IgnoreSessionVariables:    a.IgnoreSessionVariables,
+			Comment:                   a.Comment,
+		})
+	}
 	for _, r2 := range cfg.Spec.MySQLQueryRules {
 		d.MySQLQueryRules = append(d.MySQLQueryRules, proxysqlclient.MySQLQueryRule{
 			RuleID: r2.RuleID, Active: r2.Active, Username: r2.Username,
-			SchemaName: r2.SchemaName, MatchPattern: r2.MatchPattern, MatchDigest: r2.MatchDigest,
-			DestinationHostgroup: r2.DestinationHostgroup, Apply: r2.Apply, Comment: r2.Comment,
+			SchemaName: r2.SchemaName, FlagIn: r2.FlagIn,
+			MatchPattern: r2.MatchPattern, MatchDigest: r2.MatchDigest,
+			FlagOut: r2.FlagOut, ReplacePattern: r2.ReplacePattern,
+			DestinationHostgroup: r2.DestinationHostgroup,
+			CacheTTL:             r2.CacheTTL, CacheEmptyResult: r2.CacheEmptyResult,
+			Timeout: r2.Timeout, Delay: r2.Delay, MirrorHostgroup: r2.MirrorHostgroup,
+			ErrorMessage: r2.ErrorMessage, Log: r2.Log,
+			Apply: r2.Apply, Comment: r2.Comment,
 		})
 	}
 	for _, u := range cfg.Spec.MySQLUsers {
@@ -356,8 +373,14 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 	}
 	for _, r2 := range cfg.Spec.PostgreSQLQueryRules {
 		d.PostgreSQLQueryRules = append(d.PostgreSQLQueryRules, proxysqlclient.PostgreSQLQueryRule{
-			RuleID: r2.RuleID, Active: r2.Active, MatchPattern: r2.MatchPattern,
-			DestinationHostgroup: r2.DestinationHostgroup, Apply: r2.Apply, Comment: r2.Comment,
+			RuleID: r2.RuleID, Active: r2.Active, FlagIn: r2.FlagIn,
+			MatchPattern: r2.MatchPattern,
+			FlagOut:      r2.FlagOut, ReplacePattern: r2.ReplacePattern,
+			DestinationHostgroup: r2.DestinationHostgroup,
+			CacheTTL:             r2.CacheTTL, CacheEmptyResult: r2.CacheEmptyResult,
+			Timeout: r2.Timeout, Delay: r2.Delay, MirrorHostgroup: r2.MirrorHostgroup,
+			ErrorMessage: r2.ErrorMessage, Log: r2.Log,
+			Apply: r2.Apply, Comment: r2.Comment,
 		})
 	}
 	for _, s := range cfg.Spec.ProxySQLServers {

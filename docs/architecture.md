@@ -59,7 +59,7 @@ Owned objects (all with `OwnerReference{controller=true, blockOwnerDeletion=true
 | Object | Name | Purpose |
 | --- | --- | --- |
 | `Secret` | `<cluster>` *or* `spec.auth.secretName` | `admin-password`, `radmin-password`, `monitor-password`. Operator-minted when `spec.auth.secretName` is empty; user-managed otherwise. |
-| `ConfigMap` | `<cluster>` | Bootstrap `proxysql.cnf` — only enough to start the admin port. Backends, users, query rules all come from `ProxySQLConfig`. |
+| `Secret` | `<cluster>-cnf` | Bootstrap `proxysql.cnf` — only enough to start the admin port. A Secret because the rendered cnf embeds the admin/radmin/monitor passwords. Backends, users, query rules all come from `ProxySQLConfig`. |
 | `Service` | `<cluster>` | ClusterIP. Exposes the enabled protocol ports + metrics + the stats web UI (when enabled). |
 | `Service` | `<cluster>-headless` | `ClusterIP=None`, `publishNotReadyAddresses=true`. Used as the StatefulSet's `serviceName` so pods get stable DNS for ProxySQL Cluster sync. |
 | `StatefulSet` | `<cluster>` | The pods. Annotated with `proxysql.com/cnf-checksum` so a content change triggers a rolling restart. PVC template optional (`spec.persistence.enabled`). |
@@ -87,8 +87,9 @@ external pollers):
 ### `ProxySQLConfig` — the declarative configuration
 
 What it represents: the set of `mysql_servers`, `mysql_users`,
-`mysql_query_rules`, `mysql_replication_hostgroups`, `pgsql_servers`,
-`pgsql_users`, `pgsql_query_rules`, `proxysql_servers`, and global
+`mysql_query_rules`, `mysql_replication_hostgroups`,
+`mysql_hostgroup_attributes`, `pgsql_servers`, `pgsql_users`,
+`pgsql_query_rules`, `proxysql_servers`, and global
 variables (`admin_variables` / `mysql_variables` / `pgsql_variables`)
 that should be applied to the target `ProxySQLCluster`.
 
@@ -127,7 +128,8 @@ fetch CR
 
 build a Builder with defaulted spec + passwords
 
-ensure ConfigMap     (CreateOrUpdate; SetControllerReference)
+ensure cnf Secret    (CreateOrUpdate; SetControllerReference)
+  └─► garbage-collect the legacy <cluster> cnf ConfigMap (< v0.3.0), if owned
 ensure Service       (preserves immutable ClusterIP/s on update)
 ensure HeadlessSvc
 ensure StatefulSet   (cnf-checksum annotation; selector immutable post-create)
@@ -141,7 +143,7 @@ update status from the live StatefulSet
 Triggers (`SetupWithManager`):
 
 - `For(ProxySQLCluster)` — the CR itself
-- `Owns(StatefulSet, Service, Secret, ConfigMap, PodDisruptionBudget)` — re-reconcile when an owned object drifts
+- `Owns(StatefulSet, Service, Secret, PodDisruptionBudget)` — re-reconcile when an owned object drifts
 
 #### Admin Secret schemas
 
@@ -287,15 +289,17 @@ directly**. Two reasons:
    config immediately. Cluster sync still operates as the
    belt-and-braces backup.
 
-### Why is the bootstrap `proxysql.cnf` rendered into a ConfigMap rather than a Secret?
+### Why is the bootstrap `proxysql.cnf` rendered into a Secret?
 
 The cnf has to contain the admin/radmin/monitor passwords for ProxySQL
-to boot listening on its admin port. Today those passwords land in a
-ConfigMap — which in Kubernetes has the same RBAC + base64 security
-boundary as a Secret. The distinction is mostly conventional and ops
-ergonomics (kubectl-get is human-readable). Switching to a Secret-backed
-cnf via an entrypoint substitution pattern is tracked as a future
-enhancement; the code paths are already isolated in `builders/configmap.go`.
+to boot listening on its admin port, so it ships in the `<cluster>-cnf`
+Secret (the `-cnf` suffix avoids colliding with the auth Secret, which
+defaults to the bare cluster name). Versions before v0.3.0 used a
+ConfigMap named after the cluster; on upgrade the reconciler deletes
+that leftover ConfigMap (only when it carries the cluster's controller
+ownerReference) and the cnf-checksum annotation rolls the pods onto the
+Secret-backed mount seamlessly. The builder lives in
+`builders/cnf_secret.go`.
 
 ### Why `*bool` for `Enabled` fields?
 
@@ -325,7 +329,7 @@ Each ProxySQL pod runs a single container (no sidecars) configured for
 - `seccompProfile.type=RuntimeDefault`
 
 `/etc/proxysql/proxysql.cnf` is mounted from the operator-managed
-ConfigMap (read-only). `/var/lib/proxysql` is either a per-pod PVC
+`<cluster>-cnf` Secret (read-only). `/var/lib/proxysql` is either a per-pod PVC
 (default) or an emptyDir (when `spec.persistence.enabled=false`).
 
 Probes:

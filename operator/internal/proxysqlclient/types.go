@@ -27,6 +27,7 @@ type Desired struct {
 	MySQLUsers                 []MySQLUser
 	MySQLQueryRules            []MySQLQueryRule
 	MySQLReplicationHostgroups []MySQLReplicationHostgroup
+	MySQLHostgroupAttributes   []MySQLHostgroupAttributes
 
 	PostgreSQLServers    []PostgreSQLServer
 	PostgreSQLUsers      []PostgreSQLUser
@@ -71,9 +72,19 @@ type MySQLQueryRule struct {
 	Active               *bool
 	Username             string
 	SchemaName           string
+	FlagIn               *int32 // flagIN: NOT NULL DEFAULT 0
 	MatchPattern         string
 	MatchDigest          string
+	FlagOut              *int32 // flagOUT: nullable
+	ReplacePattern       string // replace_pattern: nullable, "" renders as NULL
 	DestinationHostgroup *int32
+	CacheTTL             *int32 // cache_ttl (ms): nullable
+	CacheEmptyResult     *bool  // cache_empty_result: nullable
+	Timeout              *int32 // timeout (ms): nullable
+	Delay                *int32 // delay (ms): nullable
+	MirrorHostgroup      *int32 // mirror_hostgroup: nullable
+	ErrorMessage         string // error_msg: nullable, "" renders as NULL
+	Log                  *bool  // log: nullable
 	Apply                *bool
 	Comment              string
 }
@@ -84,6 +95,22 @@ type MySQLReplicationHostgroup struct {
 	ReaderHostgroup int32
 	CheckType       string
 	Comment         string
+}
+
+// MySQLHostgroupAttributes is the resolved form of a mysql_hostgroup_attributes
+// row. Every column in the ProxySQL 3.0 table is NOT NULL with a default, so
+// unset pointer fields render the column default rather than NULL.
+type MySQLHostgroupAttributes struct {
+	Hostgroup                 int32
+	MaxNumOnlineServers       *int32
+	Autocommit                *int32
+	FreeConnectionsPct        *int32
+	InitConnect               string
+	Multiplex                 *bool
+	ConnectionWarming         *bool
+	ThrottleConnectionsPerSec *int32
+	IgnoreSessionVariables    string
+	Comment                   string
 }
 
 // PostgreSQLServer is the resolved form of a pgsql_servers row.
@@ -106,11 +133,23 @@ type PostgreSQLUser struct {
 }
 
 // PostgreSQLQueryRule is the resolved form of a pgsql_query_rules row.
+// ProxySQL 3.x pgsql_query_rules has the same rewriting/mirroring/caching/
+// chaining columns as mysql_query_rules.
 type PostgreSQLQueryRule struct {
 	RuleID               int32
 	Active               *bool
+	FlagIn               *int32 // flagIN: NOT NULL DEFAULT 0
 	MatchPattern         string
+	FlagOut              *int32 // flagOUT: nullable
+	ReplacePattern       string // replace_pattern: nullable, "" renders as NULL
 	DestinationHostgroup *int32
+	CacheTTL             *int32 // cache_ttl (ms): nullable
+	CacheEmptyResult     *bool  // cache_empty_result: nullable
+	Timeout              *int32 // timeout (ms): nullable
+	Delay                *int32 // delay (ms): nullable
+	MirrorHostgroup      *int32 // mirror_hostgroup: nullable
+	ErrorMessage         string // error_msg: nullable, "" renders as NULL
+	Log                  *bool  // log: nullable
 	Apply                *bool
 	Comment              string
 }

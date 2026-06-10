@@ -24,8 +24,9 @@ import (
 // ProxySQLConfigSpec is the declarative ProxySQL configuration the operator
 // pushes to a target ProxySQLCluster via its admin port. Fields map 1:1 to
 // the ProxySQL admin tables: mysql_servers, mysql_users, mysql_query_rules,
-// mysql_replication_hostgroups, pgsql_servers, pgsql_users, pgsql_query_rules,
-// proxysql_servers, plus admin/mysql/pgsql variables.
+// mysql_replication_hostgroups, mysql_hostgroup_attributes, pgsql_servers,
+// pgsql_users, pgsql_query_rules, proxysql_servers, plus admin/mysql/pgsql
+// variables.
 type ProxySQLConfigSpec struct {
 	// ClusterRef points to the ProxySQLCluster this config applies to.
 	// Must exist in the same namespace.
@@ -51,6 +52,10 @@ type ProxySQLConfigSpec struct {
 	// +listType=map
 	// +listMapKey=writerHostgroup
 	MySQLReplicationHostgroups []MySQLReplicationHostgroup `json:"mysqlReplicationHostgroups,omitempty"`
+	// +optional
+	// +listType=map
+	// +listMapKey=hostgroup
+	MySQLHostgroupAttributes []MySQLHostgroupAttributes `json:"mysqlHostgroupAttributes,omitempty"`
 
 	// PostgreSQL backend topology (ProxySQL 3.x).
 	// +optional
@@ -144,6 +149,57 @@ type MySQLQueryRule struct {
 	MatchDigest string `json:"matchDigest,omitempty"`
 	// +optional
 	DestinationHostgroup *int32 `json:"destinationHostgroup,omitempty"`
+	// ReplacePattern is the replacement text applied to queries matching
+	// matchPattern (query rewriting). ProxySQL has a single replace_pattern
+	// column: matchPattern selects the text to replace, replacePattern is
+	// what it is rewritten to (RE2/PCRE backreferences like \1 supported).
+	// Unset means no rewriting.
+	// +optional
+	ReplacePattern string `json:"replacePattern,omitempty"`
+	// MirrorHostgroup additionally sends a copy of matching queries to this
+	// hostgroup (query mirroring). Maps to mirror_hostgroup; unset = no mirroring.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MirrorHostgroup *int32 `json:"mirrorHostgroup,omitempty"`
+	// Timeout in milliseconds for matching queries; queries running longer
+	// are killed. Maps to timeout; unset = mysql-default_query_timeout.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Timeout *int32 `json:"timeout,omitempty"`
+	// Delay in milliseconds applied to matching queries (throttling).
+	// Maps to delay; unset = no delay.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Delay *int32 `json:"delay,omitempty"`
+	// ErrorMessage blocks matching queries and returns this message to the
+	// client instead of executing them (query firewalling). Maps to error_msg.
+	// +optional
+	ErrorMessage string `json:"errorMessage,omitempty"`
+	// FlagIn assigns this rule to a chaining flag: the rule is only evaluated
+	// for queries whose current flag equals flagIn. Defaults to 0, the entry
+	// point of the rule chain. Maps to flagIN.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	FlagIn *int32 `json:"flagIn,omitempty"`
+	// FlagOut sets the flag used to evaluate subsequent rules when this rule
+	// matches (rule chaining). Maps to flagOUT; unset = keep current flag.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	FlagOut *int32 `json:"flagOut,omitempty"`
+	// Log enables query logging for matching queries. Maps to log; unset
+	// inherits ProxySQL's default behavior.
+	// +optional
+	Log *bool `json:"log,omitempty"`
+	// CacheTTL in milliseconds enables the query cache for matching queries:
+	// resultsets are cached and served for this long. Maps to cache_ttl;
+	// unset = no caching.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CacheTTL *int32 `json:"cacheTTL,omitempty"`
+	// CacheEmptyResult controls whether empty resultsets are cached too.
+	// Only meaningful together with cacheTTL. Maps to cache_empty_result.
+	// +optional
+	CacheEmptyResult *bool `json:"cacheEmptyResult,omitempty"`
 	// +optional
 	Apply *bool `json:"apply,omitempty"`
 	// +optional
@@ -158,6 +214,60 @@ type MySQLReplicationHostgroup struct {
 	// +kubebuilder:default=read_only
 	// +kubebuilder:validation:Enum=read_only;innodb_read_only;super_read_only;read_only|innodb_read_only;read_only&innodb_read_only
 	CheckType string `json:"checkType,omitempty"`
+	// +optional
+	Comment string `json:"comment,omitempty"`
+}
+
+// MySQLHostgroupAttributes maps to a row in mysql_hostgroup_attributes,
+// per-hostgroup connection-handling behavior. Unset optional fields fall back
+// to ProxySQL's column defaults.
+type MySQLHostgroupAttributes struct {
+	// Hostgroup is the mysql_hostgroup_attributes.hostgroup_id this row applies to.
+	// +kubebuilder:validation:Minimum=0
+	Hostgroup int32 `json:"hostgroup"`
+	// MaxNumOnlineServers caps how many servers in the hostgroup are treated
+	// as ONLINE. Maps to max_num_online_servers; ProxySQL default 1000000.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000000
+	MaxNumOnlineServers *int32 `json:"maxNumOnlineServers,omitempty"`
+	// Autocommit enforces autocommit on backend connections of this hostgroup:
+	// -1 = don't enforce (ProxySQL default), 0 = force off, 1 = force on.
+	// +optional
+	// +kubebuilder:validation:Enum=-1;0;1
+	Autocommit *int32 `json:"autocommit,omitempty"`
+	// FreeConnectionsPct is the percentage of mysql-max_connections kept open
+	// to the hostgroup as warm free connections. Maps to free_connections_pct;
+	// ProxySQL default 10.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	FreeConnectionsPct *int32 `json:"freeConnectionsPct,omitempty"`
+	// InitConnect is SQL executed on every new backend connection to this
+	// hostgroup, overriding mysql-init_connect. Maps to init_connect.
+	// +optional
+	InitConnect string `json:"initConnect,omitempty"`
+	// Multiplex enables/disables connection multiplexing for the hostgroup.
+	// Maps to multiplex; ProxySQL default true.
+	// +optional
+	Multiplex *bool `json:"multiplex,omitempty"`
+	// ConnectionWarming pre-opens free connections to reach
+	// freeConnectionsPct before serving traffic. Maps to connection_warming;
+	// ProxySQL default false.
+	// +optional
+	ConnectionWarming *bool `json:"connectionWarming,omitempty"`
+	// ThrottleConnectionsPerSec caps new backend connections per second to
+	// the hostgroup. Maps to throttle_connections_per_sec; ProxySQL default
+	// 1000000.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000000
+	ThrottleConnectionsPerSec *int32 `json:"throttleConnectionsPerSec,omitempty"`
+	// IgnoreSessionVariables is a JSON array of session variable names ProxySQL
+	// must not track for this hostgroup, e.g. ["sql_log_bin"]. Maps to
+	// ignore_session_variables; must be valid JSON (or unset).
+	// +optional
+	IgnoreSessionVariables string `json:"ignoreSessionVariables,omitempty"`
 	// +optional
 	Comment string `json:"comment,omitempty"`
 }
@@ -189,7 +299,9 @@ type PostgreSQLUser struct {
 	Comment string `json:"comment,omitempty"`
 }
 
-// PostgreSQLQueryRule maps to pgsql_query_rules.
+// PostgreSQLQueryRule maps to pgsql_query_rules. ProxySQL 3.x pgsql_query_rules
+// carries the same rewriting/mirroring/caching/chaining columns as
+// mysql_query_rules, so the optional fields below mirror MySQLQueryRule.
 type PostgreSQLQueryRule struct {
 	RuleID int32 `json:"ruleId"`
 	// +optional
@@ -198,6 +310,56 @@ type PostgreSQLQueryRule struct {
 	MatchPattern string `json:"matchPattern,omitempty"`
 	// +optional
 	DestinationHostgroup *int32 `json:"destinationHostgroup,omitempty"`
+	// ReplacePattern is the replacement text applied to queries matching
+	// matchPattern (query rewriting). ProxySQL has a single replace_pattern
+	// column: matchPattern selects the text to replace, replacePattern is
+	// what it is rewritten to. Unset means no rewriting.
+	// +optional
+	ReplacePattern string `json:"replacePattern,omitempty"`
+	// MirrorHostgroup additionally sends a copy of matching queries to this
+	// hostgroup (query mirroring). Maps to mirror_hostgroup; unset = no mirroring.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MirrorHostgroup *int32 `json:"mirrorHostgroup,omitempty"`
+	// Timeout in milliseconds for matching queries; queries running longer
+	// are killed. Maps to timeout; unset = global default.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Timeout *int32 `json:"timeout,omitempty"`
+	// Delay in milliseconds applied to matching queries (throttling).
+	// Maps to delay; unset = no delay.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Delay *int32 `json:"delay,omitempty"`
+	// ErrorMessage blocks matching queries and returns this message to the
+	// client instead of executing them (query firewalling). Maps to error_msg.
+	// +optional
+	ErrorMessage string `json:"errorMessage,omitempty"`
+	// FlagIn assigns this rule to a chaining flag: the rule is only evaluated
+	// for queries whose current flag equals flagIn. Defaults to 0, the entry
+	// point of the rule chain. Maps to flagIN.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	FlagIn *int32 `json:"flagIn,omitempty"`
+	// FlagOut sets the flag used to evaluate subsequent rules when this rule
+	// matches (rule chaining). Maps to flagOUT; unset = keep current flag.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	FlagOut *int32 `json:"flagOut,omitempty"`
+	// Log enables query logging for matching queries. Maps to log; unset
+	// inherits ProxySQL's default behavior.
+	// +optional
+	Log *bool `json:"log,omitempty"`
+	// CacheTTL in milliseconds enables the query cache for matching queries:
+	// resultsets are cached and served for this long. Maps to cache_ttl;
+	// unset = no caching.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CacheTTL *int32 `json:"cacheTTL,omitempty"`
+	// CacheEmptyResult controls whether empty resultsets are cached too.
+	// Only meaningful together with cacheTTL. Maps to cache_empty_result.
+	// +optional
+	CacheEmptyResult *bool `json:"cacheEmptyResult,omitempty"`
 	// +optional
 	Apply *bool `json:"apply,omitempty"`
 	// +optional

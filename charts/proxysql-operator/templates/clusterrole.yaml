@@ -10,8 +10,15 @@ metadata:
   labels:
     {{- include "proxysql-operator.labels" . | nindent 4 }}
 rules:
+  # configmaps: read + delete only — needed to garbage-collect the legacy
+  # bootstrap-cnf ConfigMap left behind by operator versions < v0.3.0. The
+  # operator no longer creates or updates any ConfigMap (the cnf lives in a
+  # Secret).
   - apiGroups: [""]
-    resources: [configmaps, secrets]
+    resources: [configmaps]
+    verbs: [delete, get, list, watch]
+  - apiGroups: [""]
+    resources: [secrets]
     verbs: [create, get, list, patch, update, watch]
   - apiGroups: [""]
     resources: [events]
