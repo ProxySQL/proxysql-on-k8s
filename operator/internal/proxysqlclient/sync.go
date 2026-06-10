@@ -193,19 +193,31 @@ func syncMySQLQueryRules(ctx context.Context, c Executor, d *Desired) error {
 	sort.Slice(rules, func(i, j int) bool { return rules[i].RuleID < rules[j].RuleID })
 
 	var b strings.Builder
-	b.WriteString("INSERT INTO mysql_query_rules (rule_id,active,username,schemaname,match_pattern,match_digest,destination_hostgroup,apply,comment) VALUES ")
+	b.WriteString("INSERT INTO mysql_query_rules (rule_id,active,username,schemaname,flagIN," +
+		"match_pattern,match_digest,flagOUT,replace_pattern,destination_hostgroup," +
+		"cache_ttl,cache_empty_result,timeout,delay,mirror_hostgroup,error_msg,log,apply,comment) VALUES ")
 	for i, r := range rules {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, "(%d,%s,%s,%s,%s,%s,%s,%s,%s)",
+		fmt.Fprintf(&b, "(%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
 			r.RuleID,
 			defBoolAsInt(r.Active, true), // a declared rule defaults to active
 			quote(r.Username),
 			quote(r.SchemaName),
+			defInt32(r.FlagIn, 0), // flagIN NOT NULL DEFAULT 0 (chain entry point)
 			quote(r.MatchPattern),
 			quote(r.MatchDigest),
+			nullableInt32(r.FlagOut),              // nullable: NULL = keep current flag
+			nullableString(r.ReplacePattern),      // nullable: '' would rewrite to empty query
 			nullableInt32(r.DestinationHostgroup), // nullable: NULL = no hostgroup override
+			nullableInt32(r.CacheTTL),             // nullable: NULL = no caching
+			nullableBoolAsInt(r.CacheEmptyResult), // nullable
+			nullableInt32(r.Timeout),              // nullable: NULL = global default
+			nullableInt32(r.Delay),                // nullable: NULL = no delay
+			nullableInt32(r.MirrorHostgroup),      // nullable: NULL = no mirroring
+			nullableString(r.ErrorMessage),        // nullable: non-NULL blocks the query
+			nullableBoolAsInt(r.Log),              // nullable
 			defBoolAsInt(r.Apply, false),          // mysql_query_rules.apply NOT NULL DEFAULT 0
 			quote(r.Comment),
 		)
@@ -279,16 +291,28 @@ func syncPostgreSQLQueryRules(ctx context.Context, c Executor, d *Desired) error
 	sort.Slice(rules, func(i, j int) bool { return rules[i].RuleID < rules[j].RuleID })
 
 	var b strings.Builder
-	b.WriteString("INSERT INTO pgsql_query_rules (rule_id,active,match_pattern,destination_hostgroup,apply,comment) VALUES ")
+	b.WriteString("INSERT INTO pgsql_query_rules (rule_id,active,flagIN,match_pattern,flagOUT," +
+		"replace_pattern,destination_hostgroup,cache_ttl,cache_empty_result,timeout,delay," +
+		"mirror_hostgroup,error_msg,log,apply,comment) VALUES ")
 	for i, r := range rules {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, "(%d,%s,%s,%s,%s,%s)",
+		fmt.Fprintf(&b, "(%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
 			r.RuleID,
 			defBoolAsInt(r.Active, true), // a declared rule defaults to active
+			defInt32(r.FlagIn, 0),        // flagIN NOT NULL DEFAULT 0 (chain entry point)
 			quote(r.MatchPattern),
+			nullableInt32(r.FlagOut),              // nullable: NULL = keep current flag
+			nullableString(r.ReplacePattern),      // nullable: '' would rewrite to empty query
 			nullableInt32(r.DestinationHostgroup), // nullable
+			nullableInt32(r.CacheTTL),             // nullable: NULL = no caching
+			nullableBoolAsInt(r.CacheEmptyResult), // nullable
+			nullableInt32(r.Timeout),              // nullable: NULL = global default
+			nullableInt32(r.Delay),                // nullable: NULL = no delay
+			nullableInt32(r.MirrorHostgroup),      // nullable: NULL = no mirroring
+			nullableString(r.ErrorMessage),        // nullable: non-NULL blocks the query
+			nullableBoolAsInt(r.Log),              // nullable
 			defBoolAsInt(r.Apply, false),          // pgsql_query_rules.apply NOT NULL DEFAULT 0
 			quote(r.Comment),
 		)
@@ -380,6 +404,9 @@ func isStripControl(r rune) bool {
 	return (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f
 }
 
+// sqlNull is the literal emitted for unset values in genuinely nullable columns.
+const sqlNull = "NULL"
+
 func defaultInt32(v, def int32) int32 {
 	if v == 0 {
 		return def
@@ -393,7 +420,7 @@ func defaultInt32(v, def int32) int32 {
 // fails with "NOT NULL constraint failed".
 func nullableInt32(p *int32) string {
 	if p == nil {
-		return "NULL"
+		return sqlNull
 	}
 	return strconv.FormatInt(int64(*p), 10)
 }
@@ -405,6 +432,31 @@ func defInt32(p *int32, def int32) string {
 		return strconv.FormatInt(int64(def), 10)
 	}
 	return strconv.FormatInt(int64(*p), 10)
+}
+
+// nullableBoolAsInt emits *p as 0/1, or NULL when unset. Use ONLY for genuinely
+// nullable ProxySQL boolean columns (e.g. mysql_query_rules.log) where NULL
+// means "unset / inherit default behavior" — semantically different from 0.
+func nullableBoolAsInt(p *bool) string {
+	if p == nil {
+		return sqlNull
+	}
+	if *p {
+		return "1"
+	}
+	return "0"
+}
+
+// nullableString emits the quoted form of s, or NULL when s is empty. Use ONLY
+// for nullable string columns where ” and NULL behave differently in ProxySQL:
+// replace_pattern=” rewrites matching queries to an empty string, and any
+// non-NULL error_msg (even ”) blocks matching queries. An unset field must
+// therefore render as NULL, not ”.
+func nullableString(s string) string {
+	if s == "" {
+		return sqlNull
+	}
+	return quote(s)
 }
 
 // defBoolAsInt emits *p as 0/1, or def when unset. For NOT NULL boolean columns.

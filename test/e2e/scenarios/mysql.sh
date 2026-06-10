@@ -65,6 +65,10 @@ spec:
     - {username: app, defaultHostgroup: 0, passwordSecretRef: {name: appcreds, key: password}}
   mysqlQueryRules:
     - {ruleId: 100, active: true, matchDigest: "^SELECT", destinationHostgroup: 0, apply: true}
+    # Rewrite rule (#19): matchPattern selects, replacePattern is the rewrite target.
+    - {ruleId: 110, active: true, matchPattern: "^SELECT LEGACY_VERSION", replacePattern: "SELECT VERSION()", destinationHostgroup: 0, apply: true}
+    # Cached rule (#19): resultsets for this digest are served from the query cache.
+    - {ruleId: 120, active: true, matchDigest: "^SELECT 42", destinationHostgroup: 0, cacheTTL: 5000, cacheEmptyResult: true, apply: true}
   # Disable the monitor module: the backend has no "monitor" user with the
   # operator-minted password, and we don't want health checks shunning the
   # (perfectly reachable) server during the test.
@@ -81,6 +85,20 @@ YAML
   out="$(admin_query "$ns" pxc "$radmin" "SELECT rule_id,destination_hostgroup FROM runtime_mysql_query_rules")"
   echo "$out" | grep -qE "^100[[:space:]]+0$" || { fail "query rule 100 not in runtime_mysql_query_rules: '$out'"; dump_ns "$ns"; return 1; }
   log "mysql: query rule present in runtime"
+
+  # Richer query rules (#19): rewrite rule and cached rule landed in runtime
+  # with the right columns populated.
+  out="$(admin_query "$ns" pxc "$radmin" "SELECT COUNT(*) FROM runtime_mysql_query_rules WHERE rule_id=110 AND replace_pattern='SELECT VERSION()'")"
+  [ "$out" = "1" ] || { fail "rewrite rule 110 (replace_pattern) not in runtime_mysql_query_rules: '$out'"; dump_ns "$ns"; return 1; }
+  out="$(admin_query "$ns" pxc "$radmin" "SELECT COUNT(*) FROM runtime_mysql_query_rules WHERE rule_id=120 AND cache_ttl=5000 AND cache_empty_result=1")"
+  [ "$out" = "1" ] || { fail "cached rule 120 (cache_ttl/cache_empty_result) not in runtime_mysql_query_rules: '$out'"; dump_ns "$ns"; return 1; }
+  log "mysql: rewrite + cached query rules present in runtime"
+
+  # The rewrite actually fires: SELECT LEGACY_VERSION() would error against the
+  # backend, but rule 110 rewrites it to SELECT VERSION().
+  out="$(mysql_query "$ns" pxc app appsecret "SELECT LEGACY_VERSION()")"
+  echo "$out" | grep -qiE "mysql|[0-9]+\.[0-9]+\.[0-9]+" || { fail "rewrite rule did not rewrite SELECT LEGACY_VERSION(): '$out'"; dump_ns "$ns"; return 1; }
+  log "mysql: rewrite rule rewrote query to SELECT VERSION() (got '$out')"
 
   # Real query through ProxySQL :6033 to the backend (returns the MySQL version).
   out="$(mysql_query "$ns" pxc app appsecret "SELECT VERSION()")"

@@ -122,6 +122,46 @@ func (in *MySQLQueryRule) DeepCopyInto(out *MySQLQueryRule) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.MirrorHostgroup != nil {
+		in, out := &in.MirrorHostgroup, &out.MirrorHostgroup
+		*out = new(int32)
+		**out = **in
+	}
+	if in.Timeout != nil {
+		in, out := &in.Timeout, &out.Timeout
+		*out = new(int32)
+		**out = **in
+	}
+	if in.Delay != nil {
+		in, out := &in.Delay, &out.Delay
+		*out = new(int32)
+		**out = **in
+	}
+	if in.FlagIn != nil {
+		in, out := &in.FlagIn, &out.FlagIn
+		*out = new(int32)
+		**out = **in
+	}
+	if in.FlagOut != nil {
+		in, out := &in.FlagOut, &out.FlagOut
+		*out = new(int32)
+		**out = **in
+	}
+	if in.Log != nil {
+		in, out := &in.Log, &out.Log
+		*out = new(bool)
+		**out = **in
+	}
+	if in.CacheTTL != nil {
+		in, out := &in.CacheTTL, &out.CacheTTL
+		*out = new(int32)
+		**out = **in
+	}
+	if in.CacheEmptyResult != nil {
+		in, out := &in.CacheEmptyResult, &out.CacheEmptyResult
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Apply != nil {
 		in, out := &in.Apply, &out.Apply
 		*out = new(bool)
@@ -297,6 +337,46 @@ func (in *PostgreSQLQueryRule) DeepCopyInto(out *PostgreSQLQueryRule) {
 	if in.DestinationHostgroup != nil {
 		in, out := &in.DestinationHostgroup, &out.DestinationHostgroup
 		*out = new(int32)
+		**out = **in
+	}
+	if in.MirrorHostgroup != nil {
+		in, out := &in.MirrorHostgroup, &out.MirrorHostgroup
+		*out = new(int32)
+		**out = **in
+	}
+	if in.Timeout != nil {
+		in, out := &in.Timeout, &out.Timeout
+		*out = new(int32)
+		**out = **in
+	}
+	if in.Delay != nil {
+		in, out := &in.Delay, &out.Delay
+		*out = new(int32)
+		**out = **in
+	}
+	if in.FlagIn != nil {
+		in, out := &in.FlagIn, &out.FlagIn
+		*out = new(int32)
+		**out = **in
+	}
+	if in.FlagOut != nil {
+		in, out := &in.FlagOut, &out.FlagOut
+		*out = new(int32)
+		**out = **in
+	}
+	if in.Log != nil {
+		in, out := &in.Log, &out.Log
+		*out = new(bool)
+		**out = **in
+	}
+	if in.CacheTTL != nil {
+		in, out := &in.CacheTTL, &out.CacheTTL
+		*out = new(int32)
+		**out = **in
+	}
+	if in.CacheEmptyResult != nil {
+		in, out := &in.CacheEmptyResult, &out.CacheEmptyResult
+		*out = new(bool)
 		**out = **in
 	}
 	if in.Apply != nil {
