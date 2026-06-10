@@ -1,0 +1,83 @@
+apiVersion: v1
+entries:
+  proxysql:
+  - apiVersion: v2
+    appVersion: "3.0"
+    created: "2026-06-10T17:10:30.981773055Z"
+    description: ProxySQL data plane for Kubernetes (MySQL + PostgreSQL via ProxySQL
+      3.x)
+    digest: c7a33d092e1adc449d25b931c2bb2cdb88cebfdf571cab8d26e568c3c6d824b7
+    home: https://proxysql.com
+    icon: https://proxysql.com/wp-content/uploads/2020/04/ProxySQL-Colour-Logo.png
+    keywords:
+    - proxysql
+    - mysql
+    - postgresql
+    - database
+    - proxy
+    kubeVersion: '>=1.29.0-0'
+    maintainers:
+    - name: ProxySQL
+      url: https://proxysql.com
+    name: proxysql
+    sources:
+    - https://github.com/sysown/proxysql
+    - https://github.com/ProxySQL/kubernetes
+    type: application
+    urls:
+    - https://github.com/ProxySQL/proxysql-on-k8s/releases/download/proxysql-0.1.0/proxysql-0.1.0.tgz
+    version: 0.1.0
+  proxysql-cluster:
+  - apiVersion: v2
+    appVersion: "3.0"
+    created: "2026-06-10T17:10:31.265269345Z"
+    description: ProxySQL control-plane (StatefulSet, persistent) for operator-managed
+      ProxySQL Clusters
+    digest: bb0763b3b6702e45a02d7284866b6bdaad1f6b32e488dcbb55eee9b2a0fe36ad
+    home: https://proxysql.com
+    icon: https://proxysql.com/wp-content/uploads/2020/04/ProxySQL-Colour-Logo.png
+    keywords:
+    - proxysql
+    - mysql
+    - postgresql
+    - database
+    - proxy
+    - cluster
+    kubeVersion: '>=1.29.0-0'
+    maintainers:
+    - name: ProxySQL
+      url: https://proxysql.com
+    name: proxysql-cluster
+    sources:
+    - https://github.com/sysown/proxysql
+    - https://github.com/ProxySQL/kubernetes
+    type: application
+    urls:
+    - https://github.com/ProxySQL/proxysql-on-k8s/releases/download/proxysql-cluster-0.1.0/proxysql-cluster-0.1.0.tgz
+    version: 0.1.0
+  proxysql-operator:
+  - apiVersion: v2
+    appVersion: 0.2.5
+    created: "2026-06-10T17:10:31.532237937Z"
+    description: Operator that reconciles ProxySQLCluster and ProxySQLConfig CRDs
+      (proxysql.com/v1alpha1)
+    digest: aa21d11670e9aca5b75052c6d5abdcbe50fe13e99710752094d36a4831f7a52b
+    home: https://proxysql.com
+    icon: https://proxysql.com/wp-content/uploads/2020/04/ProxySQL-Colour-Logo.png
+    keywords:
+    - proxysql
+    - operator
+    - mysql
+    - postgresql
+    kubeVersion: '>=1.29.0-0'
+    maintainers:
+    - name: ProxySQL
+      url: https://proxysql.com
+    name: proxysql-operator
+    sources:
+    - https://github.com/ProxySQL/kubernetes
+    type: application
+    urls:
+    - https://github.com/ProxySQL/proxysql-on-k8s/releases/download/proxysql-operator-0.2.5/proxysql-operator-0.2.5.tgz
+    version: 0.2.5
+generated: "2026-06-10T17:10:31.532242946Z"
