@@ -580,6 +580,61 @@ func TestPasswordsFromSecret(t *testing.T) {
 	}
 }
 
+func TestPasswordsFromSecret_Validation(t *testing.T) {
+	const platformPass = "s3cret"
+	keys := proxysqlv1alpha1.AuthKeys{
+		AdminPassword:   "admin-password",
+		RadminPassword:  "radmin-password",
+		MonitorPassword: "monitor-password",
+	}
+
+	// Partial operator schema must error (naming the missing key), even when
+	// username/password is also present — never silently substitute.
+	_, err := PasswordsFromSecret(map[string][]byte{
+		"admin-password": []byte("a"), "radmin-password": []byte("r"),
+		"username": []byte("platform"), "password": []byte(platformPass),
+	}, keys)
+	if err == nil || !strings.Contains(err.Error(), "monitor-password") {
+		t.Fatalf("partial operator schema should error naming monitor-password, got %v", err)
+	}
+
+	// Username containing cnf-breaking characters -> error.
+	for _, user := range []string{`evil";`, "evil\nuser", "a b"} {
+		_, err = PasswordsFromSecret(map[string][]byte{
+			"username": []byte(user), "password": []byte(platformPass),
+		}, keys)
+		if err == nil || !strings.Contains(err.Error(), "username") {
+			t.Fatalf("username %q should be rejected, got %v", user, err)
+		}
+	}
+
+	// Password containing ';' (breaks admin_credentials splitting) -> error.
+	_, err = PasswordsFromSecret(map[string][]byte{
+		"username": []byte("platform"), "password": []byte("pa;ss"),
+	}, keys)
+	if err == nil || !strings.Contains(err.Error(), `"password"`) {
+		t.Fatalf("password with ';' should be rejected, got %v", err)
+	}
+
+	// Operator-schema passwords are validated too.
+	_, err = PasswordsFromSecret(map[string][]byte{
+		"admin-password":   []byte(`a"b`),
+		"radmin-password":  []byte("r"),
+		"monitor-password": []byte("m"),
+	}, keys)
+	if err == nil || !strings.Contains(err.Error(), "admin-password") {
+		t.Fatalf("operator-schema password with '\"' should be rejected, got %v", err)
+	}
+
+	// Clean username/password schema still works after validation hardening.
+	pw, err := PasswordsFromSecret(map[string][]byte{
+		"username": []byte("plat-form_user.1"), "password": []byte(platformPass),
+	}, keys)
+	if err != nil || pw.ExtraAdminUser != "plat-form_user.1" || pw.Admin != platformPass {
+		t.Fatalf("clean username/password schema should pass: pw=%+v err=%v", pw, err)
+	}
+}
+
 func TestBootstrapCnf_ExtraAdminCredential(t *testing.T) {
 	c := newCluster("extra")
 	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m",

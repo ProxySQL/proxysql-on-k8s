@@ -167,7 +167,14 @@ func (r *ProxySQLClusterReconciler) resolvePasswords(ctx context.Context, cluste
 	// Externally managed Secret: accept either the operator schema or the
 	// common platform username/password schema (see PasswordsFromSecret).
 	if !b.ManagesAuthSecret() {
-		return builders.PasswordsFromSecret(sec.Data, keys)
+		pw, perr := builders.PasswordsFromSecret(sec.Data, keys)
+		// On success, an absent admin key means the username/password schema
+		// matched (a partial operator schema errors instead of falling through).
+		if perr == nil && len(sec.Data[keys.AdminPassword]) == 0 {
+			logf.FromContext(ctx).V(1).Info("auth secret resolved via username/password schema",
+				"secret", b.SecretName())
+		}
+		return pw, perr
 	}
 
 	pw := builders.Passwords{
