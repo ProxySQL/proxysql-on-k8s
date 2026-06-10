@@ -31,7 +31,9 @@ type fakeQuerier struct {
 
 func (f *fakeQuerier) Query(_ context.Context, q string) ([][]string, error) {
 	for k, v := range f.rows {
-		if strings.Contains(q, k) {
+		// Suffix match (table name ends the FROM clause) keeps lookups
+		// unambiguous even if a future key is a prefix of another.
+		if strings.HasSuffix(q, k) {
 			return v, nil
 		}
 	}

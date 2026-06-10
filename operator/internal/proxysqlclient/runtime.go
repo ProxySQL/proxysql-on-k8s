@@ -122,8 +122,8 @@ func readKeys(ctx context.Context, q Querier, query string, dst map[string]bool)
 
 // ShunnedCount returns the number of backend servers (MySQL + PostgreSQL)
 // whose runtime status is SHUNNED.
-func (rs *RuntimeState) ShunnedCount() int {
-	n := 0
+func (rs *RuntimeState) ShunnedCount() int32 {
+	var n int32
 	for _, status := range rs.MySQLServers {
 		if status == "SHUNNED" {
 			n++
