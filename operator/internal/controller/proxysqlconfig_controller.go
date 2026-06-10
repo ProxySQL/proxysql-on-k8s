@@ -267,10 +267,9 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionTrue, "Synced",
 			fmt.Sprintf("config applied to %d/%d replicas", len(addrs), len(addrs)))
 		r.setCfgCondition(&cfg, cfgCondProgressing, metav1.ConditionFalse, "Steady", "")
-		if pgsqlMismatch {
-			r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "PgsqlDisabled",
-				"spec declares pgsql servers/users/rules but the referenced cluster has protocols.pgsql.enabled=false")
-		} else {
+		// The PgsqlDisabled Degraded condition was already set above when it
+		// applies; only clear Degraded when it doesn't.
+		if !pgsqlMismatch {
 			meta.RemoveStatusCondition(&cfg.Status.Conditions, cfgCondDegraded)
 		}
 		if err := r.Status().Update(ctx, &cfg); err != nil {
@@ -284,8 +283,13 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "PartialSync",
 		fmt.Sprintf("synced %d/%d replicas (%d re-push targets, %d succeeded)",
 			len(addrs)-len(pushAddrs)+synced, len(addrs), len(pushAddrs), synced))
-	r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "SyncErrors",
-		joinErrs(syncErrs))
+	// Degraded is a single condition: when a pgsql mismatch coexists with sync
+	// errors, fold the warning into the message so it isn't silently dropped.
+	degradedMsg := joinErrs(syncErrs)
+	if pgsqlMismatch {
+		degradedMsg = "pgsql declared but protocols.pgsql.enabled=false on cluster; " + degradedMsg
+	}
+	r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "SyncErrors", degradedMsg)
 	if err := r.Status().Update(ctx, &cfg); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -144,6 +144,13 @@ func (rs *RuntimeState) ShunnedCount() int32 {
 // Comparison is keys-only by design: see RuntimeState. A SHUNNED server is
 // present, not drifted — shunning is ProxySQL's own health reaction, not a
 // config divergence.
+//
+// mysql_replication_hostgroups and proxysql_servers are deliberately outside
+// drift detection: the former is loaded/saved together with mysql_servers (so
+// external wipes of servers — the realistic mutation — are already caught),
+// and the latter is peer topology that ProxySQL Cluster sync self-heals. Both
+// are still re-asserted whenever any drift triggers a push, since Sync always
+// writes every table.
 func (d *Desired) Drift(rs *RuntimeState) []string {
 	diffs := make([]string, 0, 8)
 	diffs = append(diffs, diffServers("mysql_servers", mysqlServerKeys(d.MySQLServers), rs.MySQLServers)...)

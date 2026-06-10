@@ -47,7 +47,7 @@ YAML
   log "delete: pxcfg deleted, finalizer released"
 
   # Post: every table the config owned is empty — runtime and disk.
-  for t in runtime_mysql_servers mysql_servers runtime_mysql_query_rules; do
+  for t in runtime_mysql_servers mysql_servers runtime_mysql_query_rules mysql_query_rules; do
     out="$(admin_query "$ns" pxc "$radmin" "SELECT COUNT(*) FROM $t")"
     [[ "$out" == "0" ]] || { fail "delete: $t not cleaned up (expected 0 rows, got '$out')"; dump_ns "$ns"; return 1; }
   done
