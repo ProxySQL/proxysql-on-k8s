@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -272,6 +273,77 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			var clusterNamedSec corev1.Secret
 			err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &clusterNamedSec)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "operator should not mint a secret when SecretName is set")
+		})
+	})
+
+	When("the user provides a username/password-shaped auth Secret", func() {
+		const name = "pxc-platform-secret"
+		const secretName = "platform-admin-creds"
+
+		It("derives admin passwords and adds the extra admin credential to the cnf", func() {
+			ctx := context.Background()
+			externalSec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+				Data: map[string][]byte{
+					"username": []byte("platform"),
+					"password": []byte("s3cret"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, externalSec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, externalSec) })
+
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Auth.SecretName = secretName
+			})
+			reconcileAndExpectSuccess(name)
+
+			// No Degraded condition: the secret resolved.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			Expect(meta.FindStatusCondition(cluster.Status.Conditions, condTypeDegraded)).To(BeNil())
+
+			// admin/radmin share the platform password, and the platform's own
+			// username rides along as a remote-capable admin credential.
+			var cm corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cm)).To(Succeed())
+			Expect(cm.Data["proxysql.cnf"]).To(ContainSubstring(
+				`admin_credentials="admin:s3cret;radmin:s3cret;platform:s3cret"`))
+
+			// The operator must NOT have minted its own Secret.
+			var clusterNamedSec corev1.Secret
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &clusterNamedSec)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	When("the external auth Secret matches neither schema", func() {
+		const name = "pxc-bad-secret"
+		const secretName = "bad-admin-creds"
+
+		It("degrades with AuthSecretError naming both accepted schemas", func() {
+			ctx := context.Background()
+			externalSec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+				Data:       map[string][]byte{"foo": []byte("bar")},
+			}
+			Expect(k8sClient.Create(ctx, externalSec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, externalSec) })
+
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Auth.SecretName = secretName
+			})
+			req = reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).To(HaveOccurred())
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(got.Status.Phase).To(Equal(proxysqlv1alpha1.PhaseDegraded))
+			degraded := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(degraded).NotTo(BeNil())
+			Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
+			Expect(degraded.Reason).To(Equal("AuthSecretError"))
+			Expect(degraded.Message).To(ContainSubstring(builders.SecretKeyAdminPassword))
+			Expect(degraded.Message).To(ContainSubstring("username/password"))
 		})
 	})
 

@@ -223,7 +223,9 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			adminSec := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
 				Data: map[string][]byte{
-					b.SecretKeys().RadminPassword: []byte("radmin-pass"),
+					b.SecretKeys().AdminPassword:   []byte("admin-pass"),
+					b.SecretKeys().RadminPassword:  []byte("radmin-pass"),
+					b.SecretKeys().MonitorPassword: []byte("monitor-pass"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
@@ -266,7 +268,9 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			adminSec := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
 				Data: map[string][]byte{
-					b.SecretKeys().RadminPassword: []byte("radmin-pass"),
+					b.SecretKeys().AdminPassword:   []byte("admin-pass"),
+					b.SecretKeys().RadminPassword:  []byte("radmin-pass"),
+					b.SecretKeys().MonitorPassword: []byte("monitor-pass"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
@@ -340,7 +344,9 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			adminSec := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
 				Data: map[string][]byte{
-					b.SecretKeys().RadminPassword: []byte("radmin-pass"),
+					b.SecretKeys().AdminPassword:   []byte("admin-pass"),
+					b.SecretKeys().RadminPassword:  []byte("radmin-pass"),
+					b.SecretKeys().MonitorPassword: []byte("monitor-pass"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
@@ -506,7 +512,9 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			adminSec := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
 				Data: map[string][]byte{
-					b.SecretKeys().RadminPassword: []byte("radmin-pass"),
+					b.SecretKeys().AdminPassword:   []byte("admin-pass"),
+					b.SecretKeys().RadminPassword:  []byte("radmin-pass"),
+					b.SecretKeys().MonitorPassword: []byte("monitor-pass"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
@@ -550,6 +558,71 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			Expect(degraded).NotTo(BeNil(), "Degraded condition must be set")
 			Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 			Expect(degraded.Reason).To(Equal("PgsqlDisabled"))
+		})
+	})
+
+	Context("username/password-shaped admin Secret", func() {
+		const ns = "default"
+
+		It("passes the AdminSecret stage and stops at NoReadyReplicas", func() {
+			ctx := context.Background()
+			const name = "updown-cfg"
+			const clusterName = "updown-cluster"
+			const secretName = "updown-admin"
+
+			cluster := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+					Auth: proxysqlv1alpha1.AuthSpec{SecretName: secretName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+
+			adminSec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+				Data: map[string][]byte{
+					"username": []byte("platform"),
+					"password": []byte("s3cret"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, adminSec) })
+
+			cfg := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: clusterName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
+			DeferCleanup(func() {
+				var cur proxysqlv1alpha1.ProxySQLConfig
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err != nil {
+					return
+				}
+				cur.Finalizers = nil
+				_ = k8sClient.Update(ctx, &cur)
+				_ = k8sClient.Delete(ctx, &cur)
+			})
+
+			r := &ProxySQLConfigReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// The username/password secret must resolve: the reconcile gets past
+			// the AdminSecret stage and stops only because no pods are ready.
+			var cur proxysqlv1alpha1.ProxySQLConfig
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur)).To(Succeed())
+			ready := meta.FindStatusCondition(cur.Status.Conditions, cfgCondReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Reason).To(Equal("NoReadyReplicas"),
+				"a username/password admin Secret must not be reported as AdminSecretIncomplete")
 		})
 	})
 

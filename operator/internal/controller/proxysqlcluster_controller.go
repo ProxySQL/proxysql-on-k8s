@@ -133,7 +133,9 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // resolvePasswords reads the admin/radmin/monitor passwords from the auth Secret.
 // When ManagesAuthSecret() and the Secret does not exist yet, it mints random
 // passwords and creates the Secret. When the Secret exists with missing keys
-// (operator-managed), it backfills them.
+// (operator-managed), it backfills them. Externally managed Secrets are
+// resolved via builders.PasswordsFromSecret, which also accepts the common
+// platform username/password schema.
 func (r *ProxySQLClusterReconciler) resolvePasswords(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster) (builders.Passwords, error) {
 	b := builders.New(cluster, r.Scheme, builders.Passwords{})
 	keys := b.SecretKeys()
@@ -160,6 +162,12 @@ func (r *ProxySQLClusterReconciler) resolvePasswords(ctx context.Context, cluste
 		return pw, nil
 	case err != nil:
 		return builders.Passwords{}, fmt.Errorf("get auth secret: %w", err)
+	}
+
+	// Externally managed Secret: accept either the operator schema or the
+	// common platform username/password schema (see PasswordsFromSecret).
+	if !b.ManagesAuthSecret() {
+		return builders.PasswordsFromSecret(sec.Data, keys)
 	}
 
 	pw := builders.Passwords{
@@ -206,9 +214,6 @@ func (r *ProxySQLClusterReconciler) resolvePasswords(ctx context.Context, cluste
 				return builders.Passwords{}, fmt.Errorf("backfill auth secret: %w", err)
 			}
 		}
-	} else if pw.Admin == "" || pw.Radmin == "" || pw.Monitor == "" {
-		return builders.Passwords{}, fmt.Errorf("auth secret %q is missing required keys (%s/%s/%s)",
-			b.SecretName(), keys.AdminPassword, keys.RadminPassword, keys.MonitorPassword)
 	}
 
 	return pw, nil

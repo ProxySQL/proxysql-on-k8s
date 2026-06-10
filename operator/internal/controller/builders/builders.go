@@ -20,6 +20,8 @@ limitations under the License.
 package builders
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,12 +48,50 @@ const (
 	SecretKeyMonitorPassword = "monitor-password"
 )
 
-// Passwords holds the plaintext admin/radmin/monitor credentials the operator
-// renders into the bootstrap ConfigMap.
+// Passwords holds the plaintext credentials the operator renders into the
+// bootstrap ConfigMap. ExtraAdminUser/ExtraAdminPassword carry an additional
+// remote-capable admin credential derived from a username/password-shaped
+// external Secret (empty when unused).
 type Passwords struct {
 	Admin   string
 	Radmin  string
 	Monitor string
+
+	ExtraAdminUser     string
+	ExtraAdminPassword string
+}
+
+// PasswordsFromSecret resolves credentials from an auth Secret's data,
+// accepting two schemas in precedence order:
+//  1. the operator schema (keys per AuthKeys) — all three keys required;
+//  2. the common platform schema: "username"/"password" (+ optional
+//     monitor key). Admin and radmin share the password; a username other
+//     than admin/radmin becomes an extra admin credential in the cnf.
+func PasswordsFromSecret(data map[string][]byte, keys proxysqlv1alpha1.AuthKeys) (Passwords, error) {
+	admin := string(data[keys.AdminPassword])
+	radmin := string(data[keys.RadminPassword])
+	monitor := string(data[keys.MonitorPassword])
+	if admin != "" && radmin != "" && monitor != "" {
+		return Passwords{Admin: admin, Radmin: radmin, Monitor: monitor}, nil
+	}
+
+	user := string(data["username"])
+	pass := string(data["password"])
+	if user != "" && pass != "" {
+		pw := Passwords{Admin: pass, Radmin: pass, Monitor: pass}
+		if monitor != "" {
+			pw.Monitor = monitor
+		}
+		if user != "admin" && user != "radmin" {
+			pw.ExtraAdminUser = user
+			pw.ExtraAdminPassword = pass
+		}
+		return pw, nil
+	}
+
+	return Passwords{}, fmt.Errorf(
+		"auth secret matches neither schema: need %s/%s/%s, or username/password",
+		keys.AdminPassword, keys.RadminPassword, keys.MonitorPassword)
 }
 
 // Builder constructs the K8s objects owned by a ProxySQLCluster.

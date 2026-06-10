@@ -517,6 +517,92 @@ func TestEndpoints_DisabledSurfacesEmpty(t *testing.T) {
 	}
 }
 
+func TestPasswordsFromSecret(t *testing.T) {
+	const platformPass = "s3cret"
+	keys := proxysqlv1alpha1.AuthKeys{
+		AdminPassword:   "admin-password",
+		RadminPassword:  "radmin-password",
+		MonitorPassword: "monitor-password",
+	}
+
+	// Operator schema wins even if username/password is also present.
+	pw, err := PasswordsFromSecret(map[string][]byte{
+		"admin-password": []byte("a"), "radmin-password": []byte("r"), "monitor-password": []byte("m"),
+		"username": []byte("ops"), "password": []byte("x"),
+	}, keys)
+	if err != nil || pw.Admin != "a" || pw.Radmin != "r" || pw.Monitor != "m" || pw.ExtraAdminUser != "" {
+		t.Fatalf("operator schema: pw=%+v err=%v", pw, err)
+	}
+
+	// username/password schema.
+	pw, err = PasswordsFromSecret(map[string][]byte{
+		"username": []byte("platform"), "password": []byte(platformPass),
+	}, keys)
+	if err != nil || pw.Admin != platformPass || pw.Radmin != platformPass || pw.Monitor != platformPass {
+		t.Fatalf("username/password schema: pw=%+v err=%v", pw, err)
+	}
+	if pw.ExtraAdminUser != "platform" || pw.ExtraAdminPassword != platformPass {
+		t.Fatalf("extra admin credential not derived: %+v", pw)
+	}
+
+	// username/password schema + an explicit monitor key overrides Monitor.
+	pw, err = PasswordsFromSecret(map[string][]byte{
+		"username": []byte("platform"), "password": []byte(platformPass),
+		"monitor-password": []byte("mon"),
+	}, keys)
+	if err != nil || pw.Monitor != "mon" {
+		t.Fatalf("monitor key should override: pw=%+v err=%v", pw, err)
+	}
+
+	// username == radmin must NOT produce an extra credential.
+	pw, _ = PasswordsFromSecret(map[string][]byte{
+		"username": []byte("radmin"), "password": []byte(platformPass),
+	}, keys)
+	if pw.ExtraAdminUser != "" {
+		t.Fatalf("radmin username must not duplicate credential: %+v", pw)
+	}
+
+	// username == admin must NOT produce an extra credential either.
+	pw, _ = PasswordsFromSecret(map[string][]byte{
+		"username": []byte("admin"), "password": []byte(platformPass),
+	}, keys)
+	if pw.ExtraAdminUser != "" {
+		t.Fatalf("admin username must not duplicate credential: %+v", pw)
+	}
+
+	// Neither schema -> error naming both.
+	_, err = PasswordsFromSecret(map[string][]byte{"foo": []byte("bar")}, keys)
+	if err == nil || !strings.Contains(err.Error(), "username") {
+		t.Fatalf("expected both-schema error, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "admin-password") {
+		t.Fatalf("error should name the operator-schema keys, got %v", err)
+	}
+}
+
+func TestBootstrapCnf_ExtraAdminCredential(t *testing.T) {
+	c := newCluster("extra")
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m",
+		ExtraAdminUser: "platform", ExtraAdminPassword: "s3cret"})
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cnf, `admin_credentials="admin:a;radmin:r;platform:s3cret"`) {
+		t.Errorf("extra credential missing:\n%s", cnf)
+	}
+
+	// No extra credential -> the line stays in its two-account form.
+	b2 := New(newCluster("plain"), newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	cnf2, err := b2.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cnf2, `admin_credentials="admin:a;radmin:r"`) {
+		t.Errorf("two-account credentials line malformed:\n%s", cnf2)
+	}
+}
+
 func TestRandomPassword_Length(t *testing.T) {
 	p, err := RandomPassword()
 	if err != nil {
