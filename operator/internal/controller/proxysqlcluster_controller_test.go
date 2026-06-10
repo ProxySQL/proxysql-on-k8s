@@ -481,8 +481,86 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
 			checksumAfter := after.Spec.Template.Annotations["proxysql.com/cnf-checksum"]
 			Expect(checksumAfter).NotTo(Equal(checksumBefore), "cnf change must roll the checksum annotation")
-			Expect(checksumAfter).To(Equal(builders.Sha256(string(sec.Data["proxysql.cnf"]))),
-				"annotation must be the SHA-256 of the Secret's cnf content")
+			Expect(checksumAfter).To(Equal(builders.CnfChecksum(sec.Data)),
+				"annotation must be the deterministic SHA-256 over every cnf Secret key")
+		})
+	})
+
+	When("spec.logging is toggled", func() {
+		const name = "pxc-logging"
+
+		It("adds and removes the fluent-bit sidecar and rolls the checksum", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			var before appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &before)).To(Succeed())
+			Expect(before.Spec.Template.Spec.Containers).To(HaveLen(1), "logging off: no sidecar")
+			checksumBefore := before.Spec.Template.Annotations["proxysql.com/cnf-checksum"]
+
+			// Enable the sidecar (queryLog must come along per the CEL rule).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Logging = &proxysqlv1alpha1.LoggingSpec{Enabled: true, QueryLog: true}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			var sec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
+			Expect(sec.Data).To(HaveKey("fluent-bit.conf"))
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring("eventslog_filename"))
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			containerNames := make([]string, 0, 2)
+			for _, c := range after.Spec.Template.Spec.Containers {
+				containerNames = append(containerNames, c.Name)
+			}
+			Expect(containerNames).To(ConsistOf("proxysql", "fluent-bit"))
+			Expect(after.Spec.Template.Annotations["proxysql.com/cnf-checksum"]).NotTo(Equal(checksumBefore),
+				"enabling logging must roll the checksum (cnf + fluent-bit.conf changed)")
+
+			// Disable again: sidecar and conf key disappear.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Logging = nil
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
+			Expect(sec.Data).NotTo(HaveKey("fluent-bit.conf"))
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			Expect(after.Spec.Template.Spec.Containers).To(HaveLen(1), "logging off again: sidecar removed")
+		})
+
+		It("rejects logging.enabled without queryLog at admission", func() {
+			ctx := context.Background()
+			bad := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "pxc-logging-bad", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+					Logging: &proxysqlv1alpha1.LoggingSpec{Enabled: true},
+				},
+			}
+			err := k8sClient.Create(ctx, bad)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("queryLog"),
+				"CEL rule must name queryLog as the missing input")
+		})
+
+		It("rejects sinkType=s3 and sinkType=http without their sink blocks", func() {
+			ctx := context.Background()
+			for _, sink := range []string{"s3", "http"} {
+				bad := &proxysqlv1alpha1.ProxySQLCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "pxc-logging-" + sink, Namespace: ns},
+					Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+						Logging: &proxysqlv1alpha1.LoggingSpec{
+							Enabled: true, QueryLog: true, SinkType: sink,
+						},
+					},
+				}
+				err := k8sClient.Create(ctx, bad)
+				Expect(err).To(HaveOccurred(), "sinkType=%s without %s block must be rejected", sink, sink)
+				Expect(err.Error()).To(ContainSubstring(sink))
+			}
 		})
 	})
 

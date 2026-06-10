@@ -59,7 +59,7 @@ Owned objects (all with `OwnerReference{controller=true, blockOwnerDeletion=true
 | Object | Name | Purpose |
 | --- | --- | --- |
 | `Secret` | `<cluster>` *or* `spec.auth.secretName` | `admin-password`, `radmin-password`, `monitor-password`. Operator-minted when `spec.auth.secretName` is empty; user-managed otherwise. |
-| `Secret` | `<cluster>-cnf` | Bootstrap `proxysql.cnf` — only enough to start the admin port. A Secret because the rendered cnf embeds the admin/radmin/monitor passwords. Backends, users, query rules all come from `ProxySQLConfig`. |
+| `Secret` | `<cluster>-cnf` | Bootstrap `proxysql.cnf` — only enough to start the admin port. A Secret because the rendered cnf embeds the admin/radmin/monitor passwords. Backends, users, query rules all come from `ProxySQLConfig`. When `spec.logging.enabled`, a second key `fluent-bit.conf` carries the sidecar config (no secrets in it — sink credentials reach the sidecar as env vars from `secretKeyRef`). |
 | `Service` | `<cluster>` | ClusterIP. Exposes the enabled protocol ports + metrics + the stats web UI (when enabled). `spec.service.annotations` (cloud LB configuration) and `spec.service.sessionAffinityTimeoutSeconds` (ClientIP session affinity) apply to this Service only, never the headless one. Annotations are owned wholesale by the spec — out-of-band edits are overwritten, mirroring label handling. |
 | `Service` | `<cluster>-headless` | `ClusterIP=None`, `publishNotReadyAddresses=true`. Used as the StatefulSet's `serviceName` so pods get stable DNS for ProxySQL Cluster sync. |
 | `StatefulSet` | `<cluster>` | The pods. Annotated with `proxysql.com/cnf-checksum` so a content change triggers a rolling restart. PVC template optional (`spec.persistence.enabled`). `spec.networking.tcpKeepalive {time,interval,probes}` renders as pod-level `securityContext.sysctls` (`net.ipv4.tcp_keepalive_{time,intvl,probes}`) — all three are in the Kubernetes safe-sysctl set since v1.29 (KEP-3105), so they're admitted under PSA `restricted`; on pre-1.29 clusters the kubelet rejects them unless allowed via `--allowed-unsafe-sysctls`. |
@@ -319,7 +319,7 @@ would have us deploying two manager Deployments to do one job.
 
 ## Pod-level details
 
-Each ProxySQL pod runs a single container (no sidecars) configured for
+Each ProxySQL pod runs a single `proxysql` container configured for
 [Pod Security Standards `restricted`](https://kubernetes.io/docs/concepts/security/pod-security-standards/):
 
 - `runAsNonRoot=true`, uid/gid 999
@@ -331,6 +331,18 @@ Each ProxySQL pod runs a single container (no sidecars) configured for
 `/etc/proxysql/proxysql.cnf` is mounted from the operator-managed
 `<cluster>-cnf` Secret (read-only). `/var/lib/proxysql` is either a per-pod PVC
 (default) or an emptyDir (when `spec.persistence.enabled=false`).
+
+When `spec.logging.enabled`, a second regular container (`fluent-bit`, same
+PSA-restricted posture, no probes — it must never gate pod readiness) ships
+ProxySQL's query log (eventslog) to `stdout | s3 | http`. Both containers
+share a dedicated `logs` emptyDir at `/var/log/proxysql`, bounded by
+`spec.logging.bufferSize` (default 1Gi): ProxySQL writes `queries*` there
+(JSON, `eventslog_format=2`, 50MB rotation) and Fluent Bit tails them, keeping
+its position DB and filesystem buffer on the same volume. The sidecar config
+is the `fluent-bit.conf` key of the `<cluster>-cnf` Secret, mounted via
+`subPath`; sink credentials (S3 keys, HTTP bearer token) are injected as env
+vars from user-referenced Secrets and never appear in the file. See
+`docs/superpowers/specs/2026-06-10-logging-sidecar-design.md` for rationale.
 
 Probes:
 
