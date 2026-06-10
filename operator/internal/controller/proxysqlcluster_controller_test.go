@@ -320,6 +320,12 @@ func TestDerivePhase(t *testing.T) {
 		{"zero ready replicas", created(0, 0, "rev-1", "rev-1"), false, 3, proxysqlv1alpha1.PhaseCreating},
 		{"all ready, same revision", created(3, 3, "rev-1", "rev-1"), false, 3, proxysqlv1alpha1.PhaseRunning},
 		{"rolling update in progress", created(2, 1, "rev-1", "rev-2"), false, 3, proxysqlv1alpha1.PhaseUpdating},
+		// All replicas still ready but a new revision just landed: the
+		// revision mismatch alone must flip the phase to Updating.
+		{"all ready, revision mismatch", created(3, 3, "rev-1", "rev-2"), false, 3, proxysqlv1alpha1.PhaseUpdating},
+		// Fresh StatefulSet whose UpdateRevision the controller hasn't
+		// populated yet counts as "no update in flight".
+		{"all ready, empty UpdateRevision", created(3, 3, "rev-1", ""), false, 3, proxysqlv1alpha1.PhaseRunning},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
