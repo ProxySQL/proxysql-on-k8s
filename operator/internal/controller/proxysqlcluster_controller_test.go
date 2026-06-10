@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
@@ -83,6 +84,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + "-headless", Namespace: ns}},
 				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name + "-cnf", Namespace: ns}},
 				&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 			} {
 				_ = k8sClient.Delete(ctx, obj)
@@ -112,14 +114,19 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(isOwnedBy(&sec, cluster)).To(BeTrue(), "Secret should be controller-owned")
 		})
 
-		It("creates a ConfigMap containing the bootstrap proxysql.cnf", func() {
+		It("creates a Secret containing the bootstrap proxysql.cnf and no ConfigMap", func() {
 			ctx := context.Background()
+			var sec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
+			Expect(sec.Data).To(HaveKey("proxysql.cnf"))
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring("admin_credentials="))
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring("proxysql_servers="), "replicas=3 should populate cluster sync")
+			Expect(isOwnedBy(&sec, cluster)).To(BeTrue())
+
+			// The cnf carries passwords; it must no longer land in a ConfigMap.
 			var cm corev1.ConfigMap
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cm)).To(Succeed())
-			Expect(cm.Data).To(HaveKey("proxysql.cnf"))
-			Expect(cm.Data["proxysql.cnf"]).To(ContainSubstring("admin_credentials="))
-			Expect(cm.Data["proxysql.cnf"]).To(ContainSubstring("proxysql_servers="), "replicas=3 should populate cluster sync")
-			Expect(isOwnedBy(&cm, cluster)).To(BeTrue())
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cm)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "no bootstrap ConfigMap should be created")
 		})
 
 		It("creates both the regular and headless Services", func() {
@@ -265,9 +272,9 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			// The bootstrap cnf should embed the user-supplied admin password
 			// (proves the operator read from the BYO secret, not a minted one).
-			var cm corev1.ConfigMap
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cm)).To(Succeed())
-			Expect(cm.Data["proxysql.cnf"]).To(ContainSubstring("admin:admin-from-user"))
+			var cnfSec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec)).To(Succeed())
+			Expect(string(cnfSec.Data["proxysql.cnf"])).To(ContainSubstring("admin:admin-from-user"))
 
 			// The operator must NOT have created a Secret named after the cluster.
 			var clusterNamedSec corev1.Secret
@@ -303,9 +310,9 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			// admin/radmin share the platform password, and the platform's own
 			// username rides along as a remote-capable admin credential.
-			var cm corev1.ConfigMap
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cm)).To(Succeed())
-			Expect(cm.Data["proxysql.cnf"]).To(ContainSubstring(
+			var cnfSec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec)).To(Succeed())
+			Expect(string(cnfSec.Data["proxysql.cnf"])).To(ContainSubstring(
 				`admin_credentials="admin:s3cret;radmin:s3cret;platform:s3cret"`))
 
 			// The operator must NOT have minted its own Secret.
@@ -344,6 +351,81 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(degraded.Reason).To(Equal("AuthSecretError"))
 			Expect(degraded.Message).To(ContainSubstring(builders.SecretKeyAdminPassword))
 			Expect(degraded.Message).To(ContainSubstring("username/password"))
+		})
+	})
+
+	When("a legacy operator-owned bootstrap ConfigMap exists (pre-Secret upgrade)", func() {
+		const name = "pxc-cm-migration"
+
+		It("deletes the owned ConfigMap but leaves a foreign one alone", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+
+			// Simulate a v0.2.x leftover: a ConfigMap named after the cluster,
+			// controller-owned by it (as the old ensureConfigMap produced).
+			legacy := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Data:       map[string]string{"proxysql.cnf": "# legacy"},
+			}
+			Expect(controllerutil.SetControllerReference(cluster, legacy, k8sClient.Scheme())).To(Succeed())
+			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
+
+			reconcileAndExpectSuccess(name)
+
+			var cm corev1.ConfigMap
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cm)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "legacy owned ConfigMap should be garbage-collected by the reconciler")
+		})
+
+		It("does not delete a same-named ConfigMap it does not own", func() {
+			ctx := context.Background()
+			const foreignName = "pxc-cm-foreign"
+			foreign := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: foreignName, Namespace: ns},
+				Data:       map[string]string{"something": "user-managed"},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+
+			cluster = makeCluster(foreignName)
+			reconcileAndExpectSuccess(foreignName)
+
+			var cm corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: foreignName, Namespace: ns}, &cm)).To(Succeed(),
+				"a user-managed ConfigMap that merely shares the name must survive")
+		})
+	})
+
+	When("the cnf content changes", func() {
+		const name = "pxc-cnf-rollout"
+
+		It("updates the cnf Secret and rolls the checksum annotation", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			var before appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &before)).To(Succeed())
+			checksumBefore := before.Spec.Template.Annotations["proxysql.com/cnf-checksum"]
+			Expect(checksumBefore).NotTo(BeEmpty())
+
+			// Enabling the web UI changes the rendered cnf.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Protocols.Web.Enabled = ptrBool(true)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+			reconcileAndExpectSuccess(name)
+
+			var sec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring("web_enabled=true"))
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			checksumAfter := after.Spec.Template.Annotations["proxysql.com/cnf-checksum"]
+			Expect(checksumAfter).NotTo(Equal(checksumBefore), "cnf change must roll the checksum annotation")
+			Expect(checksumAfter).To(Equal(builders.Sha256(string(sec.Data["proxysql.cnf"]))),
+				"annotation must be the SHA-256 of the Secret's cnf content")
 		})
 	})
 
@@ -407,6 +489,9 @@ func TestDerivePhase(t *testing.T) {
 		})
 	}
 }
+
+// ptrBool returns a pointer to v.
+func ptrBool(v bool) *bool { return &v }
 
 // isOwnedBy returns true when obj has owner as a controller ownerReference.
 func isOwnedBy(obj metav1.Object, owner *proxysqlv1alpha1.ProxySQLCluster) bool {

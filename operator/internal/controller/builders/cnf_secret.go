@@ -21,26 +21,30 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// ConfigMap returns the ConfigMap holding the bootstrap proxysql.cnf for the
-// StatefulSet pods to mount at /etc/proxysql/proxysql.cnf.
-//
-// Note: this ConfigMap contains rendered passwords. That's the same security
-// boundary as a Secret in K8s (both are base64 + RBAC-controlled), but worth
-// documenting. A future enhancement is to switch to a Secret-backed cnf or
-// use an entrypoint substitution pattern; tracked as Phase 6 work.
-func (b *Builder) ConfigMap() (*corev1.ConfigMap, error) {
+// CnfSecretName returns the name of the Secret carrying the bootstrap
+// proxysql.cnf. The "-cnf" suffix avoids colliding with the auth Secret,
+// which defaults to the bare cluster name.
+func (b *Builder) CnfSecretName() string { return b.Name() + "-cnf" }
+
+// CnfSecret returns the Secret holding the bootstrap proxysql.cnf for the
+// StatefulSet pods to mount at /etc/proxysql/proxysql.cnf. It's a Secret —
+// not a ConfigMap — because the rendered cnf embeds the admin/radmin/monitor
+// passwords. Until v0.3.0 this lived in a ConfigMap named after the cluster;
+// the reconciler garbage-collects that leftover on upgrade.
+func (b *Builder) CnfSecret() (*corev1.Secret, error) {
 	cnf, err := b.BootstrapCnf(b.ProxySQLServerDNS())
 	if err != nil {
 		return nil, err
 	}
-	return &corev1.ConfigMap{
+	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      b.Name(),
+			Name:      b.CnfSecretName(),
 			Namespace: b.Namespace(),
 			Labels:    b.Labels(),
 		},
-		Data: map[string]string{
-			"proxysql.cnf": cnf,
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"proxysql.cnf": []byte(cnf),
 		},
 	}, nil
 }

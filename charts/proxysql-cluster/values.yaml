@@ -2,8 +2,8 @@
 #
 # This chart deploys ProxySQL as a StatefulSet with persistent storage. It is
 # intended for use either standalone (config rendered from values into a
-# ConfigMap, same as the data-plane proxysql chart) or paired with the
-# proxysql-operator (operator pushes config via the admin port at runtime).
+# Secret — the cnf embeds passwords) or paired with the proxysql-operator
+# (operator pushes config via the admin port at runtime).
 #
 # Differences from the proxysql chart:
 #   - StatefulSet with volumeClaimTemplates (PVC per replica)

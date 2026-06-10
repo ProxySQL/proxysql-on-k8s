@@ -61,9 +61,9 @@ Everything under `operator/internal/controller/builders/` returns a desired-stat
 
 So tests can substitute a recording fake and verify exact SQL emitted. **Don't** introduce a concrete `*Client` dependency inside `sync.go` — it'll break the tests in `sync_test.go`.
 
-### Bootstrap cnf contains passwords
+### Bootstrap cnf contains passwords — it lives in a Secret
 
-The proxysql.cnf rendered into the ConfigMap embeds the admin/radmin/monitor passwords. Documented as same-RBAC-as-Secret in `docs/architecture.md`; if you propose moving to a Secret-mounted cnf, that's a real change worth coordinating.
+The rendered proxysql.cnf embeds the admin/radmin/monitor passwords, so it ships in the `<cluster>-cnf` Secret (builder: `builders/cnf_secret.go`; the `-cnf` suffix avoids colliding with the auth Secret named `<cluster>`). Don't move it back to a ConfigMap. The reconciler still garbage-collects the legacy `<cluster>` cnf ConfigMap from operator versions < v0.3.0 — that's why the RBAC keeps `configmaps: get;list;watch;delete` (and nothing more).
 
 ### ProxySQL admin port speaks MySQL wire protocol
 

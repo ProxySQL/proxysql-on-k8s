@@ -200,15 +200,35 @@ func TestBuilder_SecretName_HonoursExternal(t *testing.T) {
 	}
 }
 
-func TestBuilder_ConfigMap_ClusterSyncOnMultiReplica(t *testing.T) {
+func TestBuilder_CnfSecret_NameAndShape(t *testing.T) {
 	c := newCluster(clusterName)
 	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
 
-	cm, err := b.ConfigMap()
+	sec, err := b.CnfSecret()
 	if err != nil {
-		t.Fatalf("ConfigMap: %v", err)
+		t.Fatalf("CnfSecret: %v", err)
 	}
-	cnf := cm.Data["proxysql.cnf"]
+	// "-cnf" suffix avoids colliding with the auth Secret named <cluster>.
+	if sec.Name != clusterName+"-cnf" {
+		t.Errorf("CnfSecret name = %q, want %q", sec.Name, clusterName+"-cnf")
+	}
+	if sec.Type != corev1.SecretTypeOpaque {
+		t.Errorf("CnfSecret type = %q, want Opaque", sec.Type)
+	}
+	if len(sec.Data["proxysql.cnf"]) == 0 {
+		t.Error("CnfSecret must carry the rendered cnf under key proxysql.cnf")
+	}
+}
+
+func TestBuilder_CnfSecret_ClusterSyncOnMultiReplica(t *testing.T) {
+	c := newCluster(clusterName)
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+
+	sec, err := b.CnfSecret()
+	if err != nil {
+		t.Fatalf("CnfSecret: %v", err)
+	}
+	cnf := string(sec.Data["proxysql.cnf"])
 	if !strings.Contains(cnf, `admin_credentials="admin:a;radmin:r"`) {
 		t.Errorf("cnf missing admin_credentials\n%s", cnf)
 	}
@@ -220,17 +240,17 @@ func TestBuilder_ConfigMap_ClusterSyncOnMultiReplica(t *testing.T) {
 	}
 }
 
-func TestBuilder_ConfigMap_PostgreSQLMonitorCreds(t *testing.T) {
+func TestBuilder_CnfSecret_PostgreSQLMonitorCreds(t *testing.T) {
 	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
 		c.Spec.Protocols.PostgreSQL.Enabled = boolPtr(true)
 	})
 	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "monitorpw"})
 
-	cm, err := b.ConfigMap()
+	sec, err := b.CnfSecret()
 	if err != nil {
-		t.Fatalf("ConfigMap: %v", err)
+		t.Fatalf("CnfSecret: %v", err)
 	}
-	cnf := cm.Data["proxysql.cnf"]
+	cnf := string(sec.Data["proxysql.cnf"])
 	// The pgsql_variables block must carry monitor credentials so PostgreSQL
 	// backend health checks can authenticate (verified pgsql-monitor_username/
 	// password exist in ProxySQL 3.0).
@@ -247,13 +267,13 @@ func TestBuilder_ConfigMap_PostgreSQLMonitorCreds(t *testing.T) {
 	}
 }
 
-func TestBuilder_ConfigMap_NoClusterSyncOnSingleReplica(t *testing.T) {
+func TestBuilder_CnfSecret_NoClusterSyncOnSingleReplica(t *testing.T) {
 	one := int32(1)
 	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) { c.Spec.Replicas = &one })
 	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
 
-	cm, _ := b.ConfigMap()
-	cnf := cm.Data["proxysql.cnf"]
+	sec, _ := b.CnfSecret()
+	cnf := string(sec.Data["proxysql.cnf"])
 	if strings.Contains(cnf, "cluster_username=") {
 		t.Errorf("single-replica cnf should not contain cluster sync vars\n%s", cnf)
 	}
@@ -281,6 +301,30 @@ func TestBuilder_StatefulSet_PortsMatchEnabledProtocols(t *testing.T) {
 	}
 	if names["admin"] != DefaultAdminPort || names["mysql"] != DefaultMySQLPort || names["pgsql"] != DefaultPostgreSQLPort {
 		t.Errorf("unexpected port values: %v", names)
+	}
+}
+
+func TestBuilder_StatefulSet_MountsCnfSecret(t *testing.T) {
+	b := New(newCluster(clusterName), newScheme(t), Passwords{})
+	vols := b.StatefulSet("checksum").Spec.Template.Spec.Volumes
+
+	var config *corev1.Volume
+	for i := range vols {
+		if vols[i].Name == "config" {
+			config = &vols[i]
+		}
+	}
+	if config == nil {
+		t.Fatalf("no config volume in %v", vols)
+	}
+	if config.Secret == nil {
+		t.Fatalf("config volume must use a Secret source (cnf carries passwords), got %+v", config.VolumeSource)
+	}
+	if got, want := config.Secret.SecretName, clusterName+"-cnf"; got != want {
+		t.Errorf("config volume secretName = %q, want %q", got, want)
+	}
+	if len(config.Secret.Items) != 1 || config.Secret.Items[0].Key != "proxysql.cnf" || config.Secret.Items[0].Path != "proxysql.cnf" {
+		t.Errorf("config volume must project key proxysql.cnf -> proxysql.cnf, got %+v", config.Secret.Items)
 	}
 }
 

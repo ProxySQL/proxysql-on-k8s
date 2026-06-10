@@ -39,7 +39,7 @@ data-plane and control-plane pods via CRDs.
 
 | Kind | Short | What it owns |
 | --- | --- | --- |
-| `ProxySQLCluster` (`pxc`) | A set of ProxySQL pods | `StatefulSet`, headless + ClusterIP Services, `Secret` (admin/radmin/monitor passwords, minted by the operator), `ConfigMap` (bootstrap `proxysql.cnf`), `PodDisruptionBudget`, optional `ServiceMonitor` |
+| `ProxySQLCluster` (`pxc`) | A set of ProxySQL pods | `StatefulSet`, headless + ClusterIP Services, `Secret` (admin/radmin/monitor passwords, minted by the operator), `Secret` (bootstrap `proxysql.cnf`), `PodDisruptionBudget`, optional `ServiceMonitor` |
 | `ProxySQLConfig` (`pxcfg`) | The declarative ProxySQL configuration applied to a `ProxySQLCluster` | Nothing — runs SQL writes against each replica's admin port |
 
 ### Backend examples
@@ -63,8 +63,8 @@ operator's CR + a ProxySQL CR pair, get a working stack:
          │ reconciles    │                       │ reconciles │
          ▼               ▼                       ▼            │
     ┌─────────┐  ┌────────────┐            ┌───────────┐      │
-    │ Secret  │  │ ConfigMap  │            │ SQL push  │      │
-    │ Service │  │ + cnf      │            │ to admin  │──────┘
+    │ Secret  │  │ Secret     │            │ SQL push  │      │
+    │ Service │  │ (cnf)      │            │ to admin  │──────┘
     │ STS     │  └────────────┘            │ port 6032 │
     │ PDB     │                            └──────┬────┘
     └─────────┘                                   │

@@ -52,7 +52,10 @@ type ProxySQLClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// configmaps: get + delete only — needed to garbage-collect the legacy
+// bootstrap-cnf ConfigMap left behind by operator versions < v0.3.0. The
+// operator no longer creates or updates any ConfigMap.
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
@@ -67,7 +70,8 @@ const (
 // Order of operations:
 //  1. Fetch the CR.
 //  2. Resolve the auth Secret (read existing or create with random passwords).
-//  3. Build the desired ConfigMap and ensure it.
+//  3. Build the desired bootstrap-cnf Secret and ensure it (and garbage-collect
+//     the legacy cnf ConfigMap left behind by versions < v0.3.0).
 //  4. Ensure the headless + regular Services.
 //  5. Ensure the StatefulSet (annotated with the cnf checksum so a content
 //     change triggers a rolling restart).
@@ -97,11 +101,16 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	b := builders.New(&cluster, r.Scheme, pw)
 
 	// 2) Owned resources, in dependency order.
-	cm, err := b.ConfigMap()
+	cnfSecret, err := b.CnfSecret()
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("build configmap: %w", err)
+		return ctrl.Result{}, fmt.Errorf("build cnf secret: %w", err)
 	}
-	if err := r.ensureConfigMap(ctx, &cluster, cm); err != nil {
+	if err := r.ensureCnfSecret(ctx, &cluster, cnfSecret); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Migration from < v0.3.0: the bootstrap cnf used to live in a ConfigMap
+	// named after the cluster. Remove it if we own it.
+	if err := r.cleanupLegacyCnfConfigMap(ctx, &cluster); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -112,7 +121,7 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	cnfChecksum := builders.Sha256(cm.Data["proxysql.cnf"])
+	cnfChecksum := builders.Sha256(string(cnfSecret.Data["proxysql.cnf"]))
 	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(cnfChecksum)); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -242,16 +251,38 @@ func mintPasswords() (builders.Passwords, error) {
 	return builders.Passwords{Admin: admin, Radmin: radmin, Monitor: monitor}, nil
 }
 
-func (r *ProxySQLClusterReconciler) ensureConfigMap(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *corev1.ConfigMap) error {
-	existing := &corev1.ConfigMap{}
+func (r *ProxySQLClusterReconciler) ensureCnfSecret(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *corev1.Secret) error {
+	existing := &corev1.Secret{}
 	existing.Name = desired.Name
 	existing.Namespace = desired.Namespace
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
 		existing.Labels = desired.Labels
+		existing.Type = desired.Type
 		existing.Data = desired.Data
 		return controllerutil.SetControllerReference(owner, existing, r.Scheme)
 	})
 	return err
+}
+
+// cleanupLegacyCnfConfigMap deletes the bootstrap-cnf ConfigMap (named after
+// the cluster) that operator versions < v0.3.0 created, now replaced by the
+// <cluster>-cnf Secret. Only a ConfigMap controller-owned by this cluster is
+// touched; a user-managed ConfigMap that merely shares the name survives.
+func (r *ProxySQLClusterReconciler) cleanupLegacyCnfConfigMap(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster) error {
+	existing := &corev1.ConfigMap{}
+	err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: owner.Namespace}, existing)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !metav1.IsControlledBy(existing, owner) {
+		return nil
+	}
+	logf.FromContext(ctx).Info("deleting legacy bootstrap-cnf ConfigMap (replaced by Secret)",
+		"configmap", existing.Name)
+	return client.IgnoreNotFound(r.Delete(ctx, existing))
 }
 
 func (r *ProxySQLClusterReconciler) ensureService(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *corev1.Service) error {
@@ -452,7 +483,6 @@ func (r *ProxySQLClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
-		Owns(&corev1.ConfigMap{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Named("proxysqlcluster").
 		Complete(r)
