@@ -108,6 +108,9 @@ type ProxySQLClusterSpec struct {
 // ServiceSpec customizes the client-facing (regular) Service.
 type ServiceSpec struct {
 	// Annotations are merged onto the Service (cloud LB configuration).
+	// Spec keys win; annotations written by other controllers are preserved.
+	// A key removed from this map lingers on the Service until removed by
+	// hand (the operator cannot tell a removed spec key from a foreign one).
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 
