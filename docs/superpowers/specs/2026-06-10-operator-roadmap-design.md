@@ -97,6 +97,63 @@ cert-manager dependency is the default stance.
   (exercises 1.1); rotate a password Secret, assert convergence (exercises
   1.2); check status fields (exercises 1.3).
 
+## Milestone 1.5 — v0.2.5 "Platform integration surface"
+
+Requirements gathered from control-plane platforms that provision ProxySQL
+clusters programmatically: create the CR, poll status, hand endpoints to
+applications. These make the operator consumable by such platforms without
+them having to interrogate Services and StatefulSets directly.
+
+### 1.5.1 Aggregate phase and endpoints in ProxySQLCluster status
+
+- `status.phase`: one of `Pending | Creating | Running | Updating | Degraded |
+  Failed`, derived from the conditions and StatefulSet state the operator
+  already tracks. Conditions remain the source of truth; phase is a
+  convenience projection for dashboards and external pollers.
+- `status.endpoints`: in-cluster DNS endpoints (`host:port`) for every enabled
+  surface — `mysql`, `pgsql`, `admin`, `web` (1.5.2), `metrics`.
+- `status.updatedReplicas` (from the StatefulSet), completing the
+  replicas/ready/updated triple.
+- New printer column `Phase`.
+
+### 1.5.2 ProxySQL web UI exposure
+
+New `protocols.web {enabled, port}` (default off, port 6080) on
+ProxySQLCluster: enables ProxySQL's built-in web/REST stats UI, adds the
+container and Service port, and surfaces it via `status.endpoints.web`.
+
+### 1.5.3 Admin Secret schema compatibility
+
+Accept a user-supplied admin Secret in the common `username`/`password` shape
+in addition to the operator-minted
+`admin-password`/`radmin-password`/`monitor-password` schema. Resolution order
+and precedence documented in `docs/architecture.md`; a clear condition surfaces
+when neither schema matches.
+
+### 1.5.4 Networking knobs
+
+- `service.annotations` (cloud load-balancer configuration)
+- `service.sessionAffinityTimeoutSeconds`
+- `networking.tcpKeepalive {time, interval, probes}` — pod-level sysctls; must
+  be reconciled with the PSA `restricted` stance (only the kernel-namespaced
+  `net.*` sysctls allowed under restricted PSA are acceptable; anything else
+  is rejected at admission).
+
+### 1.5.5 Logging sidecar (design + implement)
+
+Optional log-shipping sidecar (Fluent Bit) on ProxySQLCluster: sinks
+`stdout | s3 | http`, optional ProxySQL query-log collection. Gets a short
+design round first (volume handling under `readOnlyRootFilesystem`, image
+pinning, resource defaults), then lands behind a default-off toggle.
+
+### 1.5.6 External-backend failover (design decision)
+
+For backend databases *outside* the cluster (not covered by 3.1's CR
+watching), decide between integrating an external topology manager
+(Orchestrator-style, seeded discovery) and extending the operator's own use of
+`mysql_replication_hostgroups` + read_only monitoring. Design-only in this
+milestone; the outcome feeds 3.1's scope.
+
 ## Milestone 2 — v0.3.0 "Feature depth"
 
 ### 2.1 Richer query rules
@@ -163,6 +220,9 @@ feeding the same sync engine*:
 
 ## Sizing and order
 
-M1 is the largest (touches both reconcilers, needs e2e). M2 is mostly
-mechanical column-plumbing. M3.1 is the one genuinely novel design effort and
-gets its own spec. M3.2 reuses M1 machinery.
+M1 is the largest (touches both reconcilers, needs e2e). M1.5 is mostly
+status/builder plumbing plus one designed feature (logging sidecar) and one
+design round (external failover); it lands between the hardening and feature
+milestones because downstream platforms block on it. M2 is mostly mechanical
+column-plumbing. M3.1 is the one genuinely novel design effort and gets its
+own spec. M3.2 reuses M1 machinery.
