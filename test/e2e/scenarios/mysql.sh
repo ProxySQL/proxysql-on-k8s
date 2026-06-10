@@ -65,8 +65,10 @@ spec:
     - {username: app, defaultHostgroup: 0, passwordSecretRef: {name: appcreds, key: password}}
   mysqlQueryRules:
     - {ruleId: 100, active: true, matchDigest: "^SELECT", destinationHostgroup: 0, apply: true}
-    # Rewrite rule (#19): matchPattern selects, replacePattern is the rewrite target.
-    - {ruleId: 110, active: true, matchPattern: "^SELECT LEGACY_VERSION", replacePattern: "SELECT VERSION()", destinationHostgroup: 0, apply: true}
+    # Rewrite rule (#19): replace_pattern substitutes the matched REGEX TEXT,
+    # so the pattern must consume the whole call (escaped parens) or the
+    # leftover characters get appended to the replacement.
+    - {ruleId: 110, active: true, matchPattern: "^SELECT LEGACY_VERSION\\(\\)", replacePattern: "SELECT VERSION()", destinationHostgroup: 0, apply: true}
     # Cached rule (#19): resultsets for this digest are served from the query cache.
     - {ruleId: 120, active: true, matchDigest: "^SELECT 42", destinationHostgroup: 0, cacheTTL: 5000, cacheEmptyResult: true, apply: true}
   # Hostgroup attributes (#20): per-hostgroup connection behavior; loads to
