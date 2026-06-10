@@ -87,8 +87,9 @@ external pollers):
 ### `ProxySQLConfig` — the declarative configuration
 
 What it represents: the set of `mysql_servers`, `mysql_users`,
-`mysql_query_rules`, `mysql_replication_hostgroups`, `pgsql_servers`,
-`pgsql_users`, `pgsql_query_rules`, `proxysql_servers`, and global
+`mysql_query_rules`, `mysql_replication_hostgroups`,
+`mysql_hostgroup_attributes`, `pgsql_servers`, `pgsql_users`,
+`pgsql_query_rules`, `proxysql_servers`, and global
 variables (`admin_variables` / `mysql_variables` / `pgsql_variables`)
 that should be applied to the target `ProxySQLCluster`.
 

@@ -69,6 +69,10 @@ spec:
     - {ruleId: 110, active: true, matchPattern: "^SELECT LEGACY_VERSION", replacePattern: "SELECT VERSION()", destinationHostgroup: 0, apply: true}
     # Cached rule (#19): resultsets for this digest are served from the query cache.
     - {ruleId: 120, active: true, matchDigest: "^SELECT 42", destinationHostgroup: 0, cacheTTL: 5000, cacheEmptyResult: true, apply: true}
+  # Hostgroup attributes (#20): per-hostgroup connection behavior; loads to
+  # runtime together with MYSQL SERVERS.
+  mysqlHostgroupAttributes:
+    - {hostgroup: 0, multiplex: false, freeConnectionsPct: 25, comment: "hg0 attrs"}
   # Disable the monitor module: the backend has no "monitor" user with the
   # operator-minted password, and we don't want health checks shunning the
   # (perfectly reachable) server during the test.
@@ -93,6 +97,11 @@ YAML
   out="$(admin_query "$ns" pxc "$radmin" "SELECT COUNT(*) FROM runtime_mysql_query_rules WHERE rule_id=120 AND cache_ttl=5000 AND cache_empty_result=1")"
   [ "$out" = "1" ] || { fail "cached rule 120 (cache_ttl/cache_empty_result) not in runtime_mysql_query_rules: '$out'"; dump_ns "$ns"; return 1; }
   log "mysql: rewrite + cached query rules present in runtime"
+
+  # Hostgroup attributes (#20): the row reaches runtime via LOAD MYSQL SERVERS.
+  out="$(admin_query "$ns" pxc "$radmin" "SELECT COUNT(*) FROM runtime_mysql_hostgroup_attributes WHERE hostgroup_id=0 AND multiplex=0 AND free_connections_pct=25")"
+  [ "$out" = "1" ] || { fail "hostgroup attributes row not in runtime_mysql_hostgroup_attributes: '$out'"; dump_ns "$ns"; return 1; }
+  log "mysql: hostgroup attributes present in runtime"
 
   # The rewrite actually fires: SELECT LEGACY_VERSION() would error against the
   # backend, but rule 110 rewrites it to SELECT VERSION().

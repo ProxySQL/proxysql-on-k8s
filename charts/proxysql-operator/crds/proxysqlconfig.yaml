@@ -78,6 +78,86 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+              mysqlHostgroupAttributes:
+                items:
+                  description: |-
+                    MySQLHostgroupAttributes maps to a row in mysql_hostgroup_attributes,
+                    per-hostgroup connection-handling behavior. Unset optional fields fall back
+                    to ProxySQL's column defaults.
+                  properties:
+                    autocommit:
+                      description: |-
+                        Autocommit enforces autocommit on backend connections of this hostgroup:
+                        -1 = don't enforce (ProxySQL default), 0 = force off, 1 = force on.
+                      enum:
+                      - -1
+                      - 0
+                      - 1
+                      format: int32
+                      type: integer
+                    comment:
+                      type: string
+                    connectionWarming:
+                      description: |-
+                        ConnectionWarming pre-opens free connections to reach
+                        freeConnectionsPct before serving traffic. Maps to connection_warming;
+                        ProxySQL default false.
+                      type: boolean
+                    freeConnectionsPct:
+                      description: |-
+                        FreeConnectionsPct is the percentage of mysql-max_connections kept open
+                        to the hostgroup as warm free connections. Maps to free_connections_pct;
+                        ProxySQL default 10.
+                      format: int32
+                      maximum: 100
+                      minimum: 0
+                      type: integer
+                    hostgroup:
+                      description: Hostgroup is the mysql_hostgroup_attributes.hostgroup_id
+                        this row applies to.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    ignoreSessionVariables:
+                      description: |-
+                        IgnoreSessionVariables is a JSON array of session variable names ProxySQL
+                        must not track for this hostgroup, e.g. ["sql_log_bin"]. Maps to
+                        ignore_session_variables; must be valid JSON (or unset).
+                      type: string
+                    initConnect:
+                      description: |-
+                        InitConnect is SQL executed on every new backend connection to this
+                        hostgroup, overriding mysql-init_connect. Maps to init_connect.
+                      type: string
+                    maxNumOnlineServers:
+                      description: |-
+                        MaxNumOnlineServers caps how many servers in the hostgroup are treated
+                        as ONLINE. Maps to max_num_online_servers; ProxySQL default 1000000.
+                      format: int32
+                      maximum: 1000000
+                      minimum: 0
+                      type: integer
+                    multiplex:
+                      description: |-
+                        Multiplex enables/disables connection multiplexing for the hostgroup.
+                        Maps to multiplex; ProxySQL default true.
+                      type: boolean
+                    throttleConnectionsPerSec:
+                      description: |-
+                        ThrottleConnectionsPerSec caps new backend connections per second to
+                        the hostgroup. Maps to throttle_connections_per_sec; ProxySQL default
+                        1000000.
+                      format: int32
+                      maximum: 1000000
+                      minimum: 1
+                      type: integer
+                  required:
+                  - hostgroup
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - hostgroup
+                x-kubernetes-list-type: map
               mysqlQueryRules:
                 items:
                   description: MySQLQueryRule maps to a row in the ProxySQL mysql_query_rules

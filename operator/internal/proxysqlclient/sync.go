@@ -45,8 +45,11 @@ func Sync(ctx context.Context, c Executor, d *Desired) error {
 	steps := []syncStep{
 		{name: "mysql_servers", run: func() error { return syncMySQLServers(ctx, c, d) }},
 		{name: "mysql_replication_hostgroups", run: func() error { return syncMySQLReplicationHostgroups(ctx, c, d) }},
-		// mysql_replication_hostgroups is loaded with mysql_servers; apply
-		// the LOAD/SAVE only once after both tables are written.
+		{name: "mysql_hostgroup_attributes", run: func() error { return syncMySQLHostgroupAttributes(ctx, c, d) }},
+		// mysql_replication_hostgroups and mysql_hostgroup_attributes are
+		// loaded with mysql_servers (verified live: runtime rows appear only
+		// after LOAD MYSQL SERVERS TO RUNTIME); apply the LOAD/SAVE only once
+		// after all three tables are written.
 		{name: "mysql_servers_apply", run: func() error { return loadSave(ctx, c, "MYSQL SERVERS") }},
 
 		{name: "mysql_users", run: func() error { return syncMySQLUsers(ctx, c, d) }},
@@ -144,6 +147,41 @@ func syncMySQLReplicationHostgroups(ctx context.Context, c Executor, d *Desired)
 			check = "read_only"
 		}
 		fmt.Fprintf(&b, "(%d,%d,%s,%s)", h.WriterHostgroup, h.ReaderHostgroup, quote(check), quote(h.Comment))
+	}
+	return c.Exec(ctx, b.String())
+}
+
+// ---- mysql_hostgroup_attributes ----
+
+func syncMySQLHostgroupAttributes(ctx context.Context, c Executor, d *Desired) error {
+	if err := c.Exec(ctx, "DELETE FROM mysql_hostgroup_attributes"); err != nil {
+		return err
+	}
+	if len(d.MySQLHostgroupAttributes) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("INSERT INTO mysql_hostgroup_attributes (hostgroup_id,max_num_online_servers," +
+		"autocommit,free_connections_pct,init_connect,multiplex,connection_warming," +
+		"throttle_connections_per_sec,ignore_session_variables,comment) VALUES ")
+	for i, a := range d.MySQLHostgroupAttributes {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		// Every column is NOT NULL with a ProxySQL default — render the
+		// column default for unset fields, never NULL.
+		fmt.Fprintf(&b, "(%d,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+			a.Hostgroup,
+			defInt32(a.MaxNumOnlineServers, 1000000),       // NOT NULL DEFAULT 1000000
+			defInt32(a.Autocommit, -1),                     // -1|0|1, NOT NULL DEFAULT -1 (-1 = don't enforce)
+			defInt32(a.FreeConnectionsPct, 10),             // 0..100, NOT NULL DEFAULT 10
+			quote(a.InitConnect),                           // NOT NULL DEFAULT ''
+			defBoolAsInt(a.Multiplex, true),                // NOT NULL DEFAULT 1
+			defBoolAsInt(a.ConnectionWarming, false),       // NOT NULL DEFAULT 0
+			defInt32(a.ThrottleConnectionsPerSec, 1000000), // 1..1000000, NOT NULL DEFAULT 1000000
+			quote(a.IgnoreSessionVariables),                // JSON or '', NOT NULL DEFAULT ''
+			quote(a.Comment),
+		)
 	}
 	return c.Exec(ctx, b.String())
 }

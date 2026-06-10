@@ -318,6 +318,17 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 			CheckType: h.CheckType, Comment: h.Comment,
 		})
 	}
+	for _, a := range cfg.Spec.MySQLHostgroupAttributes {
+		d.MySQLHostgroupAttributes = append(d.MySQLHostgroupAttributes, proxysqlclient.MySQLHostgroupAttributes{
+			Hostgroup:           a.Hostgroup,
+			MaxNumOnlineServers: a.MaxNumOnlineServers, Autocommit: a.Autocommit,
+			FreeConnectionsPct: a.FreeConnectionsPct, InitConnect: a.InitConnect,
+			Multiplex: a.Multiplex, ConnectionWarming: a.ConnectionWarming,
+			ThrottleConnectionsPerSec: a.ThrottleConnectionsPerSec,
+			IgnoreSessionVariables:    a.IgnoreSessionVariables,
+			Comment:                   a.Comment,
+		})
+	}
 	for _, r2 := range cfg.Spec.MySQLQueryRules {
 		d.MySQLQueryRules = append(d.MySQLQueryRules, proxysqlclient.MySQLQueryRule{
 			RuleID: r2.RuleID, Active: r2.Active, Username: r2.Username,

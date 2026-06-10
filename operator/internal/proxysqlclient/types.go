@@ -27,6 +27,7 @@ type Desired struct {
 	MySQLUsers                 []MySQLUser
 	MySQLQueryRules            []MySQLQueryRule
 	MySQLReplicationHostgroups []MySQLReplicationHostgroup
+	MySQLHostgroupAttributes   []MySQLHostgroupAttributes
 
 	PostgreSQLServers    []PostgreSQLServer
 	PostgreSQLUsers      []PostgreSQLUser
@@ -94,6 +95,22 @@ type MySQLReplicationHostgroup struct {
 	ReaderHostgroup int32
 	CheckType       string
 	Comment         string
+}
+
+// MySQLHostgroupAttributes is the resolved form of a mysql_hostgroup_attributes
+// row. Every column in the ProxySQL 3.0 table is NOT NULL with a default, so
+// unset pointer fields render the column default rather than NULL.
+type MySQLHostgroupAttributes struct {
+	Hostgroup                 int32
+	MaxNumOnlineServers       *int32
+	Autocommit                *int32
+	FreeConnectionsPct        *int32
+	InitConnect               string
+	Multiplex                 *bool
+	ConnectionWarming         *bool
+	ThrottleConnectionsPerSec *int32
+	IgnoreSessionVariables    string
+	Comment                   string
 }
 
 // PostgreSQLServer is the resolved form of a pgsql_servers row.
