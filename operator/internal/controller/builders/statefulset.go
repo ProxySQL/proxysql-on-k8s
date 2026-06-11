@@ -38,10 +38,12 @@ func (b *Builder) StatefulSet(cnfChecksum string) *appsv1.StatefulSet {
 	maps.Copy(podLabels, selector)
 	maps.Copy(podLabels, b.Spec.PodLabels)
 
-	podAnnotations := map[string]string{
-		"proxysql.com/cnf-checksum": cnfChecksum,
-	}
+	// User annotations first, reserved key last: proxysql.com/cnf-checksum is
+	// the rollout trigger, so a user-supplied podAnnotations entry with the
+	// same key must never clobber it.
+	podAnnotations := make(map[string]string, len(b.Spec.PodAnnotations)+1)
 	maps.Copy(podAnnotations, b.Spec.PodAnnotations)
+	podAnnotations["proxysql.com/cnf-checksum"] = cnfChecksum
 
 	ss := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{

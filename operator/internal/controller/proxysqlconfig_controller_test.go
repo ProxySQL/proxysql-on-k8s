@@ -405,7 +405,7 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			// LastAppliedHash must match the fingerprint the controller will
 			// compute, so derive it the same way (buildDesired + the pod's
 			// admin address).
-			desired, err := r.buildDesired(ctx, cfg)
+			desired, err := r.buildDesired(ctx, cfg, b)
 			Expect(err).NotTo(HaveOccurred())
 			addr := fmt.Sprintf("127.0.0.1:%d", b.Spec.Protocols.Admin.Port)
 			past := metav1.NewTime(time.Now().Add(-1 * time.Hour))
@@ -715,5 +715,92 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 				NamespacedName: types.NamespacedName{Name: "secmap-admin-cfg", Namespace: ns},
 			}), "an unrelated Secret must not map to the config")
 		})
+	})
+})
+
+var _ = Describe("buildDesired proxysql_servers auto-population", func() {
+	const ns = "default"
+	ctx := context.Background()
+
+	// makeCluster creates a real (API-server-defaulted) ProxySQLCluster so
+	// the CRD defaults (admin port, etc.) apply exactly as in production.
+	makeCluster := func(name string, replicas int32) *proxysqlv1alpha1.ProxySQLCluster {
+		cluster := &proxysqlv1alpha1.ProxySQLCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       proxysqlv1alpha1.ProxySQLClusterSpec{Replicas: &replicas},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+		return cluster
+	}
+
+	makeCfg := func(name, clusterName string, mut ...func(*proxysqlv1alpha1.ProxySQLConfig)) *proxysqlv1alpha1.ProxySQLConfig {
+		cfg := &proxysqlv1alpha1.ProxySQLConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+				ClusterRef: corev1.LocalObjectReference{Name: clusterName},
+			},
+		}
+		for _, m := range mut {
+			m(cfg)
+		}
+		Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, cfg) })
+		return cfg
+	}
+
+	reconciler := func() *ProxySQLConfigReconciler {
+		return &ProxySQLConfigReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+	}
+
+	It("populates one peer per replica when the spec list is empty and replicas > 1 (#39)", func() {
+		cluster := makeCluster("autopop-multi", 3)
+		cfg := makeCfg("autopop-multi-cfg", cluster.Name)
+
+		b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+		d, err := reconciler().buildDesired(ctx, cfg, b)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(d.ProxySQLServers).To(HaveLen(3),
+			"empty spec.proxysqlServers on a 3-replica cluster must auto-populate 3 peers, "+
+				"otherwise the sync DELETEs the cnf-seeded peer table and disables cluster sync")
+		adminPort := b.Spec.Protocols.Admin.Port
+		Expect(adminPort).NotTo(BeZero())
+		for i, s := range d.ProxySQLServers {
+			Expect(s.Hostname).To(Equal(fmt.Sprintf("autopop-multi-%d.autopop-multi-headless.%s.svc", i, ns)),
+				"peer hostname must be the stable per-pod DNS name")
+			Expect(s.Port).To(Equal(adminPort), "peers talk cluster sync over the admin port")
+			Expect(s.Weight).To(Equal(int32(0)))
+			Expect(s.Comment).To(Equal(autoPopulatedPeerComment))
+		}
+	})
+
+	It("leaves the peer list empty when replicas <= 1", func() {
+		cluster := makeCluster("autopop-single", 1)
+		cfg := makeCfg("autopop-single-cfg", cluster.Name)
+
+		b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+		d, err := reconciler().buildDesired(ctx, cfg, b)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d.ProxySQLServers).To(BeEmpty(),
+			"a single-replica cluster has no peers; DELETE-to-empty is correct there")
+	})
+
+	It("passes an explicit spec list through unchanged", func() {
+		cluster := makeCluster("autopop-explicit", 3)
+		cfg := makeCfg("autopop-explicit-cfg", cluster.Name, func(c *proxysqlv1alpha1.ProxySQLConfig) {
+			c.Spec.ProxySQLServers = []proxysqlv1alpha1.ProxySQLServerEntry{
+				{Hostname: "peer-a.example", Port: 16032, Weight: 5, Comment: "explicit"},
+			}
+		})
+
+		b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+		d, err := reconciler().buildDesired(ctx, cfg, b)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d.ProxySQLServers).To(HaveLen(1), "explicit list must not be augmented")
+		Expect(d.ProxySQLServers[0].Hostname).To(Equal("peer-a.example"))
+		Expect(d.ProxySQLServers[0].Port).To(Equal(int32(16032)))
+		Expect(d.ProxySQLServers[0].Weight).To(Equal(int32(5)))
+		Expect(d.ProxySQLServers[0].Comment).To(Equal("explicit"))
 	})
 })

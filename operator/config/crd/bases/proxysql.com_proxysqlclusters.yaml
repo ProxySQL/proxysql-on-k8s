@@ -55,8 +55,9 @@ spec:
             description: spec defines the desired state of ProxySQLCluster
             properties:
               affinity:
-                description: Affinity for pod scheduling. Defaults to soft pod antiAffinity
-                  across nodes.
+                description: |-
+                  Affinity for pod scheduling. No affinity is applied by default; set
+                  explicitly to spread replicas across nodes/zones.
                 properties:
                   nodeAffinity:
                     description: Describes node affinity scheduling rules for the

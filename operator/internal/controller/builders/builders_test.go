@@ -927,3 +927,23 @@ func TestBuilder_StatefulSet_PartialKeepalive_OnlySetSysctls(t *testing.T) {
 		t.Errorf("builder mutated b.Spec.PodSecurityContext: %v", b.Spec.PodSecurityContext.Sysctls)
 	}
 }
+
+// TestStatefulSet_CnfChecksumAnnotationIsReserved pins that a user-supplied
+// spec.podAnnotations entry cannot clobber the proxysql.com/cnf-checksum
+// rollout-trigger annotation: the reserved key always wins.
+func TestStatefulSet_CnfChecksumAnnotationIsReserved(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.PodAnnotations = map[string]string{
+			"proxysql.com/cnf-checksum": "user-clobber-attempt",
+			"example.com/custom":        "kept",
+		}
+	})
+	b := New(c, newScheme(t), Passwords{})
+	ann := b.StatefulSet("real-checksum").Spec.Template.Annotations
+	if got := ann["proxysql.com/cnf-checksum"]; got != "real-checksum" {
+		t.Fatalf("cnf-checksum annotation = %q, want %q (user podAnnotations must not override the rollout trigger)", got, "real-checksum")
+	}
+	if got := ann["example.com/custom"]; got != "kept" {
+		t.Fatalf("custom pod annotation = %q, want %q", got, "kept")
+	}
+}
