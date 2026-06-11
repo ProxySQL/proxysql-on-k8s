@@ -17,25 +17,53 @@ metadata:
 spec:
   clusterRef:
     name: proxysql
+  # List the individual pods (stable DNS via the cluster1-mysql headless
+  # Service) so ProxySQL's monitor can watch each node's read_only flag and
+  # keep the writer/reader split correct — same pattern as the
+  # mariadb-operator example.
   mysqlServers:
-    # All traffic to the group-replication primary. The PS operator re-points
-    # the cluster1-mysql-primary Service to the new primary on failover, so
-    # this single row always reaches the writer.
-    #
-    # NOTE: the PS operator does NOT create a "-mysql-replicas" Service in the
-    # HAProxy-disabled topology this example uses. To scale reads across the GR
-    # secondaries, either enable HAProxy (spec.proxy.haproxy.enabled) and point
-    # a reader hostgroup at cluster1-haproxy:3307, or expose the pods
-    # individually (spec.mysql.expose.enabled) and add a
-    # mysqlReplicationHostgroups entry that splits writer/reader by read_only —
-    # see the mariadb-operator example for that pattern.
     - hostgroup: 0
-      hostname: cluster1-mysql-primary.percona-ps-demo.svc.cluster.local
+      hostname: cluster1-mysql-0.cluster1-mysql.percona-ps-demo.svc.cluster.local
       port: 3306
-      comment: "PS group-replication primary"
+    - hostgroup: 0
+      hostname: cluster1-mysql-1.cluster1-mysql.percona-ps-demo.svc.cluster.local
+      port: 3306
+
+  # Track read_only on these hosts: the primary (read_only=OFF) stays in
+  # hostgroup 0, the replica (super_read_only=ON) is moved to hostgroup 1.
+  mysqlReplicationHostgroups:
+    - writerHostgroup: 0
+      readerHostgroup: 1
+      checkType: read_only
+
   mysqlUsers:
     - username: root
       defaultHostgroup: 0
       passwordSecretRef:
         name: cluster1-secrets
         key: root
+
+  # Variable keys are the full ProxySQL global_variables names (the operator
+  # applies them verbatim), so MySQL variables carry the `mysql-` prefix.
+  mysqlVariables:
+    # The PS operator pre-creates a `monitor` user; its password lives in
+    # cluster1-secrets under the `monitor` key. ProxySQL's monitor credentials
+    # are admin variables (plain strings — no secretRef), so this value must
+    # match that secret. Both ship with the same REPLACE-ME placeholder; if
+    # you change one, change the other.
+    mysql-monitor_username: "monitor"
+    mysql-monitor_password: "REPLACE-ME-monitor"
+    mysql-monitor_read_only_interval: "1500"
+    mysql-monitor_read_only_timeout: "500"
+
+  mysqlQueryRules:
+    - ruleId: 100
+      active: true
+      matchDigest: "^SELECT.*FOR UPDATE$"
+      destinationHostgroup: 0
+      apply: true
+    - ruleId: 200
+      active: true
+      matchDigest: "^SELECT"
+      destinationHostgroup: 1
+      apply: true

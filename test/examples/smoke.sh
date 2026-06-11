@@ -42,6 +42,18 @@ ensure_proxysql_operator() {
     --wait --timeout=3m
 }
 
+# rollout_sts NS NAME — wait for the ProxySQL operator to create the
+# StatefulSet, then for it to become ready. A bare `rollout status` right
+# after `kubectl apply` can race the reconciler and die on NotFound.
+rollout_sts() {
+  local ns="$1" name="$2" i
+  for i in $(seq 1 24); do
+    kubectl -n "$ns" get statefulset "$name" >/dev/null 2>&1 && break
+    sleep 5
+  done
+  kubectl -n "$ns" rollout status "statefulset/$name" --timeout=3m
+}
+
 # wait_synced NS CFG WANT — poll ProxySQLConfig.status.syncedReplicas >= WANT.
 wait_synced() {
   local ns="$1" cfg="$2" want="${3:-1}" i s
@@ -82,7 +94,7 @@ case "$EX" in
   cloudnativepg)
     d="$(dir postgresql/cloudnativepg)"
     helm_repo cnpg https://cloudnative-pg.github.io/charts
-    helm install cnpg cnpg/cloudnative-pg -n cnpg-system --create-namespace --wait --timeout=5m
+    helm upgrade --install cnpg cnpg/cloudnative-pg -n cnpg-system --create-namespace --wait --timeout=5m
     ensure_proxysql_operator
     kubectl apply -f "$d/backend.yaml"
     log "waiting for CNPG cluster"
@@ -100,8 +112,8 @@ case "$EX" in
   mariadb-operator)
     d="$(dir mysql/mariadb-operator)"
     helm_repo mariadb-operator https://helm.mariadb.com/mariadb-operator
-    helm install mariadb-operator-crds mariadb-operator/mariadb-operator-crds -n mariadb-operator --create-namespace >/dev/null 2>&1 || true
-    helm install mariadb-operator mariadb-operator/mariadb-operator -n mariadb-operator --wait --timeout=5m
+    helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds -n mariadb-operator --create-namespace >/dev/null 2>&1 || true
+    helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator -n mariadb-operator --wait --timeout=5m
     ensure_proxysql_operator
     kubectl apply -f "$d/backend.yaml"
     log "waiting for MariaDB cluster (replication)"
@@ -117,13 +129,89 @@ case "$EX" in
     ok "mariadb query through ProxySQL :6033 returned '$out'"
     ;;
 
-  percona-ps|percona-pxc|oracle-mysql-operator|crunchy-pgo)
-    # These backends are heavier and not yet wired into the smoke harness.
-    # The example manifests are schema-validated in per-PR CI; full end-to-end
-    # coverage here is tracked as follow-up. Skip cleanly (matrix leg passes as
-    # "not implemented" rather than failing the nightly).
-    log "smoke for '$EX' not implemented yet — skipping (see issue #9)"
-    exit 0
+  percona-ps)
+    d="$(dir mysql/percona-ps)"
+    helm_repo percona https://percona.github.io/percona-helm-charts/
+    helm upgrade --install ps-operator percona/ps-operator --version 1.1.0 --set watchAllNamespaces=true \
+      -n ps-operator --create-namespace --wait --timeout=5m
+    ensure_proxysql_operator
+    kubectl apply -f "$d/backend.yaml"
+    log "waiting for PerconaServerMySQL (async, 1 primary + 1 replica)"
+    kubectl -n percona-ps-demo wait perconaservermysqls.ps.percona.com/cluster1 \
+      --for=jsonpath='{.status.state}'=ready --timeout=10m
+    kubectl apply -f "$d/proxysql.yaml"
+    rollout_sts percona-ps-demo proxysql
+    wait_synced percona-ps-demo pxcfg 1
+    pw="$(kubectl -n percona-ps-demo get secret cluster1-secrets -o jsonpath='{.data.root}' | base64 -d)"
+    # SELECTs are routed to hostgroup 1; either node proves the path works.
+    out="$(client_query percona-ps-demo mysql:8.4 "MYSQL_PWD=$pw" -- \
+      mysql -h proxysql -P6033 -uroot -N -B -e "SELECT @@hostname")"
+    echo "$out" | grep -q "cluster1-mysql" || die "query through ProxySQL did not reach a PS node: '$out'"
+    ok "mysql query through ProxySQL :6033 answered by '$out'"
+    ;;
+
+  percona-pxc)
+    d="$(dir mysql/percona-pxc)"
+    helm_repo percona https://percona.github.io/percona-helm-charts/
+    helm upgrade --install pxc-operator percona/pxc-operator --version 1.20.0 --set watchAllNamespaces=true \
+      -n pxc-operator --create-namespace --wait --timeout=5m
+    ensure_proxysql_operator
+    kubectl apply -f "$d/backend.yaml"
+    log "waiting for PerconaXtraDBCluster (3 nodes; first boot does SSTs)"
+    kubectl -n percona-pxc-demo wait perconaxtradbclusters.pxc.percona.com/cluster1 \
+      --for=jsonpath='{.status.state}'=ready --timeout=15m
+    kubectl apply -f "$d/proxysql.yaml"
+    rollout_sts percona-pxc-demo proxysql
+    wait_synced percona-pxc-demo pxcfg 1
+    pw="$(kubectl -n percona-pxc-demo get secret cluster1-secrets -o jsonpath='{.data.root}' | base64 -d)"
+    out="$(client_query percona-pxc-demo mysql:8.4 "MYSQL_PWD=$pw" -- \
+      mysql -h proxysql -P6033 -uroot -N -B -e "SELECT @@wsrep_node_name")"
+    echo "$out" | grep -q "cluster1-pxc" || die "query through ProxySQL did not reach a Galera node: '$out'"
+    ok "mysql query through ProxySQL :6033 answered by Galera node '$out'"
+    ;;
+
+  oracle-mysql-operator)
+    d="$(dir mysql/oracle-mysql-operator)"
+    helm_repo mysql-operator https://mysql.github.io/mysql-operator/
+    helm upgrade --install mysql-operator mysql-operator/mysql-operator --version 2.2.8 \
+      -n mysql-operator --create-namespace --wait --timeout=5m
+    ensure_proxysql_operator
+    kubectl apply -f "$d/backend.yaml"
+    log "waiting for InnoDBCluster to reach ONLINE"
+    kubectl -n oracle-mysql-demo wait innodbcluster/mycluster \
+      --for=jsonpath='{.status.cluster.status}'=ONLINE --timeout=10m
+    kubectl apply -f "$d/proxysql.yaml"
+    rollout_sts oracle-mysql-demo proxysql
+    wait_synced oracle-mysql-demo pxcfg 1
+    pw="$(kubectl -n oracle-mysql-demo get secret mycluster-secret -o jsonpath='{.data.rootPassword}' | base64 -d)"
+    out="$(client_query oracle-mysql-demo mysql:8.4 "MYSQL_PWD=$pw" -- \
+      mysql -h proxysql -P6033 -uroot -N -B -e "SELECT @@hostname")"
+    echo "$out" | grep -q "mycluster-0" || die "query through ProxySQL did not reach the InnoDB Cluster instance: '$out'"
+    ok "mysql query through ProxySQL :6033 answered by '$out'"
+    ;;
+
+  crunchy-pgo)
+    d="$(dir postgresql/crunchy-pgo)"
+    helm upgrade --install pgo oci://registry.developers.crunchydata.com/crunchydata/pgo \
+      --version 5.8.3 -n postgres-operator --create-namespace --wait --timeout=5m
+    ensure_proxysql_operator
+    kubectl apply -f "$d/backend.yaml"
+    log "waiting for the Patroni leader pod"
+    # The leader pod doesn't exist immediately — poll until the role label shows up.
+    sel="postgres-operator.crunchydata.com/cluster=hippo,postgres-operator.crunchydata.com/role=master"
+    for i in $(seq 1 60); do
+      [[ -n "$(kubectl -n crunchy-demo get pod -l "$sel" -o name 2>/dev/null)" ]] && break
+      sleep 5
+    done
+    kubectl -n crunchy-demo wait pod -l "$sel" --for=condition=Ready --timeout=10m
+    kubectl apply -f "$d/proxysql.yaml"
+    rollout_sts crunchy-demo proxysql
+    wait_synced crunchy-demo pxcfg 1
+    pw="$(kubectl -n crunchy-demo get secret hippo-pguser-app -o jsonpath='{.data.password}' | base64 -d)"
+    out="$(client_query crunchy-demo postgres:16 "PGPASSWORD=$pw" -- \
+      psql -h proxysql -p 6133 -U app -d app -tAc "SELECT current_database()")"
+    echo "$out" | grep -qx app || die "psql through ProxySQL did not return 'app': '$out'"
+    ok "psql through ProxySQL :6133 returned '$out'"
     ;;
 
   *)

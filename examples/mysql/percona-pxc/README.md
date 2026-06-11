@@ -25,12 +25,11 @@ in the backend CR and use the operator-managed one instead.
 ## Install order
 
 ```bash
-# 1. PXC Operator.
+# 1. PXC Operator (pinned).
 helm repo add percona https://percona.github.io/percona-helm-charts/
-helm install pxc-operator percona/pxc-operator -n pxc-operator --create-namespace
+helm install pxc-operator percona/pxc-operator --version 1.20.0 --set watchAllNamespaces=true -n pxc-operator --create-namespace
 
-# 2. Backend.
-kubectl create namespace percona-pxc-demo
+# 2. Namespace + secrets + PerconaXtraDBCluster CR.
 kubectl apply -f backend.yaml
 
 # 3. Wait — first boot does an SST and can take several minutes.
@@ -49,8 +48,8 @@ kubectl apply -f proxysql.yaml
 
 ```bash
 ROOT_PW=$(kubectl -n percona-pxc-demo get secret cluster1-secrets -o jsonpath='{.data.root}' | base64 -d)
-kubectl -n percona-pxc-demo run -it --rm mysql-cli --image=mysql:8.0 --restart=Never -- \
-  mysql -h proxysql -P 6033 -uroot -p"$ROOT_PW" -e "SELECT @@wsrep_node_name, @@wsrep_cluster_status"
+kubectl -n percona-pxc-demo run -it --rm mysql-cli --image=mysql:8.4 --restart=Never --env=MYSQL_PWD="$ROOT_PW" -- \
+  mysql -h proxysql -P 6033 -uroot -e "SELECT @@wsrep_node_name, @@wsrep_cluster_status"
 ```
 
 Run repeatedly — you should see `wsrep_node_name` change as ProxySQL

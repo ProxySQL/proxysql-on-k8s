@@ -35,10 +35,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Validated end-to-end. Others (percona-ps, percona-pxc,
-        # oracle-mysql-operator, crunchy-pgo) are stubbed in smoke.sh and added
-        # here as their harness support lands.
-        example: [cloudnativepg, mariadb-operator]
+        # One leg per backend-operator cookbook under examples/ — all six
+        # validated end-to-end.
+        example:
+          [
+            cloudnativepg,
+            mariadb-operator,
+            percona-ps,
+            percona-pxc,
+            oracle-mysql-operator,
+            crunchy-pgo,
+          ]
     steps:
       - uses: actions/checkout@v4
 
@@ -84,3 +91,8 @@ jobs:
         run: |
           kubectl get pods -A 2>&1 | grep -vE "kube-system|local-path" || true
           kubectl -n proxysql-system logs deploy/proxysql-operator --tail=150 || true
+          # Backend-namespace diagnostics: every example uses a *-demo ns.
+          for ns in $(kubectl get ns -o name | grep -- '-demo' | cut -d/ -f2); do
+            echo "==== $ns pods ===="; kubectl -n "$ns" get pods -o wide || true
+            kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
+          done

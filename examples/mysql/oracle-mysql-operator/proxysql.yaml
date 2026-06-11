@@ -17,19 +17,20 @@ metadata:
 spec:
   clusterRef:
     name: proxysql
-  # Both rows resolve to the same Router Service — the operator's R/W port
-  # (6446) is the primary, the R/O port (6447) is the read-only fan-out.
-  # The Router itself does the GR primary selection; ProxySQL adds query
-  # rules + connection multiplexing on top.
+  # No Router in this topology (router.instances=0) — ProxySQL talks straight
+  # to the instance via its stable per-pod DNS from the `mycluster-instances`
+  # headless Service. With a single instance everything lives in hostgroup 0.
+  # Scaling out: bump `instances` in backend.yaml and add the new pods
+  # (mycluster-1, mycluster-2, ...) to hostgroup 1 as the read pool.
   mysqlServers:
     - hostgroup: 0
-      hostname: mycluster.oracle-mysql-demo.svc.cluster.local
-      port: 6446
-      comment: "writer via Router R/W port"
-    - hostgroup: 1
-      hostname: mycluster.oracle-mysql-demo.svc.cluster.local
-      port: 6447
-      comment: "reader via Router R/O port"
+      hostname: mycluster-0.mycluster-instances.oracle-mysql-demo.svc.cluster.local
+      port: 3306
+      # MySQL 8.4/9.x accounts default to caching_sha2_password, which needs
+      # a secure channel for full authentication — so connect over TLS
+      # (the certs come from tlsUseSelfSigned in backend.yaml).
+      useSSL: true
+      comment: "InnoDB Cluster instance 0 (primary)"
   mysqlUsers:
     # InnoDBCluster only provisions the `root` account, so that's the user we
     # wire through. For an app-specific account, create it in the backend
@@ -40,18 +41,9 @@ spec:
       passwordSecretRef:
         name: mycluster-secret
         key: rootPassword
-  mysqlQueryRules:
-    # SELECT ... FOR UPDATE / SELECT ... LOCK IN SHARE MODE must hit the writer.
-    - ruleId: 100
-      active: true
-      matchDigest: "^SELECT.*FOR UPDATE$"
-      destinationHostgroup: 0
-      apply: true
-      comment: "locked reads → writer"
-    # Plain SELECTs → readers (Router R/O port).
-    - ruleId: 200
-      active: true
-      matchDigest: "^SELECT"
-      destinationHostgroup: 1
-      apply: true
-      comment: "SELECTs → readers"
+  # InnoDBCluster provisions no `monitor` account, and ProxySQL's monitor
+  # defaults to monitor/monitor — repeated auth failures would eventually
+  # SHUN the single backend. Disable the monitor for this demo; to enable
+  # it, create a monitor user in the backend first.
+  mysqlVariables:
+    mysql-monitor_enabled: "false"

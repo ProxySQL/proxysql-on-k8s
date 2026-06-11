@@ -3,16 +3,27 @@ kind: Namespace
 metadata:
   name: oracle-mysql-demo
 ---
-# A 3-instance InnoDB Cluster with 1 MySQL Router pod.
+# Root credentials for the InnoDBCluster. The operator expects exactly these
+# keys. ProxySQL reuses this same secret for the `root` user wired into the
+# ProxySQLConfig — no copies, no rotation drift.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mycluster-secret
+  namespace: oracle-mysql-demo
+stringData:
+  rootUser: "root"
+  rootHost: "%"
+  rootPassword: "REPLACE-ME-root-pw"
+---
+# A single-instance InnoDBCluster with NO MySQL Router pods — ProxySQL
+# (managed by the ProxySQL operator) takes Router's place as the access
+# layer. The operator still creates:
+#   mycluster-instances    headless; per-instance pod DNS (what we use)
+#   mycluster              Router service — no endpoints with router.instances=0
 #
-# Connection points the operator creates for us:
-#   mycluster                    R/W traffic via Router on port 6446
-#                                R/O traffic via Router on port 6447
-#   mycluster-instances          headless; per-instance pod DNS
-#
-# The rootPassword secret (`mycluster-secret`) is created by the user
-# beforehand — see README. ProxySQL reuses that same secret for the
-# `root` user wired into the ProxySQLConfig.
+# One instance keeps the example kind-sized. For real HA bump `instances`
+# to 3 and add the secondaries to hostgroup 1 in proxysql.yaml.
 apiVersion: mysql.oracle.com/v2
 kind: InnoDBCluster
 metadata:
@@ -21,9 +32,9 @@ metadata:
 spec:
   secretName: mycluster-secret
   tlsUseSelfSigned: true
-  instances: 3
+  instances: 1
   router:
-    instances: 1
+    instances: 0
   datadirVolumeClaimTemplate:
     accessModes: [ReadWriteOnce]
     resources:
