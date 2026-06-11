@@ -32,6 +32,19 @@ YAML
 
   local radmin oldip newip out
   radmin="$(radmin_pw "$ns" pxc)"
+
+  # Issue #39: a config whose spec.proxysqlServers is empty must NOT wipe the
+  # peer table — the operator auto-populates it from the StatefulSet pods, so
+  # runtime_proxysql_servers must still hold all 3 peers after the sync.
+  local ip0 peers
+  ip0="$(kubectl -n "$ns" get pod pxc-0 -o jsonpath='{.status.podIP}')"
+  peers="$(admin_query "$ns" "$ip0" "$radmin" "SELECT COUNT(*) FROM runtime_proxysql_servers")"
+  if [[ "$peers" != "3" ]]; then
+    fail "expected 3 peers in runtime_proxysql_servers after config sync, got '$peers'"
+    dump_ns "$ns"
+    return 1
+  fi
+  log "multireplica: runtime_proxysql_servers still has 3 peers after config sync (#39)"
   oldip="$(kubectl -n "$ns" get pod pxc-1 -o jsonpath='{.status.podIP}')"
   log "multireplica: deleting pxc-1 (old IP $oldip)"
   kubectl -n "$ns" delete pod pxc-1 --wait=true >/dev/null

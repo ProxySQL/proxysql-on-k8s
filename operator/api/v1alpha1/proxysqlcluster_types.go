@@ -67,7 +67,8 @@ type ProxySQLClusterSpec struct {
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
-	// Affinity for pod scheduling. Defaults to soft pod antiAffinity across nodes.
+	// Affinity for pod scheduling. No affinity is applied by default; set
+	// explicitly to spread replicas across nodes/zones.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 

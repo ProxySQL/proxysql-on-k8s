@@ -22,7 +22,7 @@ kubectl apply -f backend.yaml
 # 3. Wait for it to reach Ready (see backend operator's docs/CRD status).
 
 # 4. ProxySQL operator (also one-time).
-helm repo add proxysql https://proxysql.github.io/kubernetes
+helm repo add proxysql https://proxysql.github.io/proxysql-on-k8s
 helm install proxysql-operator proxysql/proxysql-operator -n proxysql-system --create-namespace
 
 # 5. ProxySQL cluster + config.

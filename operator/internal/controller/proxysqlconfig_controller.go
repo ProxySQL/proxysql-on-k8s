@@ -192,7 +192,7 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	radminPassword := adminPw.Radmin
 
 	// 3) Resolve user passwords (mysql_users + pgsql_users) from Secrets.
-	desired, err := r.buildDesired(ctx, &cfg)
+	desired, err := r.buildDesired(ctx, &cfg, b)
 	if err != nil {
 		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "UserSecretError", err.Error())
 		_ = r.Status().Update(ctx, &cfg)
@@ -296,9 +296,17 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 }
 
+// autoPopulatedPeerComment marks proxysql_servers rows the operator derived
+// from the target cluster's StatefulSet pods (spec.proxysqlServers was empty).
+const autoPopulatedPeerComment = "operator-populated from ProxySQLCluster pods"
+
 // buildDesired translates the K8s spec into the resolved Desired struct
-// the proxysqlclient package operates on.
-func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig) (*proxysqlclient.Desired, error) {
+// the proxysqlclient package operates on. b is the target cluster's builder
+// (defaulted spec): when spec.proxysqlServers is empty and the cluster runs
+// more than one replica, the peer list is auto-populated from the cluster's
+// stable per-pod DNS names so the sync doesn't DELETE the cnf-seeded
+// proxysql_servers table and silently disable ProxySQL Cluster sync (#39).
+func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig, b *builders.Builder) (*proxysqlclient.Desired, error) {
 	d := &proxysqlclient.Desired{
 		AdminVariables:      cfg.Spec.AdminVariables,
 		MySQLVariables:      cfg.Spec.MySQLVariables,
@@ -387,6 +395,20 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 		d.ProxySQLServers = append(d.ProxySQLServers, proxysqlclient.ProxySQLServer{
 			Hostname: s.Hostname, Port: s.Port, Weight: s.Weight, Comment: s.Comment,
 		})
+	}
+	if len(cfg.Spec.ProxySQLServers) == 0 {
+		// Auto-populate the peer table (documented CRD behavior, #39).
+		// ProxySQLServerDNS returns the same stable per-pod DNS names the
+		// bootstrap cnf seeds, and returns nil when the defaulted replica
+		// count is <= 1 — there an empty peer table (DELETE) is correct.
+		for _, host := range b.ProxySQLServerDNS() {
+			d.ProxySQLServers = append(d.ProxySQLServers, proxysqlclient.ProxySQLServer{
+				Hostname: host,
+				Port:     b.Spec.Protocols.Admin.Port,
+				Weight:   0,
+				Comment:  autoPopulatedPeerComment,
+			})
+		}
 	}
 	return d, nil
 }
