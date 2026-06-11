@@ -41,3 +41,9 @@ spec:
       passwordSecretRef:
         name: mycluster-secret
         key: rootPassword
+  # InnoDBCluster provisions no `monitor` account, and ProxySQL's monitor
+  # defaults to monitor/monitor — repeated auth failures would eventually
+  # SHUN the single backend. Disable the monitor for this demo; to enable
+  # it, create a monitor user in the backend first.
+  mysqlVariables:
+    mysql-monitor_enabled: "false"

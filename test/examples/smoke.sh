@@ -94,7 +94,7 @@ case "$EX" in
   cloudnativepg)
     d="$(dir postgresql/cloudnativepg)"
     helm_repo cnpg https://cloudnative-pg.github.io/charts
-    helm install cnpg cnpg/cloudnative-pg -n cnpg-system --create-namespace --wait --timeout=5m
+    helm upgrade --install cnpg cnpg/cloudnative-pg -n cnpg-system --create-namespace --wait --timeout=5m
     ensure_proxysql_operator
     kubectl apply -f "$d/backend.yaml"
     log "waiting for CNPG cluster"
@@ -112,8 +112,8 @@ case "$EX" in
   mariadb-operator)
     d="$(dir mysql/mariadb-operator)"
     helm_repo mariadb-operator https://helm.mariadb.com/mariadb-operator
-    helm install mariadb-operator-crds mariadb-operator/mariadb-operator-crds -n mariadb-operator --create-namespace >/dev/null 2>&1 || true
-    helm install mariadb-operator mariadb-operator/mariadb-operator -n mariadb-operator --wait --timeout=5m
+    helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds -n mariadb-operator --create-namespace >/dev/null 2>&1 || true
+    helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator -n mariadb-operator --wait --timeout=5m
     ensure_proxysql_operator
     kubectl apply -f "$d/backend.yaml"
     log "waiting for MariaDB cluster (replication)"
@@ -132,7 +132,7 @@ case "$EX" in
   percona-ps)
     d="$(dir mysql/percona-ps)"
     helm_repo percona https://percona.github.io/percona-helm-charts/
-    helm install ps-operator percona/ps-operator --version 1.1.0 --set watchAllNamespaces=true \
+    helm upgrade --install ps-operator percona/ps-operator --version 1.1.0 --set watchAllNamespaces=true \
       -n ps-operator --create-namespace --wait --timeout=5m
     ensure_proxysql_operator
     kubectl apply -f "$d/backend.yaml"
@@ -153,7 +153,7 @@ case "$EX" in
   percona-pxc)
     d="$(dir mysql/percona-pxc)"
     helm_repo percona https://percona.github.io/percona-helm-charts/
-    helm install pxc-operator percona/pxc-operator --version 1.20.0 --set watchAllNamespaces=true \
+    helm upgrade --install pxc-operator percona/pxc-operator --version 1.20.0 --set watchAllNamespaces=true \
       -n pxc-operator --create-namespace --wait --timeout=5m
     ensure_proxysql_operator
     kubectl apply -f "$d/backend.yaml"
@@ -173,7 +173,7 @@ case "$EX" in
   oracle-mysql-operator)
     d="$(dir mysql/oracle-mysql-operator)"
     helm_repo mysql-operator https://mysql.github.io/mysql-operator/
-    helm install mysql-operator mysql-operator/mysql-operator --version 2.2.8 \
+    helm upgrade --install mysql-operator mysql-operator/mysql-operator --version 2.2.8 \
       -n mysql-operator --create-namespace --wait --timeout=5m
     ensure_proxysql_operator
     kubectl apply -f "$d/backend.yaml"
@@ -192,7 +192,7 @@ case "$EX" in
 
   crunchy-pgo)
     d="$(dir postgresql/crunchy-pgo)"
-    helm install pgo oci://registry.developers.crunchydata.com/crunchydata/pgo \
+    helm upgrade --install pgo oci://registry.developers.crunchydata.com/crunchydata/pgo \
       --version 5.8.3 -n postgres-operator --create-namespace --wait --timeout=5m
     ensure_proxysql_operator
     kubectl apply -f "$d/backend.yaml"

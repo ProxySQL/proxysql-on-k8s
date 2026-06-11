@@ -29,8 +29,7 @@ in the backend CR and use the operator-managed one instead.
 helm repo add percona https://percona.github.io/percona-helm-charts/
 helm install pxc-operator percona/pxc-operator --version 1.20.0 --set watchAllNamespaces=true -n pxc-operator --create-namespace
 
-# 2. Backend.
-kubectl create namespace percona-pxc-demo
+# 2. Namespace + secrets + PerconaXtraDBCluster CR.
 kubectl apply -f backend.yaml
 
 # 3. Wait — first boot does an SST and can take several minutes.
