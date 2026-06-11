@@ -156,6 +156,17 @@ CI runs all of the above on every PR — see [`.github/workflows/ci.yaml`](./.gi
 
 ## Documentation
 
+Full documentation index: [`docs/README.md`](./docs/README.md). Four layers:
+
+| Layer | Start here | When |
+| --- | --- | --- |
+| **Quickstart** | [`docs/quickstart.md`](./docs/quickstart.md) | Try it in ~5 minutes: operator, one manifest, a real query. |
+| **Tutorials** | [`docs/tutorials/`](./docs/tutorials/01-first-cluster.md) | Learning path: first cluster → routing → PostgreSQL → HA → logging → monitoring. |
+| **User guide** | [`docs/user-guide/`](./docs/user-guide/installation.md) | Running it: installation, clusters, configuration, security, operations, backends. |
+| **Reference** | [`docs/reference/`](./docs/reference/proxysqlcluster.md) | Every field, condition, annotation, and chart value, in tables. |
+
+Plus:
+
 - [`docs/architecture.md`](./docs/architecture.md) — operator design, reconcile loops, write strategy
 - [`docs/migration-from-v1.md`](./docs/migration-from-v1.md) — mapping from the old chart layout to v2
 - [`examples/README.md`](./examples/README.md) — backend cookbook index

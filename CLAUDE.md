@@ -15,7 +15,7 @@ ProxySQL on Kubernetes, v2. Three layers:
    - Two reconcilers, a builders package, one MySQL-wire SQL client (`internal/proxysqlclient`).
 3. **Examples** (`examples/`) — backend cookbook entries (Oracle MySQL Operator, Percona PS/PXC, MariaDB Operator, CloudNativePG, Crunchy PGO) plus shared sysbench/pgbench Jobs in `examples/loadgen/`.
 
-`docs/architecture.md` is the source of truth for design rationale and reconcile-loop pseudocode. `docs/migration-from-v1.md` maps v1 chart/value names to this repo's layout. (Both arrive in a separate docs PR — link until then.)
+`docs/architecture.md` is the source of truth for design rationale and reconcile-loop pseudocode. `docs/migration-from-v1.md` maps v1 chart/value names to this repo's layout. User-facing documentation lives under `docs/` in four layers — `docs/quickstart.md`, `docs/tutorials/`, `docs/user-guide/`, `docs/reference/` — indexed by `docs/README.md`; behavior changes in the operator usually need a matching reference/user-guide update.
 
 ## Common commands
 
