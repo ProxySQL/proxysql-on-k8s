@@ -2,7 +2,7 @@ apiVersion: v2
 name: proxysql-cluster
 description: ProxySQL control-plane (StatefulSet, persistent) for operator-managed ProxySQL Clusters
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "3.0"
 kubeVersion: ">=1.29.0-0"
 keywords:
