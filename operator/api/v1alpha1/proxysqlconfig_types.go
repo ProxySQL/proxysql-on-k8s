@@ -88,6 +88,18 @@ type ProxySQLConfigSpec struct {
 	MySQLVariables map[string]string `json:"mysqlVariables,omitempty"`
 	// +optional
 	PostgreSQLVariables map[string]string `json:"pgsqlVariables,omitempty"`
+
+	// SQLStatements is raw admin SQL executed verbatim on every replica,
+	// in order, after all structured config, on EVERY sync pass — including
+	// on new or restarted replicas and after drift resyncs. Statements MUST
+	// be idempotent. They are opaque to the operator: no implicit
+	// LOAD/SAVE is appended, their effects are not drift-tracked, and
+	// deletion cleanup does not reverse them. A statement that breaks admin
+	// connectivity (e.g. changing admin credentials) locks the operator out
+	// until a pod restart restores the cnf-based credentials.
+	// +optional
+	// +kubebuilder:validation:items:MinLength=1
+	SQLStatements []string `json:"sqlStatements,omitempty"`
 }
 
 // MySQLServer maps to a row in the ProxySQL mysql_servers table.
