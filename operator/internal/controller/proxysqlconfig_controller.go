@@ -311,6 +311,7 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 		AdminVariables:      cfg.Spec.AdminVariables,
 		MySQLVariables:      cfg.Spec.MySQLVariables,
 		PostgreSQLVariables: cfg.Spec.PostgreSQLVariables,
+		SQLStatements:       append([]string(nil), cfg.Spec.SQLStatements...),
 	}
 
 	for _, s := range cfg.Spec.MySQLServers {
