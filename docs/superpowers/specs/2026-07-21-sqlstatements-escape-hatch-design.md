@@ -79,10 +79,13 @@ spec:
 - `sync_test.go` fake-executor tests: statements emitted verbatim, in order,
   after structured config; failure surfaces as sync error for that replica;
   hash changes when statements change.
-- envtest: `ProxySQLConfig` with `sqlStatements` reaches `Synced`; a failing
-  statement (fake executor error) produces `Degraded`/`PartialSync`.
-- e2e (kind suite): flush-style statement executes on all replicas; edit →
-  re-sync observed.
+- envtest: not applicable — the reconciler dials real ProxySQL directly
+  (`applyToReplicas` has no executor seam), matching the existing suite,
+  which covers finalizer/status paths only. Execution semantics live in the
+  fake-executor unit tests; the success/`Degraded` surface is exercised by
+  the kind e2e, same as for structured config.
+- e2e (kind suite): statement executes on the replica with a
+  runtime-verifiable effect; edit → re-sync observed via `lastAppliedHash`.
 - Docs: reference page for the field + user-guide section with idempotency
   and lockout warnings.
 
