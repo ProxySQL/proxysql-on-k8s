@@ -140,11 +140,11 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Capture the StatefulSet's current annotations BEFORE ensureStatefulSet
-	// overwrites them: resolveRestartChecksum needs both the pod-template
-	// proxysql.com/cnf-checksum (prev) and the object-level
-	// proxysql.com/vars-applied-hash (appliedVars) as they stood before this
-	// reconcile.
-	prev, appliedVars, err := r.currentStatefulSetAnnotations(ctx, b)
+	// overwrites them: resolveRestartChecksum needs the pod-template
+	// proxysql.com/cnf-checksum (prev) plus the object-level
+	// proxysql.com/vars-applied-hash and proxysql.com/structural-applied-hash
+	// markers as they stood before this reconcile.
+	prev, appliedVars, structuralApplied, err := r.currentStatefulSetAnnotations(ctx, b)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -152,14 +152,15 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Checksum over every cnf Secret key (proxysql.cnf + fluent-bit.conf when
 	// logging is enabled) so any config change rolls the pods.
 	newHash := builders.CnfChecksum(cnfSecret.Data)
-	annotation, appliedVarsHash, summary, err := r.resolveRestartChecksum(ctx, &cluster, oldCnfData, cnfSecret.Data, prev, newHash, appliedVars, pw.Radmin)
+	annotation, appliedVarsHash, structuralAppliedHash, summary, err := r.resolveRestartChecksum(
+		ctx, &cluster, oldCnfData, cnfSecret.Data, prev, newHash, appliedVars, structuralApplied, pw.Radmin)
 	if err != nil {
 		// Runtime SQL push failed partway through: requeue without advancing
-		// the vars-applied-hash annotation, so the retry re-pushes the same
+		// either marker annotation, so the retry re-pushes the same
 		// variables (see resolveRestartChecksum's crash-safety contract).
 		return ctrl.Result{}, err
 	}
-	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(annotation), appliedVarsHash); err != nil {
+	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(annotation), appliedVarsHash, structuralAppliedHash); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -194,18 +195,21 @@ func (r *ProxySQLClusterReconciler) currentCnfData(ctx context.Context, b *build
 
 // currentStatefulSetAnnotations reads the StatefulSet's pod-template
 // proxysql.com/cnf-checksum (prev) and object-level
-// proxysql.com/vars-applied-hash (appliedVars) as they stood before this
-// reconcile. Both are "" if the StatefulSet doesn't exist yet.
-func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Context, b *builders.Builder) (prev, appliedVars string, err error) {
+// proxysql.com/vars-applied-hash (appliedVars) plus
+// proxysql.com/structural-applied-hash (structuralApplied) as they stood
+// before this reconcile. All are "" if the StatefulSet doesn't exist yet.
+func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Context, b *builders.Builder) (prev, appliedVars, structuralApplied string, err error) {
 	var ss appsv1.StatefulSet
 	getErr := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
 	if apierrors.IsNotFound(getErr) {
-		return "", "", nil
+		return "", "", "", nil
 	}
 	if getErr != nil {
-		return "", "", fmt.Errorf("get statefulset: %w", getErr)
+		return "", "", "", fmt.Errorf("get statefulset: %w", getErr)
 	}
-	return ss.Spec.Template.Annotations[annotationCnfChecksum], ss.Annotations[annotationVarsAppliedHash], nil
+	return ss.Spec.Template.Annotations[annotationCnfChecksum],
+		ss.Annotations[annotationVarsAppliedHash],
+		ss.Annotations[annotationStructuralAppliedHash], nil
 }
 
 // resolvePasswords reads the admin/radmin/monitor passwords from the auth Secret.
@@ -385,11 +389,12 @@ func (r *ProxySQLClusterReconciler) ensureService(ctx context.Context, owner *pr
 	return err
 }
 
-// ensureStatefulSet creates or updates the StatefulSet. varsAppliedHash is
-// written as an OBJECT-level annotation (proxysql.com/vars-applied-hash) —
-// never on the pod template — so recording it never triggers a rollout; see
-// resolveRestartChecksum for what it tracks.
-func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *appsv1.StatefulSet, varsAppliedHash string) error {
+// ensureStatefulSet creates or updates the StatefulSet. varsAppliedHash and
+// structuralAppliedHash are written as OBJECT-level annotations
+// (proxysql.com/vars-applied-hash, proxysql.com/structural-applied-hash) —
+// never on the pod template — so recording them never triggers a rollout;
+// see resolveRestartChecksum for what they track.
+func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *appsv1.StatefulSet, varsAppliedHash, structuralAppliedHash string) error {
 	existing := &appsv1.StatefulSet{}
 	existing.Name = desired.Name
 	existing.Namespace = desired.Namespace
@@ -399,6 +404,7 @@ func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner
 			existing.Annotations = map[string]string{}
 		}
 		existing.Annotations[annotationVarsAppliedHash] = varsAppliedHash
+		existing.Annotations[annotationStructuralAppliedHash] = structuralAppliedHash
 		// Selector is immutable; only set on create.
 		if existing.CreationTimestamp.IsZero() {
 			existing.Spec.Selector = desired.Spec.Selector

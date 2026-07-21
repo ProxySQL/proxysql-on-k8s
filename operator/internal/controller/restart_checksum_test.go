@@ -75,7 +75,7 @@ func TestClassifyCnfChange_FreshSTS(t *testing.T) {
 	newCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 
 	// prev == "" (no StatefulSet yet) must win regardless of oldCnf/newHash.
-	verdict, changed, keys := classifyCnfChange(secretData("some old cnf"), secretData(newCnf), "", "new-hash", "")
+	verdict, changed, keys, _ := classifyCnfChange(secretData("some old cnf"), secretData(newCnf), "", "new-hash", "", "")
 	if verdict != verdictBootHash {
 		t.Errorf("verdict = %v, want verdictBootHash", verdict)
 	}
@@ -91,7 +91,7 @@ func TestClassifyCnfChange_UnchangedCnf(t *testing.T) {
 	cnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 
 	// prev == newHash: already booted on this exact cnf.
-	verdict, changed, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "same-hash", "same-hash", "")
+	verdict, changed, _, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "same-hash", "same-hash", "", "")
 	if verdict != verdictBootHash {
 		t.Errorf("verdict = %v, want verdictBootHash", verdict)
 	}
@@ -105,7 +105,7 @@ func TestClassifyCnfChange_NoPriorSecret(t *testing.T) {
 
 	// nil old data: no prior Secret to diff against, even though prev is a
 	// real (different) hash.
-	verdict, changed, _ := classifyCnfChange(nil, secretData(newCnf), "prev-hash", "new-hash", "")
+	verdict, changed, _, _ := classifyCnfChange(nil, secretData(newCnf), "prev-hash", "new-hash", "", "")
 	if verdict != verdictBootHash {
 		t.Errorf("verdict = %v, want verdictBootHash", verdict)
 	}
@@ -122,7 +122,7 @@ func TestClassifyCnfChange_StructuralChange(t *testing.T) {
 		c.Spec.Replicas = int32Ptr(3)
 	})
 
-	verdict, changed, keys := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "")
+	verdict, changed, keys, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "", "")
 	if verdict != verdictStructural {
 		t.Errorf("verdict = %v, want verdictStructural", verdict)
 	}
@@ -138,7 +138,7 @@ func TestClassifyCnfChange_VariablesOnlyChange(t *testing.T) {
 	oldCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 	newCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "701"))
 
-	verdict, changed, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "")
+	verdict, changed, _, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "", "")
 	if verdict != verdictRuntimeTry {
 		t.Fatalf("verdict = %v, want verdictRuntimeTry", verdict)
 	}
@@ -151,7 +151,7 @@ func TestClassifyCnfChange_RemovedVariableIsStructural(t *testing.T) {
 	oldCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 	newCnf := renderCnf(t, defaultPw) // variable removed entirely
 
-	verdict, changed, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "")
+	verdict, changed, _, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "", "")
 	if verdict != verdictStructural {
 		t.Errorf("verdict = %v, want verdictStructural (removed variable changes cnf structure)", verdict)
 	}
@@ -167,7 +167,7 @@ func TestClassifyCnfChange_AlreadyApplied(t *testing.T) {
 
 	// oldCnf == newCnf (no diff) and the vars-applied-hash marker already
 	// matches: nothing left to do, keep the pod-template annotation as-is.
-	verdict, changed, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "prev-hash", "new-hash", appliedVars)
+	verdict, changed, _, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "prev-hash", "new-hash", appliedVars, "")
 	if verdict != verdictKeepPrev {
 		t.Errorf("verdict = %v, want verdictKeepPrev", verdict)
 	}
@@ -184,7 +184,7 @@ func TestClassifyCnfChange_CrashRecoveryPushesFullSet(t *testing.T) {
 	// appliedVars does NOT match: the runtime push never happened or was
 	// never confirmed. Must retry with the FULL variable set, not an empty
 	// diff.
-	verdict, changed, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "prev-hash", "new-hash", "stale-or-absent-marker")
+	verdict, changed, _, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "prev-hash", "new-hash", "stale-or-absent-marker", "")
 	if verdict != verdictRuntimeTry {
 		t.Fatalf("verdict = %v, want verdictRuntimeTry", verdict)
 	}
@@ -211,7 +211,7 @@ func TestClassifyCnfChange_CredentialRotationIsAlwaysStructural(t *testing.T) {
 	oldCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "old-radmin-pw", Monitor: "m"})
 	newCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "new-radmin-pw", Monitor: "m"})
 
-	verdict, changed, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "")
+	verdict, changed, _, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "", "")
 	if verdict != verdictStructural {
 		t.Errorf("verdict = %v, want verdictStructural — credential rotation must always force a restart", verdict)
 	}
@@ -232,7 +232,7 @@ func TestClassifyCnfChange_ExtraSecretKeyChangeIsStructural(t *testing.T) {
 	oldData := secretData(cnf, flbKey, "[OUTPUT]\n    host old-collector\n")
 	newData := secretData(cnf, flbKey, "[OUTPUT]\n    host new-collector\n")
 
-	verdict, changed, keys := classifyCnfChange(oldData, newData, "prev-hash", "new-hash", "")
+	verdict, changed, keys, _ := classifyCnfChange(oldData, newData, "prev-hash", "new-hash", "", "")
 	if verdict != verdictStructural {
 		t.Errorf("verdict = %v, want verdictStructural — a non-proxysql.cnf Secret key change must restart", verdict)
 	}
@@ -251,7 +251,7 @@ func TestClassifyCnfChange_AddedOrRemovedSecretKeyIsStructural(t *testing.T) {
 	cnf := renderCnf(t, defaultPw)
 
 	// Key added.
-	verdict, _, keys := classifyCnfChange(secretData(cnf), secretData(cnf, flbKey, "conf"), "prev-hash", "new-hash", "")
+	verdict, _, keys, _ := classifyCnfChange(secretData(cnf), secretData(cnf, flbKey, "conf"), "prev-hash", "new-hash", "", "")
 	if verdict != verdictStructural {
 		t.Errorf("added key: verdict = %v, want verdictStructural", verdict)
 	}
@@ -260,7 +260,7 @@ func TestClassifyCnfChange_AddedOrRemovedSecretKeyIsStructural(t *testing.T) {
 	}
 
 	// Key removed.
-	verdict, _, keys = classifyCnfChange(secretData(cnf, flbKey, "conf"), secretData(cnf), "prev-hash", "new-hash", "")
+	verdict, _, keys, _ = classifyCnfChange(secretData(cnf, flbKey, "conf"), secretData(cnf), "prev-hash", "new-hash", "", "")
 	if verdict != verdictStructural {
 		t.Errorf("removed key: verdict = %v, want verdictStructural", verdict)
 	}
@@ -278,10 +278,10 @@ func TestClassifyCnfChange_IdenticalExtraKeyKeepsVariablesOnlyVerdict(t *testing
 	newCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "701"))
 	const flb = "[OUTPUT]\n    name stdout\n"
 
-	verdict, changed, keys := classifyCnfChange(
+	verdict, changed, keys, _ := classifyCnfChange(
 		secretData(oldCnf, flbKey, flb),
 		secretData(newCnf, flbKey, flb),
-		"prev-hash", "new-hash", "")
+		"prev-hash", "new-hash", "", "")
 	if verdict != verdictRuntimeTry {
 		t.Fatalf("verdict = %v, want verdictRuntimeTry — an identical extra key must not force a restart", verdict)
 	}
@@ -306,8 +306,8 @@ func TestResolveRestartChecksum_ExtraKeySummaryNamesTheKey(t *testing.T) {
 	cluster := &proxysqlv1alpha1.ProxySQLCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "rc-test", Namespace: "default"},
 	}
-	annotation, _, summary, err := r.resolveRestartChecksum(
-		t.Context(), cluster, oldData, newData, "prev-hash", "new-hash", "", "pw")
+	annotation, _, _, summary, err := r.resolveRestartChecksum(
+		t.Context(), cluster, oldData, newData, "prev-hash", "new-hash", "", "", "pw")
 	if err != nil {
 		t.Fatalf("resolveRestartChecksum: %v", err)
 	}
@@ -315,6 +315,157 @@ func TestResolveRestartChecksum_ExtraKeySummaryNamesTheKey(t *testing.T) {
 		t.Errorf("annotation = %q, want %q (structural must roll)", annotation, "new-hash")
 	}
 	want := "RestartRequired: structural cnf change (fluent-bit.conf)"
+	if summary != want {
+		t.Errorf("summary = %q, want %q", summary, want)
+	}
+}
+
+// TestStructuralHash_Properties pins the invariant structuralHash is built
+// on: variable-VALUE-only proxysql.cnf changes don't move it, while
+// structural cnf changes and non-proxysql.cnf key changes do.
+func TestStructuralHash_Properties(t *testing.T) {
+	cnfA := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+	cnfB := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "701"))
+	cnfStruct := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"), func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Replicas = int32Ptr(5)
+	})
+
+	if structuralHash(secretData(cnfA)) != structuralHash(secretData(cnfB)) {
+		t.Errorf("a variable-value-only cnf change must not move structuralHash")
+	}
+	if structuralHash(secretData(cnfA)) == structuralHash(secretData(cnfStruct)) {
+		t.Errorf("a structural cnf change (proxysql_servers) must move structuralHash")
+	}
+	if structuralHash(secretData(cnfA, flbKey, "x")) == structuralHash(secretData(cnfA, flbKey, "y")) {
+		t.Errorf("a non-proxysql.cnf key content change must move structuralHash")
+	}
+	if structuralHash(secretData(cnfA)) == structuralHash(secretData(cnfA, flbKey, "x")) {
+		t.Errorf("adding a non-proxysql.cnf key must move structuralHash")
+	}
+}
+
+// TestClassifyCnfChange_InterruptedStructuralReconcile simulates the crash
+// window the structural-applied marker closes: a prior reconcile wrote the
+// new Secret (so oldData==newData now) but died before ensureStatefulSet.
+// The vars marker matches (the change wasn't about variables), yet the
+// structural marker still reflects the PREVIOUS Secret content — the
+// pending restart must not be lost.
+func TestClassifyCnfChange_InterruptedStructuralReconcile(t *testing.T) {
+	cnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+	data := secretData(cnf, flbKey, "new-sink-config")
+	appliedVars := varsHash(builders.ParseCnfVariables(cnf))
+	staleStructural := structuralHash(secretData(cnf, flbKey, "old-sink-config"))
+
+	verdict, changed, keys, pending := classifyCnfChange(data, data, "prev-hash", "new-hash", appliedVars, staleStructural)
+	if verdict != verdictStructural {
+		t.Errorf("verdict = %v, want verdictStructural — interrupted structural reconcile must still restart", verdict)
+	}
+	if !pending {
+		t.Errorf("pendingStructural = false, want true")
+	}
+	if len(changed) != 0 || len(keys) != 0 {
+		t.Errorf("changed = %v, structuralKeys = %v, want both empty for the pending case", changed, keys)
+	}
+}
+
+// TestClassifyCnfChange_MatchingStructuralMarkerKeepsPrev: the happy path is
+// unchanged — when the structural marker matches the current Secret data,
+// an all-equal reconcile still keeps the previous annotation.
+func TestClassifyCnfChange_MatchingStructuralMarkerKeepsPrev(t *testing.T) {
+	cnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+	data := secretData(cnf, flbKey, "sink-config")
+	appliedVars := varsHash(builders.ParseCnfVariables(cnf))
+
+	verdict, _, _, pending := classifyCnfChange(data, data, "prev-hash", "new-hash", appliedVars, structuralHash(data))
+	if verdict != verdictKeepPrev {
+		t.Errorf("verdict = %v, want verdictKeepPrev", verdict)
+	}
+	if pending {
+		t.Errorf("pendingStructural = true, want false")
+	}
+}
+
+// TestClassifyCnfChange_FreshSTSIgnoresStructuralMarker: a fresh StatefulSet
+// (prev == "") keeps the bootHash behavior no matter what marker value is
+// passed — the guards run before the marker check.
+func TestClassifyCnfChange_FreshSTSIgnoresStructuralMarker(t *testing.T) {
+	cnf := renderCnf(t, defaultPw)
+	data := secretData(cnf)
+
+	verdict, _, _, pending := classifyCnfChange(data, data, "", "new-hash", "", "utterly-stale")
+	if verdict != verdictBootHash {
+		t.Errorf("verdict = %v, want verdictBootHash", verdict)
+	}
+	if pending {
+		t.Errorf("pendingStructural = true, want false")
+	}
+}
+
+// TestClassifyCnfChange_LegacySTSWithoutStructuralMarker: a StatefulSet from
+// an operator version that predates the marker has no annotation
+// (structuralApplied == ""). That must NOT force a restart on upgrade — the
+// check only fires against a marker that was actually written.
+func TestClassifyCnfChange_LegacySTSWithoutStructuralMarker(t *testing.T) {
+	cnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+	data := secretData(cnf)
+	appliedVars := varsHash(builders.ParseCnfVariables(cnf))
+
+	verdict, _, _, pending := classifyCnfChange(data, data, "prev-hash", "new-hash", appliedVars, "")
+	if verdict != verdictKeepPrev {
+		t.Errorf("verdict = %v, want verdictKeepPrev — absent legacy marker must not force a restart", verdict)
+	}
+	if pending {
+		t.Errorf("pendingStructural = true, want false")
+	}
+}
+
+// TestClassifyCnfChange_InterruptedCombinedChangeRestarts: crash after a
+// Secret write that changed BOTH a variable value and structural content.
+// Post-crash both markers are stale; the structural restart must win over
+// the vars crash-recovery runtime push — a runtime push would update both
+// markers and silently drop the pending restart.
+func TestClassifyCnfChange_InterruptedCombinedChangeRestarts(t *testing.T) {
+	cnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "701"))
+	data := secretData(cnf, flbKey, "new-sink-config")
+	oldCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+	staleVars := varsHash(builders.ParseCnfVariables(oldCnf))
+	staleStructural := structuralHash(secretData(oldCnf, flbKey, "old-sink-config"))
+
+	verdict, _, _, pending := classifyCnfChange(data, data, "prev-hash", "new-hash", staleVars, staleStructural)
+	if verdict != verdictStructural {
+		t.Errorf("verdict = %v, want verdictStructural — pending structural must win over vars crash-recovery", verdict)
+	}
+	if !pending {
+		t.Errorf("pendingStructural = false, want true")
+	}
+}
+
+// TestResolveRestartChecksum_PendingStructuralSummary: the interrupted-
+// reconcile restart surfaces its own summary and rolls to newHash. The
+// structural path returns before any pod discovery or SQL I/O, so a
+// zero-value reconciler is safe here.
+func TestResolveRestartChecksum_PendingStructuralSummary(t *testing.T) {
+	cnf := renderCnf(t, defaultPw)
+	data := secretData(cnf, flbKey, "sink-config")
+	appliedVars := varsHash(builders.ParseCnfVariables(cnf))
+	staleStructural := structuralHash(secretData(cnf, flbKey, "old-sink-config"))
+
+	r := &ProxySQLClusterReconciler{}
+	cluster := &proxysqlv1alpha1.ProxySQLCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "rc-test", Namespace: "default"},
+	}
+	annotation, _, structuralOut, summary, err := r.resolveRestartChecksum(
+		t.Context(), cluster, data, data, "prev-hash", "new-hash", appliedVars, staleStructural, "pw")
+	if err != nil {
+		t.Fatalf("resolveRestartChecksum: %v", err)
+	}
+	if annotation != "new-hash" {
+		t.Errorf("annotation = %q, want %q (pending structural must roll)", annotation, "new-hash")
+	}
+	if structuralOut != structuralHash(data) {
+		t.Errorf("structuralAppliedHash = %q, want structuralHash of the current data", structuralOut)
+	}
+	want := "RestartRequired: structural change pending from interrupted reconcile"
 	if summary != want {
 		t.Errorf("summary = %q, want %q", summary, want)
 	}
