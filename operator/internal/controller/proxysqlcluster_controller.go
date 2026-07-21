@@ -76,9 +76,9 @@ const (
 // Order of operations:
 //  1. Fetch the CR.
 //  2. Resolve the auth Secret (read existing or create with random passwords).
-//  3. Read the cnf Secret's current proxysql.cnf (oldCnf), then build the
-//     desired bootstrap-cnf Secret and ensure it (and garbage-collect the
-//     legacy cnf ConfigMap left behind by versions < v0.3.0).
+//  3. Read the cnf Secret's current data map, then build the desired
+//     bootstrap-cnf Secret and ensure it (and garbage-collect the legacy
+//     cnf ConfigMap left behind by versions < v0.3.0).
 //  4. Ensure the headless + regular Services.
 //  5. Read the StatefulSet's current annotations, then resolve whether this
 //     cnf change can be applied at runtime without a restart
@@ -110,10 +110,10 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	b := builders.New(&cluster, r.Scheme, pw)
 
-	// Capture the cnf Secret's proxysql.cnf content BEFORE ensureCnfSecret
-	// overwrites it: resolveRestartChecksum needs the pre-reconcile text to
-	// diff against the newly rendered one.
-	oldCnf, err := r.currentCnf(ctx, b)
+	// Capture the cnf Secret's FULL data map BEFORE ensureCnfSecret
+	// overwrites it: resolveRestartChecksum diffs every key — proxysql.cnf
+	// at value level, every other key (fluent-bit.conf) at byte level.
+	oldCnfData, err := r.currentCnfData(ctx, b)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -151,9 +151,8 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Checksum over every cnf Secret key (proxysql.cnf + fluent-bit.conf when
 	// logging is enabled) so any config change rolls the pods.
-	newCnf := string(cnfSecret.Data["proxysql.cnf"])
 	newHash := builders.CnfChecksum(cnfSecret.Data)
-	annotation, appliedVarsHash, summary, err := r.resolveRestartChecksum(ctx, &cluster, oldCnf, newCnf, prev, newHash, appliedVars, pw.Radmin)
+	annotation, appliedVarsHash, summary, err := r.resolveRestartChecksum(ctx, &cluster, oldCnfData, cnfSecret.Data, prev, newHash, appliedVars, pw.Radmin)
 	if err != nil {
 		// Runtime SQL push failed partway through: requeue without advancing
 		// the vars-applied-hash annotation, so the retry re-pushes the same
@@ -177,20 +176,20 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, r.updateStatus(ctx, &cluster, b, summary)
 }
 
-// currentCnf reads the proxysql.cnf key of the cnf Secret as it stood before
-// this reconcile. Returns "" if the Secret doesn't exist yet (fresh
+// currentCnfData reads the cnf Secret's full data map as it stood before
+// this reconcile. Returns nil if the Secret doesn't exist yet (fresh
 // cluster) — resolveRestartChecksum treats that as "no prior Secret to diff
 // against".
-func (r *ProxySQLClusterReconciler) currentCnf(ctx context.Context, b *builders.Builder) (string, error) {
+func (r *ProxySQLClusterReconciler) currentCnfData(ctx context.Context, b *builders.Builder) (map[string][]byte, error) {
 	var sec corev1.Secret
 	err := r.Get(ctx, types.NamespacedName{Name: b.CnfSecretName(), Namespace: b.Namespace()}, &sec)
 	if apierrors.IsNotFound(err) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("get cnf secret: %w", err)
+		return nil, fmt.Errorf("get cnf secret: %w", err)
 	}
-	return string(sec.Data["proxysql.cnf"]), nil
+	return sec.Data, nil
 }
 
 // currentStatefulSetAnnotations reads the StatefulSet's pod-template

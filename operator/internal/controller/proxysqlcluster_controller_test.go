@@ -567,6 +567,54 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 		})
 	})
 
+	When("a fluent-bit-only Secret key changes (logging sink host)", func() {
+		const name = "pxc-flb-only-change"
+
+		It("rolls the pod-template checksum annotation even though proxysql.cnf is unchanged", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Logging = &proxysqlv1alpha1.LoggingSpec{
+					Enabled: true, QueryLog: true, SinkType: "http",
+					HTTP: &proxysqlv1alpha1.HTTPSinkSpec{Host: "collector-a.example.com"},
+				}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var secBefore corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &secBefore)).To(Succeed())
+			Expect(string(secBefore.Data["fluent-bit.conf"])).To(ContainSubstring("collector-a.example.com"))
+			cnfBefore := string(secBefore.Data["proxysql.cnf"])
+
+			var before appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &before)).To(Succeed())
+			checksumBefore := before.Spec.Template.Annotations[annotationCnfChecksum]
+			Expect(checksumBefore).NotTo(BeEmpty())
+
+			// Changing only the HTTP sink host rewrites fluent-bit.conf but
+			// leaves proxysql.cnf byte-identical (the cnf depends on queryLog,
+			// not the sink). Regression pin: a diff limited to a
+			// non-proxysql.cnf key must still take the restart path, or the
+			// sidecar keeps running with stale config forever.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Logging.HTTP.Host = "collector-b.example.com"
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			var secAfter corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &secAfter)).To(Succeed())
+			Expect(string(secAfter.Data["fluent-bit.conf"])).To(ContainSubstring("collector-b.example.com"))
+			Expect(string(secAfter.Data["proxysql.cnf"])).To(Equal(cnfBefore),
+				"test premise: the sink-host change must not touch proxysql.cnf")
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			checksumAfter := after.Spec.Template.Annotations[annotationCnfChecksum]
+			Expect(checksumAfter).NotTo(Equal(checksumBefore),
+				"a fluent-bit.conf-only change must roll the checksum annotation (stale sidecar config otherwise)")
+			Expect(checksumAfter).To(Equal(builders.CnfChecksum(secAfter.Data)))
+		})
+	})
+
 	When("a StatefulSet carries a legacy-scheme checksum annotation and the cnf is unchanged", func() {
 		const name = "pxc-legacy-annotation"
 

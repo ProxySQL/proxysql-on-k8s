@@ -55,16 +55,35 @@ func withMySQLVar(name, value string) func(*proxysqlv1alpha1.ProxySQLCluster) {
 
 var defaultPw = builders.Passwords{Admin: "a", Radmin: "r", Monitor: "m"}
 
+// flbKey is the non-proxysql.cnf Secret key used by the extra-key tests.
+const flbKey = "fluent-bit.conf"
+
+// secretData wraps a proxysql.cnf string (plus optional extra key/value
+// pairs) into the cnf Secret data-map shape classifyCnfChange takes.
+func secretData(cnf string, extra ...string) map[string][]byte {
+	if len(extra)%2 != 0 {
+		panic("secretData: extra must be key/value pairs")
+	}
+	data := map[string][]byte{"proxysql.cnf": []byte(cnf)}
+	for i := 0; i < len(extra); i += 2 {
+		data[extra[i]] = []byte(extra[i+1])
+	}
+	return data
+}
+
 func TestClassifyCnfChange_FreshSTS(t *testing.T) {
 	newCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 
 	// prev == "" (no StatefulSet yet) must win regardless of oldCnf/newHash.
-	verdict, changed := classifyCnfChange("some old cnf", newCnf, "", "new-hash", "")
+	verdict, changed, keys := classifyCnfChange(secretData("some old cnf"), secretData(newCnf), "", "new-hash", "")
 	if verdict != verdictBootHash {
 		t.Errorf("verdict = %v, want verdictBootHash", verdict)
 	}
 	if len(changed) != 0 {
 		t.Errorf("changed = %v, want empty", changed)
+	}
+	if len(keys) != 0 {
+		t.Errorf("structuralKeys = %v, want empty", keys)
 	}
 }
 
@@ -72,7 +91,7 @@ func TestClassifyCnfChange_UnchangedCnf(t *testing.T) {
 	cnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 
 	// prev == newHash: already booted on this exact cnf.
-	verdict, changed := classifyCnfChange(cnf, cnf, "same-hash", "same-hash", "")
+	verdict, changed, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "same-hash", "same-hash", "")
 	if verdict != verdictBootHash {
 		t.Errorf("verdict = %v, want verdictBootHash", verdict)
 	}
@@ -84,9 +103,9 @@ func TestClassifyCnfChange_UnchangedCnf(t *testing.T) {
 func TestClassifyCnfChange_NoPriorSecret(t *testing.T) {
 	newCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 
-	// oldCnf == "": no prior Secret to diff against, even though prev is a
+	// nil old data: no prior Secret to diff against, even though prev is a
 	// real (different) hash.
-	verdict, changed := classifyCnfChange("", newCnf, "prev-hash", "new-hash", "")
+	verdict, changed, _ := classifyCnfChange(nil, secretData(newCnf), "prev-hash", "new-hash", "")
 	if verdict != verdictBootHash {
 		t.Errorf("verdict = %v, want verdictBootHash", verdict)
 	}
@@ -103,12 +122,15 @@ func TestClassifyCnfChange_StructuralChange(t *testing.T) {
 		c.Spec.Replicas = int32Ptr(3)
 	})
 
-	verdict, changed := classifyCnfChange(oldCnf, newCnf, "prev-hash", "new-hash", "")
+	verdict, changed, keys := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "")
 	if verdict != verdictStructural {
 		t.Errorf("verdict = %v, want verdictStructural", verdict)
 	}
 	if len(changed) != 0 {
 		t.Errorf("changed = %v, want empty for a structural verdict", changed)
+	}
+	if len(keys) != 0 {
+		t.Errorf("structuralKeys = %v, want empty (proxysql.cnf-internal structural change)", keys)
 	}
 }
 
@@ -116,7 +138,7 @@ func TestClassifyCnfChange_VariablesOnlyChange(t *testing.T) {
 	oldCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 	newCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "701"))
 
-	verdict, changed := classifyCnfChange(oldCnf, newCnf, "prev-hash", "new-hash", "")
+	verdict, changed, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "")
 	if verdict != verdictRuntimeTry {
 		t.Fatalf("verdict = %v, want verdictRuntimeTry", verdict)
 	}
@@ -129,7 +151,7 @@ func TestClassifyCnfChange_RemovedVariableIsStructural(t *testing.T) {
 	oldCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
 	newCnf := renderCnf(t, defaultPw) // variable removed entirely
 
-	verdict, changed := classifyCnfChange(oldCnf, newCnf, "prev-hash", "new-hash", "")
+	verdict, changed, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "")
 	if verdict != verdictStructural {
 		t.Errorf("verdict = %v, want verdictStructural (removed variable changes cnf structure)", verdict)
 	}
@@ -145,7 +167,7 @@ func TestClassifyCnfChange_AlreadyApplied(t *testing.T) {
 
 	// oldCnf == newCnf (no diff) and the vars-applied-hash marker already
 	// matches: nothing left to do, keep the pod-template annotation as-is.
-	verdict, changed := classifyCnfChange(cnf, cnf, "prev-hash", "new-hash", appliedVars)
+	verdict, changed, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "prev-hash", "new-hash", appliedVars)
 	if verdict != verdictKeepPrev {
 		t.Errorf("verdict = %v, want verdictKeepPrev", verdict)
 	}
@@ -162,7 +184,7 @@ func TestClassifyCnfChange_CrashRecoveryPushesFullSet(t *testing.T) {
 	// appliedVars does NOT match: the runtime push never happened or was
 	// never confirmed. Must retry with the FULL variable set, not an empty
 	// diff.
-	verdict, changed := classifyCnfChange(cnf, cnf, "prev-hash", "new-hash", "stale-or-absent-marker")
+	verdict, changed, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "prev-hash", "new-hash", "stale-or-absent-marker")
 	if verdict != verdictRuntimeTry {
 		t.Fatalf("verdict = %v, want verdictRuntimeTry", verdict)
 	}
@@ -189,12 +211,112 @@ func TestClassifyCnfChange_CredentialRotationIsAlwaysStructural(t *testing.T) {
 	oldCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "old-radmin-pw", Monitor: "m"})
 	newCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "new-radmin-pw", Monitor: "m"})
 
-	verdict, changed := classifyCnfChange(oldCnf, newCnf, "prev-hash", "new-hash", "")
+	verdict, changed, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "")
 	if verdict != verdictStructural {
 		t.Errorf("verdict = %v, want verdictStructural — credential rotation must always force a restart", verdict)
 	}
 	if len(changed) != 0 {
 		t.Errorf("changed = %v, want empty for a structural verdict", changed)
+	}
+}
+
+// TestClassifyCnfChange_ExtraSecretKeyChangeIsStructural pins the regression
+// fix: the restart decision guards the WHOLE cnf Secret, not just the
+// proxysql.cnf key. A change confined to another key — concretely
+// fluent-bit.conf when the logging sink settings change without touching
+// proxysql.cnf — must force the restart path, or the fluent-bit sidecar
+// keeps running with stale config forever.
+func TestClassifyCnfChange_ExtraSecretKeyChangeIsStructural(t *testing.T) {
+	cnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+
+	oldData := secretData(cnf, flbKey, "[OUTPUT]\n    host old-collector\n")
+	newData := secretData(cnf, flbKey, "[OUTPUT]\n    host new-collector\n")
+
+	verdict, changed, keys := classifyCnfChange(oldData, newData, "prev-hash", "new-hash", "")
+	if verdict != verdictStructural {
+		t.Errorf("verdict = %v, want verdictStructural — a non-proxysql.cnf Secret key change must restart", verdict)
+	}
+	if len(changed) != 0 {
+		t.Errorf("changed = %v, want empty for a structural verdict", changed)
+	}
+	if len(keys) != 1 || keys[0] != flbKey {
+		t.Errorf("structuralKeys = %v, want [fluent-bit.conf]", keys)
+	}
+}
+
+// TestClassifyCnfChange_AddedOrRemovedSecretKeyIsStructural: toggling a key
+// into or out of the Secret (fluent-bit.conf appearing/disappearing when
+// logging is toggled) is a key-set difference and must restart.
+func TestClassifyCnfChange_AddedOrRemovedSecretKeyIsStructural(t *testing.T) {
+	cnf := renderCnf(t, defaultPw)
+
+	// Key added.
+	verdict, _, keys := classifyCnfChange(secretData(cnf), secretData(cnf, flbKey, "conf"), "prev-hash", "new-hash", "")
+	if verdict != verdictStructural {
+		t.Errorf("added key: verdict = %v, want verdictStructural", verdict)
+	}
+	if len(keys) != 1 || keys[0] != flbKey {
+		t.Errorf("added key: structuralKeys = %v, want [fluent-bit.conf]", keys)
+	}
+
+	// Key removed.
+	verdict, _, keys = classifyCnfChange(secretData(cnf, flbKey, "conf"), secretData(cnf), "prev-hash", "new-hash", "")
+	if verdict != verdictStructural {
+		t.Errorf("removed key: verdict = %v, want verdictStructural", verdict)
+	}
+	if len(keys) != 1 || keys[0] != flbKey {
+		t.Errorf("removed key: structuralKeys = %v, want [fluent-bit.conf]", keys)
+	}
+}
+
+// TestClassifyCnfChange_IdenticalExtraKeyKeepsVariablesOnlyVerdict: an extra
+// Secret key that is byte-identical on both sides must not disturb the
+// variables-only runtime-apply classification of a proxysql.cnf value
+// change.
+func TestClassifyCnfChange_IdenticalExtraKeyKeepsVariablesOnlyVerdict(t *testing.T) {
+	oldCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+	newCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "701"))
+	const flb = "[OUTPUT]\n    name stdout\n"
+
+	verdict, changed, keys := classifyCnfChange(
+		secretData(oldCnf, flbKey, flb),
+		secretData(newCnf, flbKey, flb),
+		"prev-hash", "new-hash", "")
+	if verdict != verdictRuntimeTry {
+		t.Fatalf("verdict = %v, want verdictRuntimeTry — an identical extra key must not force a restart", verdict)
+	}
+	if len(changed) != 1 || changed["mysql-max_connections"] != "701" {
+		t.Errorf("changed = %v, want {mysql-max_connections: 701}", changed)
+	}
+	if len(keys) != 0 {
+		t.Errorf("structuralKeys = %v, want empty", keys)
+	}
+}
+
+// TestResolveRestartChecksum_ExtraKeySummaryNamesTheKey: the structural
+// verdict caused by a non-proxysql.cnf key must surface that key in the
+// Progressing summary. The structural path returns before any pod discovery
+// or SQL I/O, so a zero-value reconciler is safe here.
+func TestResolveRestartChecksum_ExtraKeySummaryNamesTheKey(t *testing.T) {
+	cnf := renderCnf(t, defaultPw)
+	oldData := secretData(cnf, flbKey, "old")
+	newData := secretData(cnf, flbKey, "new")
+
+	r := &ProxySQLClusterReconciler{}
+	cluster := &proxysqlv1alpha1.ProxySQLCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "rc-test", Namespace: "default"},
+	}
+	annotation, _, summary, err := r.resolveRestartChecksum(
+		t.Context(), cluster, oldData, newData, "prev-hash", "new-hash", "", "pw")
+	if err != nil {
+		t.Fatalf("resolveRestartChecksum: %v", err)
+	}
+	if annotation != "new-hash" {
+		t.Errorf("annotation = %q, want %q (structural must roll)", annotation, "new-hash")
+	}
+	want := "RestartRequired: structural cnf change (fluent-bit.conf)"
+	if summary != want {
+		t.Errorf("summary = %q, want %q", summary, want)
 	}
 }
 

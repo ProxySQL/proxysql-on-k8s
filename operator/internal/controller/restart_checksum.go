@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -63,13 +64,19 @@ const (
 
 // classifyCnfChange is the pure decision core of resolveRestartChecksum: it
 // takes no I/O and does not dial ProxySQL, so it's exhaustively unit-tested
-// on its own (restart_checksum_test.go). oldCnf/newCnf are the
-// "proxysql.cnf" Secret key contents before/after this reconcile; prev is
-// the pod-template proxysql.com/cnf-checksum annotation before this
-// reconcile ("" if no StatefulSet yet); newHash is the freshly computed
-// builders.CnfChecksum of the new cnf Secret data; appliedVars is the
+// on its own (restart_checksum_test.go). oldData/newData are the FULL cnf
+// Secret data maps before/after this reconcile (nil/empty oldData means the
+// Secret didn't exist); prev is the pod-template proxysql.com/cnf-checksum
+// annotation before this reconcile ("" if no StatefulSet yet); newHash is
+// the freshly computed builders.CnfChecksum of newData; appliedVars is the
 // current proxysql.com/vars-applied-hash STS object annotation ("" if
 // absent).
+//
+// The runtime-apply relaxation exists ONLY for value-level changes inside
+// the "proxysql.cnf" key. Every other Secret key (fluent-bit.conf) is
+// consumed by a container at startup, so any difference there — content,
+// or the key appearing/disappearing — is structural and must restart;
+// structuralKeys names the offending keys in that case.
 //
 // changed is populated only for verdictRuntimeTry: the full-name variable
 // map to push at runtime. It is the diff (oldVars vs newVars) when
@@ -77,17 +84,26 @@ const (
 // appliedVars is stale — the crash-recovery case where the Secret was
 // already updated but the operator died before confirming the runtime push
 // (idempotent UPDATEs make re-pushing the full set safe).
-func classifyCnfChange(oldCnf, newCnf, prev, newHash, appliedVars string) (verdict cnfVerdict, changed map[string]string) {
+func classifyCnfChange(oldData, newData map[string][]byte, prev, newHash, appliedVars string) (verdict cnfVerdict, changed map[string]string, structuralKeys []string) {
+	oldCnf := string(oldData["proxysql.cnf"])
+	newCnf := string(newData["proxysql.cnf"])
 	newVars := builders.ParseCnfVariables(newCnf)
 
 	if prev == "" || prev == newHash {
-		return verdictBootHash, nil
+		return verdictBootHash, nil, nil
 	}
-	if oldCnf == "" {
-		return verdictBootHash, nil
+	if len(oldData) == 0 || oldCnf == "" {
+		return verdictBootHash, nil, nil
+	}
+	// Any difference outside proxysql.cnf — a key added, removed, or with
+	// different content — is structural. Checked BEFORE the proxysql.cnf
+	// normalization so a Secret-wide change can never be misread as
+	// variables-only just because proxysql.cnf itself didn't move.
+	if keys := diffNonCnfKeys(oldData, newData); len(keys) > 0 {
+		return verdictStructural, nil, keys
 	}
 	if builders.NormalizeCnf(oldCnf) != builders.NormalizeCnf(newCnf) {
-		return verdictStructural, nil
+		return verdictStructural, nil, nil
 	}
 
 	oldVars := builders.ParseCnfVariables(oldCnf)
@@ -101,15 +117,47 @@ func classifyCnfChange(oldCnf, newCnf, prev, newHash, appliedVars string) (verdi
 	if len(changedVars) == 0 {
 		newVarsHash := varsHash(newVars)
 		if appliedVars == newVarsHash {
-			return verdictKeepPrev, nil
+			return verdictKeepPrev, nil, nil
 		}
 		// Crash recovery: the Secret already carries newCnf (oldCnf==newCnf)
 		// but the marker doesn't match, so the last runtime push either never
 		// happened or never got confirmed. Push the full set again.
-		return verdictRuntimeTry, newVars
+		return verdictRuntimeTry, newVars, nil
 	}
 
-	return verdictRuntimeTry, changedVars
+	return verdictRuntimeTry, changedVars, nil
+}
+
+// diffNonCnfKeys returns the sorted set of Secret keys OTHER than
+// "proxysql.cnf" that differ between the two data maps — missing on either
+// side, or present on both with different bytes. Any such key makes a
+// change structural: those keys (fluent-bit.conf) are read by containers at
+// startup, so only a restart propagates them.
+func diffNonCnfKeys(oldData, newData map[string][]byte) []string {
+	seen := map[string]struct{}{}
+	var keys []string
+	check := func(k string) {
+		if k == "proxysql.cnf" {
+			return
+		}
+		if _, done := seen[k]; done {
+			return
+		}
+		seen[k] = struct{}{}
+		oldV, inOld := oldData[k]
+		newV, inNew := newData[k]
+		if inOld != inNew || !bytes.Equal(oldV, newV) {
+			keys = append(keys, k)
+		}
+	}
+	for k := range oldData {
+		check(k)
+	}
+	for k := range newData {
+		check(k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // varsHash returns a deterministic SHA-256 hex digest over a variable map:
@@ -175,13 +223,13 @@ func sortedKeys(m map[string]string) []string {
 // template should carry, and what proxysql.com/vars-applied-hash the
 // StatefulSet OBJECT should carry, for this reconcile.
 //
-// oldCnf is the proxysql.cnf text from the cnf Secret BEFORE this reconcile
-// updated it ("" if the Secret didn't exist). newCnf is the proxysql.cnf
-// text this reconcile is about to write. prev is the StatefulSet's current
+// oldData is the full cnf Secret data map BEFORE this reconcile updated it
+// (nil if the Secret didn't exist). newData is the full data map this
+// reconcile is about to write. prev is the StatefulSet's current
 // pod-template proxysql.com/cnf-checksum annotation ("" if no StatefulSet
-// exists yet). newHash is builders.CnfChecksum over the new cnf Secret data.
-// appliedVars is the StatefulSet's current OBJECT-level
-// proxysql.com/vars-applied-hash annotation ("" if absent).
+// exists yet). newHash is builders.CnfChecksum over newData. appliedVars is
+// the StatefulSet's current OBJECT-level proxysql.com/vars-applied-hash
+// annotation ("" if absent).
 //
 // Returns the pod-template checksum annotation to write, the object-level
 // vars-applied-hash annotation to write, and a human summary for the
@@ -192,19 +240,24 @@ func sortedKeys(m map[string]string) []string {
 func (r *ProxySQLClusterReconciler) resolveRestartChecksum(
 	ctx context.Context,
 	cluster *proxysqlv1alpha1.ProxySQLCluster,
-	oldCnf, newCnf, prev, newHash, appliedVars string,
+	oldData, newData map[string][]byte,
+	prev, newHash, appliedVars string,
 	radminPassword string,
 ) (annotation, appliedVarsHash, summary string, err error) {
-	newVars := builders.ParseCnfVariables(newCnf)
+	newVars := builders.ParseCnfVariables(string(newData["proxysql.cnf"]))
 	newVarsHash := varsHash(newVars)
 
-	verdict, changed := classifyCnfChange(oldCnf, newCnf, prev, newHash, appliedVars)
+	verdict, changed, structuralKeys := classifyCnfChange(oldData, newData, prev, newHash, appliedVars)
 
 	switch verdict {
 	case verdictBootHash:
 		return newHash, newVarsHash, "", nil
 	case verdictStructural:
-		return newHash, newVarsHash, "RestartRequired: structural cnf change", nil
+		msg := "RestartRequired: structural cnf change"
+		if len(structuralKeys) > 0 {
+			msg = fmt.Sprintf("RestartRequired: structural cnf change (%s)", strings.Join(structuralKeys, ", "))
+		}
+		return newHash, newVarsHash, msg, nil
 	case verdictKeepPrev:
 		return prev, newVarsHash, "", nil
 	}
