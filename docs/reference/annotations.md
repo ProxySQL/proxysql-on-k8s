@@ -54,12 +54,24 @@ semantics](proxysqlcluster.md#configuration-changes-runtime-vs-restart).
 | | |
 |---|---|
 | Set on | the StatefulSet's own `metadata.annotations` — **not** the pod template, so setting it never triggers a rollout |
-| Value | SHA-256 over the sorted `key=value` lines of the `spec.variables` set last successfully applied, whether via a restart-free runtime push or a restart |
+| Value | SHA-256 over the sorted `key=value` lines of **all runtime-appliable variables parsed from the rendered `proxysql.cnf`** — template-rendered defaults (`threads`, `cluster_check_*`, `eventslog_*`, monitor credentials, …) as well as `spec.variables` entries; only bootstrap-structural lines (`admin_credentials`, ifaces/interfaces) are excluded — as last successfully applied, whether via a restart-free runtime push or a restart |
 | Purpose | closes the crash-safety window between the cnf Secret update and the runtime SQL push: if the operator dies after writing the Secret but before confirming the admin-port push, the mismatch between this annotation and the new cnf's variable set forces a fresh push attempt on the next reconcile, instead of silently assuming the old push succeeded |
 
 Not user-configurable; see [runtime vs. restart
 semantics](proxysqlcluster.md#configuration-changes-runtime-vs-restart) for
 when this updates versus `proxysql.com/cnf-checksum`.
+
+### `proxysql.com/structural-applied-hash` (operator-set, on the StatefulSet object)
+
+| | |
+|---|---|
+| Set on | the StatefulSet's own `metadata.annotations` — **not** the pod template, so setting it never triggers a rollout |
+| Value | SHA-256 over the **structural** content of the `<cluster>-cnf` Secret: `proxysql.cnf` with every runtime-appliable variable value replaced by a fixed placeholder, plus the raw bytes of every other Secret key (`fluent-bit.conf`) — so runtime-appliable value changes don't move it, while any structural change (or a non-`proxysql.cnf` key change) does |
+| Purpose | the structural twin of `vars-applied-hash`: records what structural Secret content the StatefulSet was last successfully reconciled against. If the operator dies after writing the Secret but before updating the StatefulSet, the next reconcile sees identical old/new Secret data — without this marker the pending restart (e.g. a `fluent-bit.conf`-only change) would be silently dropped forever; the mismatch forces the restart through, surfaced as `RestartRequired: structural change pending from interrupted reconcile` |
+
+Absent on StatefulSets created by operator versions that predate it; an
+absent marker is skipped (never forces a restart on operator upgrade) and is
+written on the next reconcile. Not user-configurable.
 
 ## Standard label set
 

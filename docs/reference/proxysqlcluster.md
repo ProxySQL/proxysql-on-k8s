@@ -469,7 +469,10 @@ the `Progressing` condition (see the [status reference](status.md)):
 |---|---|---|
 | Runtime apply succeeded | `Progressing=False`, reason `RuntimeApplied` | `RuntimeApplied: <sorted variable names>` |
 | Runtime apply failed read-back / restart needed for a variable change | `Progressing=True`, reason `Rolling` | `RestartRequired: <sorted variable names> (runtime read-back mismatch)` |
-| Structural cnf change | `Progressing=True`, reason `Rolling` | `RestartRequired: structural cnf change` |
+| Structural `proxysql.cnf` change | `Progressing=True`, reason `Rolling` | `RestartRequired: structural cnf change` |
+| Change confined to non-`proxysql.cnf` Secret keys (e.g. `fluent-bit.conf`) | `Progressing=True`, reason `Rolling` | `RestartRequired: structural cnf change (<keys>)` |
+| Interrupted reconcile left a structural restart pending (`structural-applied-hash` mismatch) | `Progressing=True`, reason `Rolling` | `RestartRequired: structural change pending from interrupted reconcile` |
+| Runtime push failed on a replica | `Degraded=True`, reason `RuntimeApplyError` | the push error, naming the replica address (retried on requeue; StatefulSet updates are not blocked) |
 | Normal rollout, no variables-specific reason | `Progressing=True`, reason `Rolling` | `waiting for replicas` |
 
 A `RuntimeApplied` outcome is reported even though `Progressing=False` —
