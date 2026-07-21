@@ -343,11 +343,11 @@ layers of validation apply:
   time.
 - **Operator (reconcile)**: after stripping the domain prefix, the
   remaining variable name must match `^[a-z0-9_]+$` (lowercase snake_case);
-  values must be printable ASCII without `"` or `\` (or any control
-  character, or DEL) — these characters would break out of the
-  double-quoted `name="value"` line the operator renders. A violation fails
-  the reconcile (rejected, not escaped) and retries with backoff; nothing is
-  written until it's fixed.
+  values may not contain double quotes (`"`), backslashes (`\`), control
+  characters, or DEL — these could break out of the double-quoted
+  `name="value"` line the operator renders. Anything else, including
+  non-ASCII, is allowed. A violation fails the reconcile (rejected, not
+  escaped) and retries with backoff; nothing is written until it's fixed.
 
 **Reserved keys** — always rejected, because the operator itself renders
 these lines from other spec fields (`spec.auth`, `spec.protocols`) and a
@@ -419,9 +419,10 @@ reference](annotations.md)).
 - **Structural changes** — anything outside `spec.variables` values:
   listening ports/interfaces, admin/radmin credential rotation (the
   `admin_credentials` line), `replicas`/the `proxysql_servers` peer list,
-  enabling/disabling the logging sidecar (`fluent-bit.conf` is part of the
-  same Secret and same checksum), protocol enable/disable, and so on. These
-  always roll every pod.
+  toggling `logging.queryLog` (which adds/removes the `eventslog_*` lines
+  in `proxysql.cnf`), protocol enable/disable, and so on. These always
+  roll every pod. Note the runtime-vs-restart classification diffs
+  `proxysql.cnf` only.
 - **Zero ready replicas at push time.** Nothing is pushed anywhere (there's
   nothing to dial); the cnf Secret is already updated, so pods bootstrap
   correctly once they come up. No restart is *triggered* by this path

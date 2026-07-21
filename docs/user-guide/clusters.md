@@ -269,12 +269,18 @@ When `replicas > 1`, two things switch on:
 
 The pod template carries a `proxysql.com/cnf-checksum` annotation — a
 hash over the rendered bootstrap cnf (and the Fluent Bit config when
-logging is enabled). Any change that alters the cnf rolls the pods:
-auth Secret contents, protocol/port changes, metrics or web toggles,
-replica count (peer list), logging settings. Image and resource changes
-roll the pods the normal StatefulSet way. Pod management is `Parallel`,
-so initial creation doesn't serialize, while updates follow the
-StatefulSet rolling-update semantics.
+logging is enabled). **Structural** cnf changes roll the pods: auth
+Secret contents (admin/radmin credentials), protocol/port/interface
+changes, metrics or web toggles, replica count (peer list), logging
+settings. A change confined to `spec.variables` *values* is the
+exception: the operator applies it to running replicas over the admin
+port without a restart, falling back to a roll only when a variable
+doesn't take at runtime or a key is added/removed — see
+[runtime vs. restart
+semantics](../reference/proxysqlcluster.md#configuration-changes-runtime-vs-restart).
+Image and resource changes roll the pods the normal StatefulSet way.
+Pod management is `Parallel`, so initial creation doesn't serialize,
+while updates follow the StatefulSet rolling-update semantics.
 
 Watch a rollout:
 

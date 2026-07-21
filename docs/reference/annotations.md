@@ -43,8 +43,11 @@ carries no user-configurable meaning.
 **Exception:** a `proxysql.cnf` change confined to `spec.variables` *values*
 (no key added or removed) does not necessarily change this annotation — the
 operator tries a restart-free runtime apply first and only falls back to
-updating this annotation (and thus restarting) if that fails. See [runtime
-vs. restart semantics](proxysqlcluster.md#configuration-changes-runtime-vs-restart).
+updating this annotation (and thus restarting) if that fails. The
+runtime-vs-restart classification diffs `proxysql.cnf` only; for example, a
+`logging.queryLog` toggle restarts because it adds/removes the `eventslog_*`
+lines in `proxysql.cnf` itself. See [runtime vs. restart
+semantics](proxysqlcluster.md#configuration-changes-runtime-vs-restart).
 
 ### `proxysql.com/vars-applied-hash` (operator-set, on the StatefulSet object)
 
