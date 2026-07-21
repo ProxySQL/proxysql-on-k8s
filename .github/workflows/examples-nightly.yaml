@@ -130,6 +130,29 @@ jobs:
                        /var/local-path-provisioner/*/bootstrap.log; do
                 [ -f "$f" ] && { echo "=== $f ==="; tail -40 "$f"; }
               done' 2>/dev/null || true
+            # Deep filesystem diagnostics for the MySQL image-permission failures:
+            # how did containerd unpack the image layers on the kind node?
+            docker exec examples-control-plane sh -c '
+              for d in /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/*/fs; do
+                [ -e "$d/usr/share/percona-server" ] && { echo "== $d"; ls -la "$d/usr/share/percona-server/" | head -8; ls -la "$d/usr/share/percona-server/english/errmsg.sys" 2>/dev/null; }
+                [ -e "$d/etc/my.cnf" ] && { echo "== $d/etc"; ls -la "$d/etc/my.cnf" "$d/etc/my.cnf.d" 2>/dev/null; }
+              done' 2>/dev/null | head -60 || true
+            # And from inside the running container (crash-loop window ~20s per
+            # cycle, so retry): what does mysqld actually see?
+            if kubectl -n "$ns" get pod cluster1-mysql-0 >/dev/null 2>&1; then
+              for i in $(seq 1 30); do
+                if kubectl -n "$ns" exec cluster1-mysql-0 -c mysql -- sh -c '
+                    id
+                    echo "--- /etc/my.cnf:"; ls -la /etc/my.cnf /etc/my.cnf.d/ 2>&1; head -30 /etc/my.cnf 2>&1
+                    echo "--- node.cnf:"; cat /etc/my.cnf.d/node.cnf 2>&1 | head -30
+                    echo "--- errmsg.sys:"; ls -la /usr/share/percona-server/english/errmsg.sys 2>&1; head -c 16 /usr/share/percona-server/english/errmsg.sys >/dev/null 2>&1 && echo readable || echo NOT-readable
+                    echo "--- print-defaults:"; mysqld --print-defaults 2>&1 | head -5
+                  ' 2>/dev/null; then
+                  break
+                fi
+                sleep 3
+              done
+            fi
             # Also dump the backend CR status for debugging
             kubectl -n "$ns" get perconaservermysqls.ps.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
             kubectl -n "$ns" get perconaxtradbclusters.pxc.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
