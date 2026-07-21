@@ -94,6 +94,29 @@ jobs:
           kind load docker-image proxysql-operator:ci --name examples
           kind load docker-image proxysql/proxysql:3.0 --name examples
 
+      # Debug probe for the MySQL image-permission failures: run the same
+      # image as a plain sleep pod (no probes, stays up) and inspect what
+      # mysqld actually sees at runtime.
+      - name: probe mysql image runtime behavior
+        if: ${{ env.skip != 'true' && matrix.example == 'percona-ps' }}
+        run: |
+          kubectl create ns probe || true
+          kubectl -n probe run psdbg --image=percona/percona-server:8.4.8-8.1 --restart=Never --command -- sleep 600
+          kubectl -n probe wait --for=condition=Ready pod/psdbg --timeout=180s
+          kubectl -n probe exec psdbg -- bash -c '
+            id
+            echo "apparmor: $(cat /proc/self/attr/current 2>&1)"
+            grep Seccomp: /proc/self/status
+            ls -la /etc/my.cnf /usr/share/percona-server/english/errmsg.sys
+            head -c 16 /usr/share/percona-server/english/errmsg.sys >/dev/null && echo errmsg-READABLE || echo errmsg-NOT-READABLE
+            head -c 16 /etc/my.cnf >/dev/null && echo mycnf-READABLE || echo mycnf-NOT-READABLE
+            echo "--- print-defaults:"
+            mysqld --print-defaults 2>&1 | tail -2 | cut -c1-500
+            echo "--- validate-config:"
+            mysqld --validate-config --datadir=/tmp/dd 2>&1 | head -8 || true
+          ' || true
+          kubectl -n probe delete pod psdbg --wait=false || true
+
       - name: smoke ${{ matrix.example }}
         if: ${{ env.skip != 'true' }}
         env:
