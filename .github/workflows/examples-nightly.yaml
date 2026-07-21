@@ -121,6 +121,15 @@ jobs:
                 kubectl -n "$ns" logs "$pod" -c "$container" --previous --tail=80 2>/dev/null || echo "(no previous logs)"
               done
             done
+            # MySQL-family backends write state/bootstrap logs into the datadir.
+            # The datadir is a local-path PV inside the kind node container, so
+            # read it via docker exec — works even while the pod is crash-looping.
+            docker exec examples-control-plane sh -c '
+              for f in /var/local-path-provisioner/*/mysql.state \
+                       /var/local-path-provisioner/*/mysql-state-monitor.log \
+                       /var/local-path-provisioner/*/bootstrap.log; do
+                [ -f "$f" ] && { echo "=== $f ==="; tail -40 "$f"; }
+              done' 2>/dev/null || true
             # Also dump the backend CR status for debugging
             kubectl -n "$ns" get perconaservermysqls.ps.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
             kubectl -n "$ns" get perconaxtradbclusters.pxc.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
