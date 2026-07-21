@@ -29,7 +29,7 @@ YAML
   kubectl -n "$ns" wait --for=condition=Ready pod/pxc-0 --timeout=120s >/dev/null
   wait_config_synced "$ns" pxcfg 1 120 || { dump_ns "$ns"; return 1; }
 
-  local radmin out hash0 i
+  local radmin out hash0
   radmin="$(radmin_pw "$ns" pxc)"
   out="$(admin_query "$ns" pxc "$radmin" \
     "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_connections'")"
@@ -39,7 +39,7 @@ YAML
   hash0="$(kubectl -n "$ns" get proxysqlconfig pxcfg -o jsonpath='{.status.lastAppliedHash}')"
   kubectl -n "$ns" patch proxysqlconfig pxcfg --type=json \
     -p='[{"op":"replace","path":"/spec/sqlStatements/0","value":"UPDATE global_variables SET variable_value='\''778'\'' WHERE variable_name='\''mysql-max_connections'\''"}]' >/dev/null
-  for i in $(seq 1 15); do
+  for _ in $(seq 1 15); do
     [[ "$(kubectl -n "$ns" get proxysqlconfig pxcfg -o jsonpath='{.status.lastAppliedHash}')" != "$hash0" ]] && break
     sleep 4
   done
