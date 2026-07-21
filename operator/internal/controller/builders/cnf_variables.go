@@ -21,6 +21,25 @@ import (
 	"strings"
 )
 
+// structuralCnfKeys are the bootstrap-structural cnf lines excluded from
+// runtime-appliable variable parsing/normalization: the credential line the
+// operator's own admin connection depends on, and the listener
+// ifaces/interfaces lines (bound at startup). A value change on any of
+// these must take the restart path.
+//
+// Deliberately NARROWER than reservedCnfKeys (proxysql_cnf.go): a key like
+// mysql-monitor_password is reserved against spec.variables override
+// (secret-derived), but when the operator itself re-renders it from a
+// rotated spec.auth monitor password it is an ordinary variable-value
+// change that runtime-applies restart-free — the documented
+// monitor-credential exception.
+var structuralCnfKeys = map[string]struct{}{
+	"admin-admin_credentials": {},
+	"admin-mysql_ifaces":      {},
+	"mysql-interfaces":        {},
+	"pgsql-interfaces":        {},
+}
+
 // cnfSectionStart matches the opening line of a variables section, e.g.
 // "mysql_variables=". The section body is the following "{ ... }" block.
 var cnfSectionStart = regexp.MustCompile(`^(admin|mysql|pgsql)_variables=$`)
@@ -97,8 +116,8 @@ func unquote(v string) string {
 }
 
 // ParseCnfVariables returns runtime-appliable variables from a rendered cnf,
-// keyed by FULL variable name (admin-*, mysql-*, pgsql-*). Reserved keys
-// (reservedCnfKeys) are excluded. Values are unquoted so they can be
+// keyed by FULL variable name (admin-*, mysql-*, pgsql-*). Structural keys
+// (structuralCnfKeys) are excluded. Values are unquoted so they can be
 // compared directly against runtime_global_variables values.
 func ParseCnfVariables(cnf string) map[string]string {
 	out := map[string]string{}
@@ -106,7 +125,7 @@ func ParseCnfVariables(cnf string) map[string]string {
 		if !l.isVar {
 			continue
 		}
-		if _, reserved := reservedCnfKeys[l.fullName]; reserved {
+		if _, structural := structuralCnfKeys[l.fullName]; structural {
 			continue
 		}
 		out[l.fullName] = unquote(l.value)
@@ -115,8 +134,8 @@ func ParseCnfVariables(cnf string) map[string]string {
 }
 
 // NormalizeCnf replaces every runtime-appliable variable VALUE with the
-// fixed placeholder "<runtime>" and returns the result. Reserved keys and
-// all structural text are left verbatim, so:
+// fixed placeholder "<runtime>" and returns the result. Structural keys
+// (structuralCnfKeys) and all structural text are left verbatim, so:
 //
 //	NormalizeCnf(a) == NormalizeCnf(b)  <=>  a and b differ only in
 //	runtime-appliable variable values (same key set, same structure).
@@ -128,7 +147,7 @@ func NormalizeCnf(cnf string) string {
 			out[i] = l.text
 			continue
 		}
-		if _, reserved := reservedCnfKeys[l.fullName]; reserved {
+		if _, structural := structuralCnfKeys[l.fullName]; structural {
 			out[i] = l.text
 			continue
 		}

@@ -349,25 +349,36 @@ layers of validation apply:
   non-ASCII, is allowed. A violation fails the reconcile (rejected, not
   escaped) and retries with backoff; nothing is written until it's fixed.
 
-**Reserved keys** — always rejected, because the operator itself renders
-these lines from other spec fields (`spec.auth`, `spec.protocols`) and a
-user-supplied value would conflict with bootstrap-structural state:
+**Reserved keys** — always rejected, because the operator owns these
+values: it renders them from other spec fields (`spec.auth`,
+`spec.protocols`, `spec.metrics`), and for the port/toggle keys the values
+are additionally coupled to the StatefulSet (container ports, probe
+wiring) — a cnf-only override would desync the pod spec:
 
-| Key | Rendered from |
+| Key | Owned by |
 |---|---|
 | `admin-admin_credentials` | `spec.auth` (admin/radmin/extra credentials) |
 | `admin-mysql_ifaces` | `spec.protocols.admin.port` |
 | `mysql-interfaces` | `spec.protocols.mysql.port` |
 | `pgsql-interfaces` | `spec.protocols.pgsql.port` |
+| `mysql-monitor_username`, `mysql-monitor_password` | `spec.auth` (monitor credentials) |
+| `pgsql-monitor_username`, `pgsql-monitor_password` | `spec.auth` (monitor credentials) |
+| `admin-cluster_username`, `admin-cluster_password` | `spec.auth` (radmin; ProxySQL Cluster sync login) |
+| `admin-restapi_enabled`, `admin-restapi_port` | `spec.metrics` (STS container-port coupling) |
+| `admin-web_enabled`, `admin-web_port` | `spec.protocols.web` (STS container-port coupling) |
 
 The error is `spec.variables: "<key>" is reserved (bootstrap-structural)`.
 
-Notably **not** reserved: `mysql-monitor_password` / `pgsql-monitor_password`.
-The template already renders these from `spec.auth`'s monitor password on
-every cnf, so don't also set them under `spec.variables.mysql`/`.pgsql` —
-the operator does not deduplicate against its own template output. See
-[below](#configuration-changes-runtime-vs-restart) for why monitor
-credential rotation is restart-free while admin/radmin rotation is not.
+Keys the operator renders *by default* but does **not** reserve —
+`mysql-threads`, `pgsql-threads`, `admin-cluster_check_*` and the other
+cluster-sync tuning values, the `eventslog_*` family — are overridable: the
+operator overlay-merges `spec.variables` over its own per-section defaults,
+so each key renders exactly once and your value replaces the default
+(libconfig rejects duplicate settings, so double-rendering would crashloop
+the pod — the overlay guarantees it can't happen). Reserving the
+monitor-credential keys only blocks *user overrides*: rotating the monitor
+password through `spec.auth` still takes the restart-free runtime-apply
+path — see [below](#configuration-changes-runtime-vs-restart).
 
 ## Configuration changes: runtime vs restart
 
@@ -429,11 +440,12 @@ reference](annotations.md)).
   specifically, but nothing runtime-applies either until pods exist.
 
 **The monitor-credential exception.** Credential rotation normally always
-restarts, because `admin`/`radmin` live in the reserved
+restarts, because `admin`/`radmin` live in the bootstrap-structural
 `admin-admin_credentials` line. The `monitor` user's credentials are
 different: `mysql-monitor_password` and `pgsql-monitor_password` are
-ordinary (non-reserved) variable lines rendered from `spec.auth`, so
-rotating the monitor password is just a variable-value change like any
+ordinary variable lines rendered from `spec.auth` (reserved only against
+`spec.variables` *overrides*, not bootstrap-structural for classification),
+so rotating the monitor password is just a variable-value change like any
 other — it goes through the runtime-apply path above and is restart-free.
 
 **Progressing condition messages.** The reconciler surfaces the outcome in

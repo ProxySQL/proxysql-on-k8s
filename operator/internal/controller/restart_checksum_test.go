@@ -269,6 +269,26 @@ func TestClassifyCnfChange_CredentialRotationIsAlwaysStructural(t *testing.T) {
 	}
 }
 
+// TestClassifyCnfChange_MonitorRotationStaysRuntimeAppliable pins the
+// documented monitor-credential exception: mysql-monitor_password is
+// reserved against spec.variables override (secret-derived), but when the
+// OPERATOR re-renders it from a rotated spec.auth monitor password it is an
+// ordinary variable-value change and must keep the restart-free
+// runtime-apply path (docs/reference/proxysqlcluster.md, "The
+// monitor-credential exception").
+func TestClassifyCnfChange_MonitorRotationStaysRuntimeAppliable(t *testing.T) {
+	oldCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "r", Monitor: "old-monitor-pw"})
+	newCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "r", Monitor: "new-monitor-pw"})
+
+	verdict, changed, _, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "", "")
+	if verdict != verdictRuntimeTry {
+		t.Fatalf("verdict = %v, want verdictRuntimeTry — monitor rotation is documented restart-free", verdict)
+	}
+	if changed["mysql-monitor_password"] != "new-monitor-pw" {
+		t.Errorf("changed = %v, want mysql-monitor_password=new-monitor-pw", changed)
+	}
+}
+
 // TestClassifyCnfChange_ExtraSecretKeyChangeIsStructural pins the regression
 // fix: the restart decision guards the WHOLE cnf Secret, not just the
 // proxysql.cnf key. A change confined to another key — concretely

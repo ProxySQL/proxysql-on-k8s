@@ -475,7 +475,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			var sec corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
-			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring("web_enabled=true"))
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring(`web_enabled="true"`))
 
 			var after appsv1.StatefulSet
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
