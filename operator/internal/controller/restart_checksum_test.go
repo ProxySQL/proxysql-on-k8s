@@ -198,6 +198,55 @@ func TestClassifyCnfChange_CrashRecoveryPushesFullSet(t *testing.T) {
 	}
 }
 
+// TestClassifyCnfChange_RevertToBootedValuePushesFullSet pins the C1 fix: a
+// pod boots with var=700 (so the pod-template annotation prev equals newHash
+// of that cnf), the value is runtime-applied to 701 (Secret now carries 701,
+// vars-applied-hash records the 701 set, prev untouched), then the spec
+// reverts to 700. Now prev == newHash again, but the LIVE runtime value is
+// still 701 — classify must not short-circuit to verdictBootHash (which
+// would advance the vars marker and silently drop the 700 push forever); it
+// must runtime-push the FULL new variable set, crash-recovery-style.
+func TestClassifyCnfChange_RevertToBootedValuePushesFullSet(t *testing.T) {
+	bootCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+	runtimeCnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "701"))
+	bootVars := builders.ParseCnfVariables(bootCnf)
+	appliedVars := varsHash(builders.ParseCnfVariables(runtimeCnf))
+	bootHash := builders.CnfChecksum(secretData(bootCnf))
+
+	// oldData: the Secret as the runtime-apply left it (701). newData: the
+	// reverted render (700). prev == newHash == hash of the booted cnf.
+	verdict, changed, _, _ := classifyCnfChange(
+		secretData(runtimeCnf), secretData(bootCnf),
+		bootHash, bootHash, appliedVars, structuralHash(secretData(runtimeCnf)))
+	if verdict != verdictRuntimeTry {
+		t.Fatalf("verdict = %v, want verdictRuntimeTry — revert to the booted value must still be pushed", verdict)
+	}
+	if len(changed) != len(bootVars) {
+		t.Errorf("changed = %v, want the full new variable set %v", changed, bootVars)
+	}
+	for k, v := range bootVars {
+		if changed[k] != v {
+			t.Errorf("changed[%q] = %q, want %q", k, changed[k], v)
+		}
+	}
+}
+
+// TestClassifyCnfChange_UnchangedCnfMatchingMarker: prev == newHash with a
+// vars marker that MATCHES the current variable set stays on the bootHash
+// path — nothing pending, nothing to push.
+func TestClassifyCnfChange_UnchangedCnfMatchingMarker(t *testing.T) {
+	cnf := renderCnf(t, defaultPw, withMySQLVar("mysql-max_connections", "700"))
+	appliedVars := varsHash(builders.ParseCnfVariables(cnf))
+
+	verdict, changed, _, _ := classifyCnfChange(secretData(cnf), secretData(cnf), "same-hash", "same-hash", appliedVars, "")
+	if verdict != verdictBootHash {
+		t.Errorf("verdict = %v, want verdictBootHash", verdict)
+	}
+	if len(changed) != 0 {
+		t.Errorf("changed = %v, want empty", changed)
+	}
+}
+
 // TestClassifyCnfChange_CredentialRotationIsAlwaysStructural pins a security
 // property flagged in review: rotating the radmin password changes the
 // reserved admin_credentials line, which NormalizeCnf leaves verbatim (by

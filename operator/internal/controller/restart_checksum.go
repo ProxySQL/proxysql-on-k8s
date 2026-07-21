@@ -101,7 +101,21 @@ func classifyCnfChange(oldData, newData map[string][]byte, prev, newHash, applie
 	newCnf := string(newData["proxysql.cnf"])
 	newVars := builders.ParseCnfVariables(newCnf)
 
-	if prev == "" || prev == newHash {
+	if prev == "" {
+		return verdictBootHash, nil, nil, false
+	}
+	if prev == newHash {
+		// The pod template already carries this exact cnf hash — usually
+		// nothing to do. But a runtime-applied change followed by a spec
+		// REVERT lands here too: the Secret was moved off the booted cnf and
+		// back, prev never moved, yet the LIVE runtime values still hold the
+		// intermediate change (recorded in the vars marker). If a prior
+		// Secret exists and the marker disagrees with the new variable set,
+		// push the FULL set crash-recovery-style; returning bootHash here
+		// would advance the marker and drop the revert forever.
+		if len(oldData) > 0 && appliedVars != "" && appliedVars != varsHash(newVars) {
+			return verdictRuntimeTry, newVars, nil, false
+		}
 		return verdictBootHash, nil, nil, false
 	}
 	if len(oldData) == 0 || oldCnf == "" {
