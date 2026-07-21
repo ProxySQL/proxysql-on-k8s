@@ -26,7 +26,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KIND_NODE_IMAGE: kindest/node:v1.31.0
+  KIND_NODE_IMAGE: kindest/node:v1.34.8
 
 jobs:
   smoke:
@@ -54,6 +54,35 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.example != '' && github.event.inputs.example != matrix.example }}
         run: echo "skip=true" >> "$GITHUB_ENV"
 
+      # MySQL 8.x aborts at InnoDB init ("io_setup() failed with EAGAIN",
+      # "Cannot initialize AIO sub-system") when the kernel's AIO context
+      # limit is exhausted — the runner default (fs.aio-max-nr=65536) is too
+      # low. fs.aio-max-nr is not namespaced, so raising it on the runner
+      # host also applies inside the kind node. MariaDB/PostgreSQL don't
+      # need this (they fall back / don't use Linux native AIO), but it's
+      # harmless for those legs.
+      - name: raise fs.aio-max-nr for MySQL-family backends
+        if: ${{ env.skip != 'true' }}
+        run: sudo sysctl -w fs.aio-max-nr=1048576
+
+      # The runner image preinstalls MySQL, and its AppArmor profile for
+      # /usr/sbin/mysqld is loaded on the HOST kernel. AppArmor attaches
+      # profiles by executable path kernel-wide, and kind containers get no
+      # AppArmor policy namespace — so mysqld inside ANY pod (Percona/PXC/
+      # Oracle images all ship /usr/sbin/mysqld) is confined by the host's
+      # Ubuntu-MySQL profile and gets EACCES opening its own /etc/my.cnf,
+      # /usr/share/*/errmsg.sys, etc. Unload the profile.
+      - name: unload host mysqld AppArmor profile
+        if: ${{ env.skip != 'true' }}
+        run: |
+          sudo aa-status 2>/dev/null | grep -i mysql || echo "(no mysql profiles listed)"
+          found=0
+          for p in /etc/apparmor.d/usr.sbin.mysqld /etc/apparmor.d/*mysql*; do
+            [ -f "$p" ] || continue
+            sudo apparmor_parser -R "$p" 2>/dev/null && { echo "unloaded $p"; found=1; } || true
+          done
+          [ "$found" = 1 ] || echo "no profile file found/unloaded"
+
       - uses: azure/setup-helm@v4
         if: ${{ env.skip != 'true' }}
         with:
@@ -71,6 +100,9 @@ jobs:
       - uses: helm/kind-action@v1
         if: ${{ env.skip != 'true' }}
         with:
+          # kind >= v0.32.0 is required for the June-2026 node images
+          # (containerd 2.x with config version 4).
+          version: v0.32.0
           node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: examples
 
@@ -95,15 +127,30 @@ jobs:
           for ns in $(kubectl get ns -o name | grep -- '-demo' | cut -d/ -f2); do
             echo "==== $ns pods ===="; kubectl -n "$ns" get pods -o wide || true
             kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
-            # Dump logs + describe for every non-running pod (CrashLoopBackOff, Error, Init, etc.)
-            for pod in $(kubectl -n "$ns" get pods -o jsonpath='{range .items[?(@.status.phase!="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+            # Dump logs + describe for every not-Ready pod. NOTE: a pod in
+            # CrashLoopBackOff still has status.phase=Running, so filter on the
+            # Ready condition instead of the phase.
+            for pod in $(kubectl -n "$ns" get pods -o name 2>/dev/null | cut -d/ -f2); do
+              ready="$(kubectl -n "$ns" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
+              [[ "$ready" == "True" ]] && continue
               echo "--- describe $pod ---"
               kubectl -n "$ns" describe pod "$pod" 2>/dev/null | head -80 || true
               for container in $(kubectl -n "$ns" get pod "$pod" -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null); do
                 echo "--- logs $pod/$container ---"
-                kubectl -n "$ns" logs "$pod" -c "$container" --tail=60 2>/dev/null || echo "(no logs)"
+                kubectl -n "$ns" logs "$pod" -c "$container" --tail=80 2>/dev/null || echo "(no logs)"
+                echo "--- previous logs $pod/$container ---"
+                kubectl -n "$ns" logs "$pod" -c "$container" --previous --tail=80 2>/dev/null || echo "(no previous logs)"
               done
             done
+            # MySQL-family backends write state/bootstrap logs into the datadir.
+            # The datadir is a local-path PV inside the kind node container, so
+            # read it via docker exec — works even while the pod is crash-looping.
+            docker exec examples-control-plane sh -c '
+              for f in /var/local-path-provisioner/*/mysql.state \
+                       /var/local-path-provisioner/*/mysql-state-monitor.log \
+                       /var/local-path-provisioner/*/bootstrap.log; do
+                [ -f "$f" ] && { echo "=== $f ==="; tail -40 "$f"; }
+              done' 2>/dev/null || true
             # Also dump the backend CR status for debugging
             kubectl -n "$ns" get perconaservermysqls.ps.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
             kubectl -n "$ns" get perconaxtradbclusters.pxc.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
