@@ -112,32 +112,6 @@ jobs:
           kind load docker-image proxysql-operator:ci --name examples
           kind load docker-image proxysql/proxysql:3.0 --name examples
 
-      # Debug probe for the MySQL image-permission failures: run the same
-      # image as a plain sleep pod (no probes, stays up) and inspect what
-      # mysqld actually sees at runtime.
-      - name: probe mysql image runtime behavior
-        if: ${{ env.skip != 'true' && matrix.example == 'percona-ps' }}
-        run: |
-          kubectl create ns probe || true
-          kubectl -n probe run psdbg --image=percona/percona-server:8.4.8-8.1 --restart=Never \
-            --overrides='{"spec":{"securityContext":{"runAsUser":0},"containers":[{"name":"psdbg","image":"percona/percona-server:8.4.8-8.1","command":["sleep","900"]}]}}'
-          kubectl -n probe wait --for=condition=Ready pod/psdbg --timeout=180s
-          kubectl -n probe exec psdbg -- bash -c '
-            id
-            echo "--- print-defaults (as root):"
-            mysqld --print-defaults 2>&1 | tail -2 | cut -c1-500
-            microdnf install -y strace >/dev/null 2>&1 || echo "strace install failed"
-            echo "--- strace print-defaults:"
-            strace -qq -f -o /tmp/t1 mysqld --print-defaults >/dev/null 2>&1 || true
-            grep -E "my.cnf|\.cnf" /tmp/t1 | head -20
-            echo "--- strace validate-config (errmsg):"
-            strace -qq -f -o /tmp/t2 mysqld --validate-config --datadir=/tmp/dd >/dev/null 2>&1 || true
-            grep -E "errmsg|english" /tmp/t2 | head -10
-            echo "--- failed syscalls:"
-            grep -E "= -1 " /tmp/t1 | grep -vE "ENOENT.*(ld\.so|locale|gconv|tls|haswell|x86_64|glibc)" | head -20
-          ' || true
-          kubectl -n probe delete pod psdbg --wait=false || true
-
       - name: smoke ${{ matrix.example }}
         if: ${{ env.skip != 'true' }}
         env:
@@ -177,29 +151,6 @@ jobs:
                        /var/local-path-provisioner/*/bootstrap.log; do
                 [ -f "$f" ] && { echo "=== $f ==="; tail -40 "$f"; }
               done' 2>/dev/null || true
-            # Deep filesystem diagnostics for the MySQL image-permission failures:
-            # how did containerd unpack the image layers on the kind node?
-            docker exec examples-control-plane sh -c '
-              for d in /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/*/fs; do
-                [ -e "$d/usr/share/percona-server" ] && { echo "== $d"; ls -la "$d/usr/share/percona-server/" | head -8; ls -la "$d/usr/share/percona-server/english/errmsg.sys" 2>/dev/null; }
-                [ -e "$d/etc/my.cnf" ] && { echo "== $d/etc"; ls -la "$d/etc/my.cnf" "$d/etc/my.cnf.d" 2>/dev/null; }
-              done' 2>/dev/null | head -60 || true
-            # And from inside the running container (crash-loop window ~20s per
-            # cycle, so retry): what does mysqld actually see?
-            if kubectl -n "$ns" get pod cluster1-mysql-0 >/dev/null 2>&1; then
-              for i in $(seq 1 30); do
-                if kubectl -n "$ns" exec cluster1-mysql-0 -c mysql -- sh -c '
-                    id
-                    echo "--- /etc/my.cnf:"; ls -la /etc/my.cnf /etc/my.cnf.d/ 2>&1; head -30 /etc/my.cnf 2>&1
-                    echo "--- node.cnf:"; cat /etc/my.cnf.d/node.cnf 2>&1 | head -30
-                    echo "--- errmsg.sys:"; ls -la /usr/share/percona-server/english/errmsg.sys 2>&1; head -c 16 /usr/share/percona-server/english/errmsg.sys >/dev/null 2>&1 && echo readable || echo NOT-readable
-                    echo "--- print-defaults:"; mysqld --print-defaults 2>&1 | head -5
-                  ' 2>/dev/null; then
-                  break
-                fi
-                sleep 3
-              done
-            fi
             # Also dump the backend CR status for debugging
             kubectl -n "$ns" get perconaservermysqls.ps.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
             kubectl -n "$ns" get perconaxtradbclusters.pxc.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
