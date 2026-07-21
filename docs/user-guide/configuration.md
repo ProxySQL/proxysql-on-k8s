@@ -212,12 +212,12 @@ Statements run **after** all structured config in the spec, and the
 operator appends no implicit `LOAD`/`SAVE` — include those yourself if the
 statement needs them.
 
-> **Idempotency:** statements re-run on every sync pass, on new replicas,
-> and after drift resyncs — write them so re-execution is harmless. This
-> is desired-state SQL, not a one-shot migration script.
+**Idempotency:** statements re-run on every sync pass, on new replicas,
+and after drift resyncs — write them so re-execution is harmless. This
+is desired-state SQL, not a one-shot migration script.
 
-> **Lockout:** statements that change admin credentials will lock the
-> operator out until a pod restart restores the cnf credentials.
+**Lockout:** statements that change admin credentials will lock the
+operator out until a pod restart restores the cnf credentials.
 
 A failing statement aborts the remaining statements on that replica and
 surfaces through the usual `PartialSync`/`Degraded` conditions (see
