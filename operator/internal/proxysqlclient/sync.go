@@ -41,6 +41,9 @@ type Executor interface {
 //
 // Each section is independent: if mysql_users fails, mysql_servers stays
 // applied. Failures are aggregated; the first error is returned.
+//
+// sql_statements runs last, after every structured section above; within
+// it, the first failing statement aborts the remaining statements in the list.
 func Sync(ctx context.Context, c Executor, d *Desired) error {
 	steps := []syncStep{
 		{name: "mysql_servers", run: func() error { return syncMySQLServers(ctx, c, d) }},

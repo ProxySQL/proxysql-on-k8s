@@ -219,6 +219,12 @@ is desired-state SQL, not a one-shot migration script.
 **Lockout:** statements that change admin credentials will lock the
 operator out until a pod restart restores the cnf credentials.
 
+**Secrets:** statement text is stored plaintext in the `ProxySQLConfig`
+CR (and therefore in etcd), and can resurface in condition messages and
+operator logs via SQL error text on a failed statement. Do not embed
+credentials in `sqlStatements` — use the structured user fields instead,
+which resolve passwords from Secrets.
+
 A failing statement aborts the remaining statements on that replica and
 surfaces through the usual `PartialSync`/`Degraded` conditions (see
 [Operations](./operations.md#troubleshooting)). Statement text participates

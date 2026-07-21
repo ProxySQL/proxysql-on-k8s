@@ -19,6 +19,7 @@ package proxysqlclient
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -476,11 +477,19 @@ func TestSync_SQLStatements_FirstFailureAbortsRemainder(t *testing.T) {
 }
 
 func TestSync_SQLStatements_EmptyIsNoOp(t *testing.T) {
-	rec := &recorder{}
-	if err := Sync(context.Background(), rec, &Desired{}); err != nil {
-		t.Fatalf("Sync: %v", err)
+	baseline := &recorder{}
+	if err := Sync(context.Background(), baseline, &Desired{}); err != nil {
+		t.Fatalf("Sync (baseline): %v", err)
 	}
-	if indexOf(rec.queries, "sqlStatements") != -1 {
-		t.Fatalf("empty SQLStatements must add no queries")
+
+	withStatement := &recorder{}
+	d := &Desired{SQLStatements: []string{"PROXYSQL FLUSH QUERY CACHE"}}
+	if err := Sync(context.Background(), withStatement, d); err != nil {
+		t.Fatalf("Sync (with statement): %v", err)
+	}
+
+	want := append(append([]string{}, baseline.queries...), "PROXYSQL FLUSH QUERY CACHE")
+	if !reflect.DeepEqual(withStatement.queries, want) {
+		t.Fatalf("SQLStatements must add exactly one verbatim query at the end:\n got: %v\nwant: %v", withStatement.queries, want)
 	}
 }

@@ -264,7 +264,7 @@ Variable semantics:
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `sqlStatements` | `[]string` | none (omitted) | each entry min length 1 | Raw admin SQL, executed verbatim in list order. |
+| `sqlStatements` | `[]string` | none (omitted) | each entry min length 1 | Raw admin SQL, executed verbatim in list order. Each entry must be exactly one SQL statement — the admin connection does not enable multi-statements, so an entry like `"stmt1; stmt2"` fails at execution. |
 
 An escape hatch for anything the structured fields above don't model
 (cache flushes, admin commands, settings not yet exposed as CRD fields).
@@ -286,6 +286,11 @@ this spec (servers, users, query rules, hostgroup attributes, variables,
   run on that replica. This surfaces through the existing `PartialSync`
   (`Ready=False`) / `Degraded=True/SyncErrors` conditions, same as any
   other sync failure — no new status fields.
+- **Runs regardless of earlier section outcomes.** Each sync section is
+  independent, so `sqlStatements` is still attempted on a replica even if
+  an earlier structured section (servers, users, query rules, variables,
+  ...) failed on that same replica in the same pass. A statement must not
+  assume every structured section applied successfully in the same pass.
 - **Hash participation.** Statement text is part of `status.lastAppliedHash`
   (via `spec.sqlStatements`), so editing the list re-triggers a sync like
   any other field.
