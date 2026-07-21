@@ -193,6 +193,40 @@ or values beyond what ProxySQL itself enforces, and **removing a key
 does not reset the variable** — ProxySQL has no "unset", so the last
 written value persists until you write a new one.
 
+## Raw SQL statements (escape hatch)
+
+`sqlStatements` is a list of raw admin SQL, executed verbatim, in order, on
+every ready replica — for anything the structured fields above don't model
+(cache flushes, admin commands, settings not yet exposed as a CRD field):
+
+```yaml
+spec:
+  clusterRef: {name: proxysql}
+  sqlStatements:
+    - "UPDATE global_variables SET variable_value='250' WHERE variable_name='mysql-max_connections'"
+    - "LOAD MYSQL VARIABLES TO RUNTIME"
+    - "PROXYSQL FLUSH QUERY CACHE"
+```
+
+Statements run **after** all structured config in the spec, and the
+operator appends no implicit `LOAD`/`SAVE` — include those yourself if the
+statement needs them.
+
+> **Idempotency:** statements re-run on every sync pass, on new replicas,
+> and after drift resyncs — write them so re-execution is harmless. This
+> is desired-state SQL, not a one-shot migration script.
+
+> **Lockout:** statements that change admin credentials will lock the
+> operator out until a pod restart restores the cnf credentials.
+
+A failing statement aborts the remaining statements on that replica and
+surfaces through the usual `PartialSync`/`Degraded` conditions (see
+[Operations](./operations.md#troubleshooting)). Statement text participates
+in `status.lastAppliedHash`, but effects are **not** drift-tracked and are
+**not** reversed by the deletion finalizer — see the
+[field reference](../reference/proxysqlconfig.md#sqlstatements) for the
+full contract.
+
 ## Deleting a ProxySQLConfig
 
 Deletion is guarded by the `proxysql.com/config-cleanup` finalizer: the
