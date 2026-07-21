@@ -82,6 +82,9 @@ jobs:
       - uses: helm/kind-action@v1
         if: ${{ env.skip != 'true' }}
         with:
+          # kind >= v0.32.0 is required for the June-2026 node images
+          # (containerd 2.x with config version 4).
+          version: v0.32.0
           node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: examples
 
