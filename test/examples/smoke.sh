@@ -100,7 +100,7 @@ case "$EX" in
     log "waiting for CNPG cluster"
     kubectl -n cnpg-demo wait --for=condition=Ready cluster/pg --timeout=8m
     kubectl apply -f "$d/proxysql.yaml"
-    kubectl -n cnpg-demo rollout status statefulset/proxysql --timeout=3m
+    rollout_sts cnpg-demo proxysql
     wait_synced cnpg-demo pxcfg 1
     pw="$(kubectl -n cnpg-demo get secret pg-app -o jsonpath='{.data.password}' | base64 -d)"
     out="$(client_query cnpg-demo postgres:16 "PGPASSWORD=$pw" -- \
@@ -119,7 +119,7 @@ case "$EX" in
     log "waiting for MariaDB cluster (replication)"
     kubectl -n mariadb-demo wait --for=condition=Ready mariadb/mariadb --timeout=10m
     kubectl apply -f "$d/proxysql.yaml"
-    kubectl -n mariadb-demo rollout status statefulset/proxysql --timeout=3m
+    rollout_sts mariadb-demo proxysql
     wait_synced mariadb-demo pxcfg 1
     # root password is the example placeholder (consistent within the example).
     pw="$(kubectl -n mariadb-demo get secret mariadb-root -o jsonpath='{.data.password}' | base64 -d)"

@@ -94,5 +94,19 @@ jobs:
           # Backend-namespace diagnostics: every example uses a *-demo ns.
           for ns in $(kubectl get ns -o name | grep -- '-demo' | cut -d/ -f2); do
             echo "==== $ns pods ===="; kubectl -n "$ns" get pods -o wide || true
-            kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
+            kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+            # Dump logs + describe for every non-running pod (CrashLoopBackOff, Error, Init, etc.)
+            for pod in $(kubectl -n "$ns" get pods -o jsonpath='{range .items[?(@.status.phase!="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+              echo "--- describe $pod ---"
+              kubectl -n "$ns" describe pod "$pod" 2>/dev/null | head -80 || true
+              for container in $(kubectl -n "$ns" get pod "$pod" -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null); do
+                echo "--- logs $pod/$container ---"
+                kubectl -n "$ns" logs "$pod" -c "$container" --tail=60 2>/dev/null || echo "(no logs)"
+              done
+            done
+            # Also dump the backend CR status for debugging
+            kubectl -n "$ns" get perconaservermysqls.ps.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
+            kubectl -n "$ns" get perconaxtradbclusters.pxc.percona.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
+            kubectl -n "$ns" get innodbclusters.mysql.oracle.com -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
+            kubectl -n "$ns" get cluster.postgresql.cnpg.io -o yaml 2>/dev/null | grep -A 30 'status:' | head -40 || true
           done
