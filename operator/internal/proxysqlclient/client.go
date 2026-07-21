@@ -130,7 +130,7 @@ func snippet(q string) string {
 // redactQuotedLiterals replaces the contents of every single-quoted SQL
 // string literal in q with "***", preserving the surrounding statement
 // shape (verb, table, column names) for debuggability. It understands SQL's
-// doubled-quote escape ('' inside a literal is a literal single quote, not
+// doubled-quote escape (” inside a literal is a literal single quote, not
 // the end of the literal) so it won't terminate a literal early and leak the
 // remainder of a secret.
 func redactQuotedLiterals(q string) string {
