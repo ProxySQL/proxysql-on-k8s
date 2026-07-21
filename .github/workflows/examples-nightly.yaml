@@ -65,6 +65,24 @@ jobs:
         if: ${{ env.skip != 'true' }}
         run: sudo sysctl -w fs.aio-max-nr=1048576
 
+      # The runner image preinstalls MySQL, and its AppArmor profile for
+      # /usr/sbin/mysqld is loaded on the HOST kernel. AppArmor attaches
+      # profiles by executable path kernel-wide, and kind containers get no
+      # AppArmor policy namespace — so mysqld inside ANY pod (Percona/PXC/
+      # Oracle images all ship /usr/sbin/mysqld) is confined by the host's
+      # Ubuntu-MySQL profile and gets EACCES opening its own /etc/my.cnf,
+      # /usr/share/*/errmsg.sys, etc. Unload the profile.
+      - name: unload host mysqld AppArmor profile
+        if: ${{ env.skip != 'true' }}
+        run: |
+          sudo aa-status 2>/dev/null | grep -i mysql || echo "(no mysql profiles listed)"
+          found=0
+          for p in /etc/apparmor.d/usr.sbin.mysqld /etc/apparmor.d/*mysql*; do
+            [ -f "$p" ] || continue
+            sudo apparmor_parser -R "$p" 2>/dev/null && { echo "unloaded $p"; found=1; } || true
+          done
+          [ "$found" = 1 ] || echo "no profile file found/unloaded"
+
       - uses: azure/setup-helm@v4
         if: ${{ env.skip != 'true' }}
         with:
