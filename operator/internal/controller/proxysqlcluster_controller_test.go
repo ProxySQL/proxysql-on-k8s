@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -638,6 +639,112 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
 			Expect(after.Spec.Template.Annotations[annotationCnfChecksum]).To(Equal("legacy-scheme-checksum-value"),
 				"an unchanged cnf must never force adoption of the new checksum scheme")
+		})
+	})
+
+	// The full runtime-push failure path (a ready replica whose admin port
+	// can't be dialed) can't be exercised end-to-end in envtest: no kubelet
+	// ever marks a pod Ready, so discoverPodAddresses always returns zero
+	// addresses and the dial never happens. handleRuntimeApplyError is
+	// therefore covered directly (the reconciler wires it 1:1 to the
+	// resolveRestartChecksum error), plus a normal-flow spec asserting the
+	// Degraded condition is absent when nothing fails.
+	When("the runtime variable push fails (RuntimeApplyError path)", func() {
+		const name = "pxc-runtime-push-fail"
+
+		It("still ensures the StatefulSet with the previous annotations and surfaces a Degraded condition", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			var before appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &before)).To(Succeed())
+			prev := before.Spec.Template.Annotations[annotationCnfChecksum]
+			appliedVars := before.Annotations[annotationVarsAppliedHash]
+			structuralApplied := before.Annotations[annotationStructuralAppliedHash]
+			Expect(prev).NotTo(BeEmpty())
+
+			// A pending replica change rides along in the same reconcile that
+			// hits the push failure: it must NOT be blocked.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			five := int32(5)
+			cluster.Spec.Replicas = &five
+
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			pushErr := errors.New("apply variables on 10.1.2.3:6032: dial tcp: i/o timeout")
+			err := reconciler.handleRuntimeApplyError(ctx, cluster, b, prev, appliedVars, structuralApplied, pushErr)
+			Expect(err).To(MatchError(pushErr), "the push error must be returned for requeue")
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			Expect(after.Spec.Template.Annotations[annotationCnfChecksum]).To(Equal(prev),
+				"the failed push must not move the pod-template checksum (no rollout)")
+			Expect(after.Annotations[annotationVarsAppliedHash]).To(Equal(appliedVars),
+				"the vars marker must not advance, so the retry re-pushes")
+			Expect(after.Annotations[annotationStructuralAppliedHash]).To(Equal(structuralApplied))
+			Expect(*after.Spec.Replicas).To(Equal(five),
+				"a pending replica change must survive the failed push (no wedged StatefulSet)")
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil(), "a Degraded condition must surface the push failure")
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("RuntimeApplyError"))
+			Expect(cond.Message).To(ContainSubstring("10.1.2.3:6032"), "the message must name the failing replica")
+		})
+
+		It("leaves no Degraded condition in the normal flow", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Variables.MySQL = map[string]string{"mysql-max_connections": "700"}
+			})
+			reconcileAndExpectSuccess(name)
+
+			// A variables-only change through the full reconcile (no ready
+			// replicas in envtest, so nothing is dialed and nothing fails).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Variables.MySQL = map[string]string{"mysql-max_connections": "701"}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil(),
+				"no Degraded condition may linger after a clean reconcile")
+		})
+	})
+
+	When("updateStatus gets a RestartRequired summary while all replicas are ready", func() {
+		const name = "pxc-restart-required-msg"
+
+		It("surfaces the RestartRequired message on the Progressing condition instead of Steady", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			// Fake a fully-ready StatefulSet via the status subresource: at
+			// the moment a restart-required change is detected, the OLD pods
+			// are typically all still Ready — the Steady branch must not
+			// swallow the RestartRequired explanation.
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			desired := *ss.Spec.Replicas
+			ss.Status.Replicas = desired
+			ss.Status.ReadyReplicas = desired
+			ss.Status.UpdatedReplicas = desired
+			Expect(k8sClient.Status().Update(ctx, &ss)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			summary := "RestartRequired: structural cnf change (fluent-bit.conf)"
+			Expect(reconciler.updateStatus(ctx, cluster, b, summary)).To(Succeed())
+
+			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypeProgressing)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("Rolling"))
+			Expect(cond.Message).To(Equal(summary))
 		})
 	})
 

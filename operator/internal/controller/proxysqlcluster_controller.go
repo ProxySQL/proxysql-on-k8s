@@ -155,10 +155,12 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	annotation, appliedVarsHash, structuralAppliedHash, summary, err := r.resolveRestartChecksum(
 		ctx, &cluster, oldCnfData, cnfSecret.Data, prev, newHash, appliedVars, structuralApplied, pw.Radmin)
 	if err != nil {
-		// Runtime SQL push failed partway through: requeue without advancing
-		// either marker annotation, so the retry re-pushes the same
-		// variables (see resolveRestartChecksum's crash-safety contract).
-		return ctrl.Result{}, err
+		// Runtime SQL push failed partway through. Requeue without advancing
+		// either marker annotation (so the retry re-pushes the same
+		// variables), but do NOT skip the StatefulSet: it is re-ensured with
+		// the PRE-reconcile annotations so pending template/replica changes
+		// still apply, and a Degraded condition surfaces the failure.
+		return ctrl.Result{}, r.handleRuntimeApplyError(ctx, &cluster, b, prev, appliedVars, structuralApplied, err)
 	}
 	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(annotation), appliedVarsHash, structuralAppliedHash); err != nil {
 		return ctrl.Result{}, err
@@ -389,6 +391,41 @@ func (r *ProxySQLClusterReconciler) ensureService(ctx context.Context, owner *pr
 	return err
 }
 
+// handleRuntimeApplyError recovers from a resolveRestartChecksum failure
+// (runtime SQL push to a replica failed) without wedging StatefulSet
+// updates: the StatefulSet is still ensured, carrying the PRE-reconcile
+// pod-template checksum and object-level marker values — identical
+// annotations trigger no rollout, but every other pending template or
+// replica change still applies — and a Degraded condition (reason
+// RuntimeApplyError, message naming the failing replica) surfaces the
+// failure. The push error is returned so the caller requeues; with both
+// markers unchanged the retry re-pushes the same variables
+// (resolveRestartChecksum's crash-safety contract).
+func (r *ProxySQLClusterReconciler) handleRuntimeApplyError(
+	ctx context.Context,
+	cluster *proxysqlv1alpha1.ProxySQLCluster,
+	b *builders.Builder,
+	prev, appliedVars, structuralApplied string,
+	pushErr error,
+) error {
+	// prev can only be empty when no StatefulSet exists yet, and fresh
+	// clusters classify as bootHash before any push runs — but guard anyway
+	// so no path can ever create a StatefulSet with an empty checksum
+	// annotation.
+	if prev != "" {
+		if err := r.ensureStatefulSet(ctx, cluster, b.StatefulSet(prev), appliedVars, structuralApplied); err != nil {
+			return fmt.Errorf("ensure statefulset after runtime-apply failure: %w (runtime apply: %v)", err, pushErr)
+		}
+	}
+	r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, "RuntimeApplyError", pushErr.Error())
+	if serr := r.Status().Update(ctx, cluster); serr != nil {
+		// Best-effort: the requeue driven by pushErr will retry the status
+		// write on the next pass.
+		logf.FromContext(ctx).Error(serr, "status update after runtime-apply failure")
+	}
+	return pushErr
+}
+
 // ensureStatefulSet creates or updates the StatefulSet. varsAppliedHash and
 // structuralAppliedHash are written as OBJECT-level annotations
 // (proxysql.com/vars-applied-hash, proxysql.com/structural-applied-hash) —
@@ -547,6 +584,12 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 		// condition: nothing is rolling out, but it's worth surfacing what
 		// just changed.
 		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "RuntimeApplied", summary)
+	case strings.HasPrefix(summary, "RestartRequired"):
+		// A restart-required change was detected THIS reconcile. The old
+		// pods are typically all still Ready at this instant, so this case
+		// must come before the Steady branch or the explanation would be
+		// swallowed until a pod actually goes NotReady.
+		r.setCondition(cluster, condTypeProgressing, metav1.ConditionTrue, "Rolling", summary)
 	case replicasReady:
 		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "Steady", "no rollout in progress")
 	default:
