@@ -387,8 +387,17 @@ two-step pipeline: (1) the `<cluster>-cnf` Secret is updated first, always;
 (2) the operator then decides whether that change can be pushed to already-
 running pods over the admin port, restart-free, or whether it requires a
 StatefulSet rolling restart. Step 1 happens unconditionally, so even when
-step 2 can't apply something at runtime, a *fresh* pod (new pod, or a pod
-that does restart) always boots from the correct, already-updated cnf.
+step 2 can't apply something at runtime, a pod with a *fresh* datadir (a
+new pod on a new/ephemeral volume) boots from the correct, already-updated
+cnf. **Persistence caveat:** the container starts without `--initial` or
+`--reload`, so on a persistence-enabled cluster (the default) a pod that
+merely *restarts* onto its existing PVC loads `proxysql.db`, which wins
+over the cnf — restart-fallback semantics then rely on the
+`SAVE ... TO DISK` the runtime pass performed on pushed replicas, and
+added/removed bootstrap variables may not take effect on PVC-backed pods
+until set at runtime. See
+[operations](../user-guide/operations.md#what-restarts-pods-what-doesnt)
+for the full caveat.
 
 **What can be applied at runtime (no restart):** a change confined to
 `spec.variables` values — an existing key's value changes, no keys are
@@ -424,9 +433,12 @@ reference](annotations.md)).
 - **Adding or removing a variable key.** Removing a key is a restart *by
   design*, not a limitation: ProxySQL has no "unset" for a global variable,
   so a runtime apply could only leave the old value in place while the
-  Secret says otherwise — silently wrong. A restart re-bootstraps from the
-  cnf's variable set as a whole, which is the only way to actually drop a
-  previously-set value.
+  Secret says otherwise — silently wrong. With persistence disabled, the
+  restart re-bootstraps from the cnf's variable set as a whole, dropping
+  the previously-set value; with persistence enabled (the default) the old
+  value can survive in `proxysql.db` (see the persistence caveat above) —
+  verify on the admin port, or set the intended state at runtime via
+  `ProxySQLConfig`.
 - **Structural changes** — anything outside `spec.variables` values:
   listening ports/interfaces, admin/radmin credential rotation (the
   `admin_credentials` line), `replicas`/the `proxysql_servers` peer list,
@@ -435,8 +447,10 @@ reference](annotations.md)).
   roll every pod. Note the runtime-vs-restart classification diffs
   `proxysql.cnf` only.
 - **Zero ready replicas at push time.** Nothing is pushed anywhere (there's
-  nothing to dial); the cnf Secret is already updated, so pods bootstrap
-  correctly once they come up. No restart is *triggered* by this path
+  nothing to dial); the cnf Secret is already updated, so a pod with a
+  fresh datadir bootstraps from it once it comes up — a PVC-backed pod
+  restarting onto an existing `proxysql.db` may keep old values (see the
+  persistence caveat above). No restart is *triggered* by this path
   specifically, but nothing runtime-applies either until pods exist.
 
 **The monitor-credential exception.** Credential rotation normally always
