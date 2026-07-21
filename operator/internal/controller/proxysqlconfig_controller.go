@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -200,7 +199,7 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// 4) Discover ready ProxySQL pods.
-	addrs, err := r.discoverPodAddresses(ctx, &cluster, adminPort)
+	addrs, err := discoverPodAddresses(ctx, r.Client, &cluster, adminPort)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -428,42 +427,9 @@ func (r *ProxySQLConfigReconciler) resolveSecretKey(ctx context.Context, ns stri
 	return string(v), nil
 }
 
-// discoverPodAddresses lists Pods owned by the ProxySQLCluster and returns
-// host:port addresses for any pod that has a Ready status and a non-empty IP.
-func (r *ProxySQLConfigReconciler) discoverPodAddresses(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, port int32) ([]string, error) {
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(cluster.Namespace), client.MatchingLabels{
-		"proxysql.com/cluster": cluster.Name,
-	}); err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, p := range pods.Items {
-		if p.Status.PodIP == "" || p.DeletionTimestamp != nil {
-			continue
-		}
-		if !isPodReady(&p) {
-			continue
-		}
-		out = append(out, fmt.Sprintf("%s:%d", p.Status.PodIP, port))
-	}
-	// Deterministic order for logs/status.
-	sort.Strings(out)
-	return out, nil
-}
-
 // pgsqlConfigured reports whether the spec declares any pgsql-side state.
 func pgsqlConfigured(cfg *proxysqlv1alpha1.ProxySQLConfig) bool {
 	return len(cfg.Spec.PostgreSQLServers)+len(cfg.Spec.PostgreSQLUsers)+len(cfg.Spec.PostgreSQLQueryRules) > 0
-}
-
-func isPodReady(p *corev1.Pod) bool {
-	for _, c := range p.Status.Conditions {
-		if c.Type == corev1.PodReady {
-			return c.Status == corev1.ConditionTrue
-		}
-	}
-	return false
 }
 
 // applyToReplicas opens a connection to each addr and runs Sync. Returns the
@@ -564,7 +530,7 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 	}
 	radminPassword := adminPw.Radmin
 
-	addrs, err := r.discoverPodAddresses(ctx, &cluster, b.Spec.Protocols.Admin.Port)
+	addrs, err := discoverPodAddresses(ctx, r.Client, &cluster, b.Spec.Protocols.Admin.Port)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

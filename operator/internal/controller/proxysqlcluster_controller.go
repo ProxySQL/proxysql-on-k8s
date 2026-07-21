@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -53,6 +54,10 @@ type ProxySQLClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// pods: get;list;watch only — needed by resolveRestartChecksum's
+// discoverPodAddresses call to find ready replicas to push runtime variable
+// changes to.
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // configmaps: get + delete only — needed to garbage-collect the legacy
 // bootstrap-cnf ConfigMap left behind by operator versions < v0.3.0. The
 // operator no longer creates or updates any ConfigMap.
@@ -71,13 +76,17 @@ const (
 // Order of operations:
 //  1. Fetch the CR.
 //  2. Resolve the auth Secret (read existing or create with random passwords).
-//  3. Build the desired bootstrap-cnf Secret and ensure it (and garbage-collect
-//     the legacy cnf ConfigMap left behind by versions < v0.3.0).
+//  3. Read the cnf Secret's current proxysql.cnf (oldCnf), then build the
+//     desired bootstrap-cnf Secret and ensure it (and garbage-collect the
+//     legacy cnf ConfigMap left behind by versions < v0.3.0).
 //  4. Ensure the headless + regular Services.
-//  5. Ensure the StatefulSet (annotated with the cnf checksum so a content
-//     change triggers a rolling restart).
+//  5. Read the StatefulSet's current annotations, then resolve whether this
+//     cnf change can be applied at runtime without a restart
+//     (resolveRestartChecksum), and ensure the StatefulSet with the
+//     resulting pod-template checksum and object-level vars-applied-hash.
 //  6. Ensure the PodDisruptionBudget when replicas > 1.
-//  7. Update status from the underlying StatefulSet.
+//  7. Update status from the underlying StatefulSet, surfacing
+//     resolveRestartChecksum's summary through the Progressing condition.
 func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -101,6 +110,14 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	b := builders.New(&cluster, r.Scheme, pw)
 
+	// Capture the cnf Secret's proxysql.cnf content BEFORE ensureCnfSecret
+	// overwrites it: resolveRestartChecksum needs the pre-reconcile text to
+	// diff against the newly rendered one.
+	oldCnf, err := r.currentCnf(ctx, b)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// 2) Owned resources, in dependency order.
 	cnfSecret, err := b.CnfSecret()
 	if err != nil {
@@ -122,10 +139,28 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// Capture the StatefulSet's current annotations BEFORE ensureStatefulSet
+	// overwrites them: resolveRestartChecksum needs both the pod-template
+	// proxysql.com/cnf-checksum (prev) and the object-level
+	// proxysql.com/vars-applied-hash (appliedVars) as they stood before this
+	// reconcile.
+	prev, appliedVars, err := r.currentStatefulSetAnnotations(ctx, b)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Checksum over every cnf Secret key (proxysql.cnf + fluent-bit.conf when
 	// logging is enabled) so any config change rolls the pods.
-	cnfChecksum := builders.CnfChecksum(cnfSecret.Data)
-	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(cnfChecksum)); err != nil {
+	newCnf := string(cnfSecret.Data["proxysql.cnf"])
+	newHash := builders.CnfChecksum(cnfSecret.Data)
+	annotation, appliedVarsHash, summary, err := r.resolveRestartChecksum(ctx, &cluster, oldCnf, newCnf, prev, newHash, appliedVars, pw.Radmin)
+	if err != nil {
+		// Runtime SQL push failed partway through: requeue without advancing
+		// the vars-applied-hash annotation, so the retry re-pushes the same
+		// variables (see resolveRestartChecksum's crash-safety contract).
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(annotation), appliedVarsHash); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -139,7 +174,39 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	r.ensureServiceMonitor(ctx, &cluster, b.ServiceMonitor())
 
 	// 3) Status.
-	return ctrl.Result{}, r.updateStatus(ctx, &cluster, b)
+	return ctrl.Result{}, r.updateStatus(ctx, &cluster, b, summary)
+}
+
+// currentCnf reads the proxysql.cnf key of the cnf Secret as it stood before
+// this reconcile. Returns "" if the Secret doesn't exist yet (fresh
+// cluster) — resolveRestartChecksum treats that as "no prior Secret to diff
+// against".
+func (r *ProxySQLClusterReconciler) currentCnf(ctx context.Context, b *builders.Builder) (string, error) {
+	var sec corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: b.CnfSecretName(), Namespace: b.Namespace()}, &sec)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get cnf secret: %w", err)
+	}
+	return string(sec.Data["proxysql.cnf"]), nil
+}
+
+// currentStatefulSetAnnotations reads the StatefulSet's pod-template
+// proxysql.com/cnf-checksum (prev) and object-level
+// proxysql.com/vars-applied-hash (appliedVars) as they stood before this
+// reconcile. Both are "" if the StatefulSet doesn't exist yet.
+func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Context, b *builders.Builder) (prev, appliedVars string, err error) {
+	var ss appsv1.StatefulSet
+	getErr := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
+	if apierrors.IsNotFound(getErr) {
+		return "", "", nil
+	}
+	if getErr != nil {
+		return "", "", fmt.Errorf("get statefulset: %w", getErr)
+	}
+	return ss.Spec.Template.Annotations[annotationCnfChecksum], ss.Annotations[annotationVarsAppliedHash], nil
 }
 
 // resolvePasswords reads the admin/radmin/monitor passwords from the auth Secret.
@@ -319,12 +386,20 @@ func (r *ProxySQLClusterReconciler) ensureService(ctx context.Context, owner *pr
 	return err
 }
 
-func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *appsv1.StatefulSet) error {
+// ensureStatefulSet creates or updates the StatefulSet. varsAppliedHash is
+// written as an OBJECT-level annotation (proxysql.com/vars-applied-hash) —
+// never on the pod template — so recording it never triggers a rollout; see
+// resolveRestartChecksum for what it tracks.
+func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *appsv1.StatefulSet, varsAppliedHash string) error {
 	existing := &appsv1.StatefulSet{}
 	existing.Name = desired.Name
 	existing.Namespace = desired.Namespace
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
 		existing.Labels = desired.Labels
+		if existing.Annotations == nil {
+			existing.Annotations = map[string]string{}
+		}
+		existing.Annotations[annotationVarsAppliedHash] = varsAppliedHash
 		// Selector is immutable; only set on create.
 		if existing.CreationTimestamp.IsZero() {
 			existing.Spec.Selector = desired.Spec.Selector
@@ -424,7 +499,15 @@ func (r *ProxySQLClusterReconciler) ensureServiceMonitor(ctx context.Context, ow
 	r.setCondition(owner, condType, metav1.ConditionTrue, "Synced", "ServiceMonitor applied")
 }
 
-func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder) error {
+// updateStatus refreshes cluster.Status from the underlying StatefulSet.
+// summary is the human-readable outcome of this reconcile's
+// resolveRestartChecksum call ("" when there was nothing to report): a
+// "RuntimeApplied: ..." summary always wins the Progressing condition
+// (reason RuntimeApplied, ConditionFalse — nothing is rolling); a
+// "RestartRequired: ..." summary (or any other non-empty summary) becomes
+// the message of the existing Rolling condition, which the StatefulSet
+// template diff drives as before.
+func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, summary string) error {
 	var ss appsv1.StatefulSet
 	err := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
 	notFound := apierrors.IsNotFound(err)
@@ -444,14 +527,33 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	cluster.Status.Endpoints = b.Endpoints()
 	cluster.Status.Phase = derivePhase(&ss, notFound, desired)
 
-	if ss.Status.ReadyReplicas == desired && desired > 0 {
+	replicasReady := ss.Status.ReadyReplicas == desired && desired > 0
+	if replicasReady {
 		r.setCondition(cluster, condTypeAvailable, metav1.ConditionTrue, "AllReplicasReady",
 			fmt.Sprintf("%d/%d replicas ready", ss.Status.ReadyReplicas, desired))
-		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "Steady", "no rollout in progress")
 	} else {
 		r.setCondition(cluster, condTypeAvailable, metav1.ConditionFalse, "ReplicasNotReady",
 			fmt.Sprintf("%d/%d replicas ready", ss.Status.ReadyReplicas, desired))
-		r.setCondition(cluster, condTypeProgressing, metav1.ConditionTrue, "Rolling", "waiting for replicas")
+	}
+
+	switch {
+	case strings.HasPrefix(summary, "RuntimeApplied"):
+		// A restart-free variables push always wins the Progressing
+		// condition: nothing is rolling out, but it's worth surfacing what
+		// just changed.
+		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "RuntimeApplied", summary)
+	case replicasReady:
+		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "Steady", "no rollout in progress")
+	default:
+		msg := "waiting for replicas"
+		if summary != "" {
+			// Carries a "RestartRequired: ..." explanation when the pod
+			// template annotation just changed for that reason; the
+			// StatefulSet template diff is what actually drives the
+			// rollout, this only improves the message.
+			msg = summary
+		}
+		r.setCondition(cluster, condTypeProgressing, metav1.ConditionTrue, "Rolling", msg)
 	}
 	meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
 
