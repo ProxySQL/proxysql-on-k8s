@@ -101,19 +101,22 @@ jobs:
         if: ${{ env.skip != 'true' && matrix.example == 'percona-ps' }}
         run: |
           kubectl create ns probe || true
-          kubectl -n probe run psdbg --image=percona/percona-server:8.4.8-8.1 --restart=Never --command -- sleep 600
+          kubectl -n probe run psdbg --image=percona/percona-server:8.4.8-8.1 --restart=Never \
+            --overrides='{"spec":{"securityContext":{"runAsUser":0},"containers":[{"name":"psdbg","image":"percona/percona-server:8.4.8-8.1","command":["sleep","900"]}]}}'
           kubectl -n probe wait --for=condition=Ready pod/psdbg --timeout=180s
           kubectl -n probe exec psdbg -- bash -c '
             id
-            echo "apparmor: $(cat /proc/self/attr/current 2>&1)"
-            grep Seccomp: /proc/self/status
-            ls -la /etc/my.cnf /usr/share/percona-server/english/errmsg.sys
-            head -c 16 /usr/share/percona-server/english/errmsg.sys >/dev/null && echo errmsg-READABLE || echo errmsg-NOT-READABLE
-            head -c 16 /etc/my.cnf >/dev/null && echo mycnf-READABLE || echo mycnf-NOT-READABLE
-            echo "--- print-defaults:"
+            echo "--- print-defaults (as root):"
             mysqld --print-defaults 2>&1 | tail -2 | cut -c1-500
-            echo "--- validate-config:"
-            mysqld --validate-config --datadir=/tmp/dd 2>&1 | head -8 || true
+            microdnf install -y strace >/dev/null 2>&1 || echo "strace install failed"
+            echo "--- strace print-defaults:"
+            strace -qq -f -o /tmp/t1 mysqld --print-defaults >/dev/null 2>&1 || true
+            grep -E "my.cnf|\.cnf" /tmp/t1 | head -20
+            echo "--- strace validate-config (errmsg):"
+            strace -qq -f -o /tmp/t2 mysqld --validate-config --datadir=/tmp/dd >/dev/null 2>&1 || true
+            grep -E "errmsg|english" /tmp/t2 | head -10
+            echo "--- failed syscalls:"
+            grep -E "= -1 " /tmp/t1 | grep -vE "ENOENT.*(ld\.so|locale|gconv|tls|haswell|x86_64|glibc)" | head -20
           ' || true
           kubectl -n probe delete pod psdbg --wait=false || true
 
