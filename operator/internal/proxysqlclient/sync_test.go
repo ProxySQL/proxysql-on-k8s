@@ -18,6 +18,7 @@ package proxysqlclient
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -404,3 +405,82 @@ var errBoom = stringError("boom")
 type stringError string
 
 func (s stringError) Error() string { return string(s) }
+
+// failOn wraps recorder and fails the first query containing failSubstr.
+type failOn struct {
+	recorder
+	failSubstr string
+}
+
+func (f *failOn) Exec(ctx context.Context, q string, args ...any) error {
+	if strings.Contains(q, f.failSubstr) {
+		return fmt.Errorf("injected failure on %q", q)
+	}
+	return f.recorder.Exec(ctx, q, args...)
+}
+
+func indexOf(queries []string, substr string) int {
+	for i, q := range queries {
+		if strings.Contains(q, substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestSync_SQLStatements_VerbatimInOrderAfterVariables(t *testing.T) {
+	rec := &recorder{}
+	d := &Desired{
+		AdminVariables: map[string]string{"admin-refresh_interval": "2000"},
+		SQLStatements: []string{
+			"UPDATE global_variables SET variable_value='250' WHERE variable_name='mysql-max_connections'",
+			"LOAD MYSQL VARIABLES TO RUNTIME",
+			"PROXYSQL FLUSH QUERY CACHE",
+		},
+	}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	iFlush := indexOf(rec.queries, "PROXYSQL FLUSH QUERY CACHE")
+	iUpd := indexOf(rec.queries, "variable_name='mysql-max_connections'")
+	iAdminApply := indexOf(rec.queries, "LOAD ADMIN VARIABLES TO RUNTIME")
+	if iUpd == -1 || iFlush == -1 {
+		t.Fatalf("statements not executed verbatim: %v", rec.queries)
+	}
+	if iUpd > iFlush {
+		t.Fatalf("statements out of order: update at %d, flush at %d", iUpd, iFlush)
+	}
+	if iAdminApply == -1 || iUpd < iAdminApply {
+		t.Fatalf("sqlStatements must run after structured variables (admin apply at %d, first statement at %d)", iAdminApply, iUpd)
+	}
+}
+
+func TestSync_SQLStatements_FirstFailureAbortsRemainder(t *testing.T) {
+	f := &failOn{failSubstr: "STATEMENT-B"}
+	d := &Desired{SQLStatements: []string{
+		"STATEMENT-A", "STATEMENT-B", "STATEMENT-C",
+	}}
+	err := Sync(context.Background(), f, d)
+	if err == nil {
+		t.Fatal("expected error from failing statement")
+	}
+	if !strings.Contains(err.Error(), "sqlStatements[1]") {
+		t.Fatalf("error should name the failing statement index: %v", err)
+	}
+	if !f.seen("STATEMENT-A") {
+		t.Fatal("statement before the failure must have executed")
+	}
+	if f.seen("STATEMENT-C") {
+		t.Fatal("statement after the failure must NOT have executed")
+	}
+}
+
+func TestSync_SQLStatements_EmptyIsNoOp(t *testing.T) {
+	rec := &recorder{}
+	if err := Sync(context.Background(), rec, &Desired{}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if indexOf(rec.queries, "sqlStatements") != -1 {
+		t.Fatalf("empty SQLStatements must add no queries")
+	}
+}

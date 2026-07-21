@@ -73,6 +73,7 @@ func Sync(ctx context.Context, c Executor, d *Desired) error {
 		{name: "mysql_variables", run: func() error { return syncVariables(ctx, c, d.MySQLVariables, "MYSQL") }},
 		{name: "pgsql_variables", run: func() error { return syncVariables(ctx, c, d.PostgreSQLVariables, "PGSQL") }},
 		{name: "admin_variables", run: func() error { return syncVariables(ctx, c, d.AdminVariables, "ADMIN") }},
+		{name: "sql_statements", run: func() error { return syncSQLStatements(ctx, c, d) }},
 	}
 
 	var firstErr error
@@ -406,6 +407,18 @@ func syncVariables(ctx context.Context, c Executor, vars map[string]string, doma
 		}
 	}
 	return loadSave(ctx, c, domain+" VARIABLES")
+}
+
+// syncSQLStatements executes user-provided raw admin SQL in listed order.
+// Unlike the table sections, the first failure aborts the remaining
+// statements: order may carry dependencies (e.g. UPDATE then LOAD).
+func syncSQLStatements(ctx context.Context, c Executor, d *Desired) error {
+	for i, stmt := range d.SQLStatements {
+		if err := c.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("sqlStatements[%d]: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // ---- helpers ----

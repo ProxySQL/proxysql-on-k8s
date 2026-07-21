@@ -38,6 +38,10 @@ type Desired struct {
 	AdminVariables      map[string]string
 	MySQLVariables      map[string]string
 	PostgreSQLVariables map[string]string
+
+	// SQLStatements is raw admin SQL executed verbatim after all
+	// structured sections. Opaque: no implicit LOAD/SAVE, not drift-tracked.
+	SQLStatements []string
 }
 
 // MySQLServer is the resolved form of a mysql_servers row.
