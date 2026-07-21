@@ -64,6 +64,7 @@ says which.
 | `service` | `ServiceSpec` | see [Service](#service) | — | Customizes the client-facing Service only. |
 | `networking` | `NetworkingSpec` | see [Networking](#networking-tcpkeepalive) | — | TCP keepalive sysctls. |
 | `logging` | `*LoggingSpec` | `nil` (sidecar off) | CEL rules, see [Logging](#logging) | Optional Fluent Bit query-log sidecar. |
+| `variables` | `VariablesSpec` | see [Variables](#variables) | CEL + operator validation | Extra ProxySQL global variables baked into the bootstrap cnf. |
 
 ### Image
 
@@ -318,6 +319,135 @@ UPDATE global_variables SET variable_value='false'
   WHERE variable_name='mysql-eventslog_default_log';
 LOAD MYSQL VARIABLES TO RUNTIME; SAVE MYSQL VARIABLES TO DISK;
 ```
+
+### Variables
+
+`spec.variables` adds extra ProxySQL global variables to the bootstrap cnf,
+on top of the operator's own bootstrap-structural settings (credentials,
+listening interfaces). It has three maps, one per ProxySQL variable domain:
+
+| Field | Type | Validation | Description |
+|---|---|---|---|
+| `variables.admin` | `map[string]string` | CEL: every key must start with `admin-` | Rendered into the cnf's `admin_variables` block. |
+| `variables.mysql` | `map[string]string` | CEL: every key must start with `mysql-` | Rendered into `mysql_variables`. Not rendered at all when `protocols.mysql` is disabled. |
+| `variables.pgsql` | `map[string]string` | CEL: every key must start with `pgsql-` | Rendered into `pgsql_variables`. Not rendered at all when `protocols.pgsql` is disabled. |
+
+Keys are ProxySQL's **full** variable names, prefix included (e.g.
+`mysql-max_connections`, not `max_connections`) — the same convention as
+`ProxySQLConfig`'s [variables maps](proxysqlconfig.md#variables-maps). Two
+layers of validation apply:
+
+- **CEL (admission)**: each map's keys must carry that map's domain prefix
+  (`admin-`, `mysql-`, `pgsql-` respectively) — enforced by the
+  `XValidation` rules above; a mismatched key is rejected at `kubectl apply`
+  time.
+- **Operator (reconcile)**: after stripping the domain prefix, the
+  remaining variable name must match `^[a-z0-9_]+$` (lowercase snake_case);
+  values must be printable ASCII without `"` or `\` (or any control
+  character, or DEL) — these characters would break out of the
+  double-quoted `name="value"` line the operator renders. A violation fails
+  the reconcile (rejected, not escaped) and retries with backoff; nothing is
+  written until it's fixed.
+
+**Reserved keys** — always rejected, because the operator itself renders
+these lines from other spec fields (`spec.auth`, `spec.protocols`) and a
+user-supplied value would conflict with bootstrap-structural state:
+
+| Key | Rendered from |
+|---|---|
+| `admin-admin_credentials` | `spec.auth` (admin/radmin/extra credentials) |
+| `admin-mysql_ifaces` | `spec.protocols.admin.port` |
+| `mysql-interfaces` | `spec.protocols.mysql.port` |
+| `pgsql-interfaces` | `spec.protocols.pgsql.port` |
+
+The error is `spec.variables: "<key>" is reserved (bootstrap-structural)`.
+
+Notably **not** reserved: `mysql-monitor_password` / `pgsql-monitor_password`.
+The template already renders these from `spec.auth`'s monitor password on
+every cnf, so don't also set them under `spec.variables.mysql`/`.pgsql` —
+the operator does not deduplicate against its own template output. See
+[below](#configuration-changes-runtime-vs-restart) for why monitor
+credential rotation is restart-free while admin/radmin rotation is not.
+
+## Configuration changes: runtime vs restart
+
+Every change to `spec` that affects the bootstrap cnf goes through the same
+two-step pipeline: (1) the `<cluster>-cnf` Secret is updated first, always;
+(2) the operator then decides whether that change can be pushed to already-
+running pods over the admin port, restart-free, or whether it requires a
+StatefulSet rolling restart. Step 1 happens unconditionally, so even when
+step 2 can't apply something at runtime, a *fresh* pod (new pod, or a pod
+that does restart) always boots from the correct, already-updated cnf.
+
+**What can be applied at runtime (no restart):** a change confined to
+`spec.variables` values — an existing key's value changes, no keys are
+added or removed. The operator diffs the old and new rendered cnf; if the
+only difference is variable values within `admin`/`mysql`/`pgsql`
+variable-domain lines, it connects to every **Ready** replica over the
+admin port and, per changed domain:
+
+```sql
+UPDATE global_variables SET variable_value=<v> WHERE variable_name=<k>;
+LOAD {ADMIN|MYSQL|PGSQL} VARIABLES TO RUNTIME;
+SAVE {ADMIN|MYSQL|PGSQL} VARIABLES TO DISK;
+```
+
+It then reads `runtime_global_variables` back on that replica and compares
+against the intended value. This read-back is the oracle for whether the
+variable actually took effect at runtime — there is no hardcoded list of
+"dynamic" vs "static" ProxySQL variables. If every changed variable reads
+back as expected on every replica, **no pod restarts**: the pod template's
+`proxysql.com/cnf-checksum` annotation is left unchanged, and the
+StatefulSet-object-level `proxysql.com/vars-applied-hash` annotation is
+updated to record the applied set (see [annotations
+reference](annotations.md)).
+
+**What always requires a rolling restart:**
+
+- **Any variable ProxySQL doesn't honor at runtime.** If the read-back
+  after `LOAD ... TO RUNTIME` doesn't match the intended value on any
+  replica (e.g. `mysql-threads`, which ProxySQL only reads at startup), the
+  operator falls back to a restart automatically — the `cnf-checksum`
+  annotation changes and the mismatched variable names are named in the
+  `Progressing` message.
+- **Adding or removing a variable key.** Removing a key is a restart *by
+  design*, not a limitation: ProxySQL has no "unset" for a global variable,
+  so a runtime apply could only leave the old value in place while the
+  Secret says otherwise — silently wrong. A restart re-bootstraps from the
+  cnf's variable set as a whole, which is the only way to actually drop a
+  previously-set value.
+- **Structural changes** — anything outside `spec.variables` values:
+  listening ports/interfaces, admin/radmin credential rotation (the
+  `admin_credentials` line), `replicas`/the `proxysql_servers` peer list,
+  enabling/disabling the logging sidecar (`fluent-bit.conf` is part of the
+  same Secret and same checksum), protocol enable/disable, and so on. These
+  always roll every pod.
+- **Zero ready replicas at push time.** Nothing is pushed anywhere (there's
+  nothing to dial); the cnf Secret is already updated, so pods bootstrap
+  correctly once they come up. No restart is *triggered* by this path
+  specifically, but nothing runtime-applies either until pods exist.
+
+**The monitor-credential exception.** Credential rotation normally always
+restarts, because `admin`/`radmin` live in the reserved
+`admin-admin_credentials` line. The `monitor` user's credentials are
+different: `mysql-monitor_password` and `pgsql-monitor_password` are
+ordinary (non-reserved) variable lines rendered from `spec.auth`, so
+rotating the monitor password is just a variable-value change like any
+other — it goes through the runtime-apply path above and is restart-free.
+
+**Progressing condition messages.** The reconciler surfaces the outcome in
+the `Progressing` condition (see the [status reference](status.md)):
+
+| Outcome | Condition | Message |
+|---|---|---|
+| Runtime apply succeeded | `Progressing=False`, reason `RuntimeApplied` | `RuntimeApplied: <sorted variable names>` |
+| Runtime apply failed read-back / restart needed for a variable change | `Progressing=True`, reason `Rolling` | `RestartRequired: <sorted variable names> (runtime read-back mismatch)` |
+| Structural cnf change | `Progressing=True`, reason `Rolling` | `RestartRequired: structural cnf change` |
+| Normal rollout, no variables-specific reason | `Progressing=True`, reason `Rolling` | `waiting for replicas` |
+
+A `RuntimeApplied` outcome is reported even though `Progressing=False` —
+nothing is rolling out, but it's worth surfacing that a restart-free change
+just landed.
 
 ## Status
 

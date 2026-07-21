@@ -96,6 +96,92 @@ doesn't mention (the operator only writes declared variables), tables
 outside the managed set, and anything on a `ProxySQLConfig` that was
 deleted with `skip-cleanup`.
 
+## What restarts pods, what doesn't
+
+Two spec fields push ProxySQL variables, and they don't restart pods the
+same way: `ProxySQLCluster.spec.variables` (bootstrap cnf, this section) and
+`ProxySQLConfig.spec.{admin,mysql,pgsql}Variables` (always runtime-only, see
+[Configuration](./configuration.md#hostgroup-attributes-and-variables)) —
+don't confuse the two.
+
+**Restart-free by default.** Editing an *existing* key's value under
+`spec.variables.{admin,mysql,pgsql}` on a `ProxySQLCluster` does not roll
+your pods. The operator writes the updated `<cluster>-cnf` Secret first
+(so a pod that does restart, for any reason, always boots correct), then
+pushes the changed variables to every currently **Ready** replica over the
+admin port (`UPDATE global_variables` + `LOAD ... TO RUNTIME` +
+`SAVE ... TO DISK`), and reads `runtime_global_variables` back to confirm
+the value actually took. Watch it land:
+
+```bash
+kubectl edit pxc proxysql   # change spec.variables.mysql.mysql-max_connections
+kubectl get pxc proxysql -o jsonpath='{.status.conditions[?(@.type=="Progressing")]}'
+# reason: RuntimeApplied, message: "RuntimeApplied: mysql-max_connections"
+```
+
+No pod restarts; `kubectl get pods` shows unchanged `AGE`/`RESTARTS`.
+
+**Automatic fallback to a restart.** Not every ProxySQL variable is
+runtime-settable — some only take effect on the next start (e.g.
+`mysql-threads`). The operator doesn't maintain a list of which are which;
+it tries the runtime apply, reads back `runtime_global_variables`, and if
+the value didn't actually change, it falls back to a rolling restart on
+its own. You'll see this in the `Progressing` condition:
+
+```
+reason: Rolling, message: "RestartRequired: mysql-threads (runtime read-back mismatch)"
+```
+
+**Removing a variable key always restarts, by design.** ProxySQL has no
+"unset" for a global variable — a runtime `UPDATE` can only *set* a value,
+never remove one. So deleting a key from `spec.variables` can't be applied
+at runtime without silently keeping the old value; the operator forces a
+rolling restart instead, which re-bootstraps from the new cnf's variable
+set as a whole. This is the same reason `ProxySQLConfig`'s variable maps
+document "removing a key does not reset the variable" — different
+mechanism, same underlying ProxySQL limitation.
+
+**What always restarts, unconditionally:** listening ports/interfaces,
+`replicas`, admin/radmin credential rotation, and toggling the logging
+sidecar — anything that isn't a `spec.variables` value change. See the
+[full breakdown](../reference/proxysqlcluster.md#configuration-changes-runtime-vs-restart).
+
+**The monitor-credential exception.** Admin/radmin credential rotation
+always restarts (the `admin_credentials` cnf line changes). The `monitor`
+account is different: its password is an ordinary `mysql_variables` /
+`pgsql_variables` line, not part of `admin_credentials`, so rotating it
+through `spec.auth`'s monitor key goes through the same restart-free
+runtime-apply path as any other variable change — you can rotate the
+monitor password with zero pod restarts.
+
+**Precedence when both mechanisms touch the same variable.** If a key
+appears in both `ProxySQLCluster.spec.variables` and a
+`ProxySQLConfig.spec.*Variables` map targeting that cluster,
+`ProxySQLConfig`'s sync runs after the cluster-level bootstrap variables on
+every reconcile pass and wins — the same convergence order you'd see after
+a fresh restart (cnf boots first, `ProxySQLConfig` syncs after). Don't rely
+on this for anything subtle: it's simpler to pick one mechanism per
+variable.
+
+**Two operational gaps worth knowing:**
+
+- **Zero ready replicas.** If no replica is Ready when a `spec.variables`
+  change lands, nothing is pushed anywhere — there's no pod to dial. The
+  cnf Secret is already updated, so pods bootstrap correctly once they
+  come up; there's just no runtime push to observe in the meantime.
+- **A Not-Ready replica at push time.** The runtime push only dials
+  **Ready** pods. A replica that's transiently Not-Ready (not restarting,
+  just failing readiness) at the moment of the push can miss that
+  variable's runtime apply and keep serving the old value until the next
+  `spec.variables` change or a restart. On a multi-replica cluster,
+  ProxySQL Cluster sync (`cluster_*` settings, replicas > 1) mitigates
+  this for variables that also propagate via cluster sync; it does not
+  cover every variable. If you need certainty a change reached every
+  replica, check `runtime_global_variables` yourself (see
+  [manual admin-port access](#manual-admin-port-access) below) rather than
+  trusting the `Progressing` message alone — it reflects only the
+  replicas that were Ready at push time.
+
 ## Manual admin-port access
 
 Sometimes you need to look inside ProxySQL. Do it read-only, as

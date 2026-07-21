@@ -17,8 +17,9 @@ time they were written.
 |---|---|---|---|
 | `Available` | `True` | `AllReplicasReady` | `readyReplicas == replicas` and `replicas > 0`. Message: `N/N replicas ready`. |
 | `Available` | `False` | `ReplicasNotReady` | Any replica not ready. Message: `n/N replicas ready`. |
-| `Progressing` | `True` | `Rolling` | Set together with `Available=False`; waiting for replicas. |
+| `Progressing` | `True` | `Rolling` | Set together with `Available=False`; waiting for replicas. Message is `waiting for replicas`, unless this reconcile just decided a restart is needed for a `spec.variables` change, in which case it's `RestartRequired: <sorted variable names> (runtime read-back mismatch)` (a variable didn't take at runtime) or `RestartRequired: structural cnf change` (a non-variable cnf change: ports, credentials, `replicas`, logging sidecar, ...). The StatefulSet template diff is what actually drives the rollout either way; this only improves the message. |
 | `Progressing` | `False` | `Steady` | Set together with `Available=True`; no rollout in progress. |
+| `Progressing` | `False` | `RuntimeApplied` | A `spec.variables` change was pushed to every ready replica over the admin port and read back successfully — restart-free. Message: `RuntimeApplied: <sorted variable names>`. Takes priority over `Steady` for the reconcile in which it fires; nothing is rolling out, but it's worth surfacing what just changed. See [ProxySQLCluster reference](proxysqlcluster.md#configuration-changes-runtime-vs-restart). |
 | `Degraded` | `True` | `AuthSecretError` | Auth-Secret resolution failed: external Secret missing, partial operator schema, schema mismatch, or invalid credential characters. The reconcile aborts (no resources are touched) and `phase` is set to `Degraded`. |
 | `ServiceMonitorReady` | `True` | `Synced` | ServiceMonitor applied. |
 | `ServiceMonitorReady` | `False` | `CRDNotInstalledOrFailed` | ServiceMonitor create/update failed — most commonly the `monitoring.coreos.com/v1` CRD is not installed. **Non-fatal**: the rest of the reconcile is unaffected. |
