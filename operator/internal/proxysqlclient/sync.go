@@ -412,6 +412,13 @@ func syncVariables(ctx context.Context, c Executor, vars map[string]string, doma
 	return loadSave(ctx, c, domain+" VARIABLES")
 }
 
+// ApplyVariables pushes full-named variables ("mysql-max_connections") for
+// one domain ("MYSQL"|"PGSQL"|"ADMIN") and loads+saves them. Thin exported
+// wrapper over the sync path's variable step.
+func ApplyVariables(ctx context.Context, c Executor, vars map[string]string, domain string) error {
+	return syncVariables(ctx, c, vars, domain)
+}
+
 // syncSQLStatements executes user-provided raw admin SQL in listed order.
 // Unlike the table sections, the first failure aborts the remaining
 // statements: order may carry dependencies (e.g. UPDATE then LOAD).
