@@ -885,17 +885,17 @@ func cnfSectionBlock(t *testing.T, cnf, section string) string {
 		t.Fatalf("cnf missing %s_variables block:\n%s", section, cnf)
 	}
 	rest := cnf[start:]
-	end := strings.Index(rest, "\n}")
-	if end < 0 {
+	before, _, found := strings.Cut(rest, "\n}")
+	if !found {
 		t.Fatalf("cnf %s_variables block unterminated:\n%s", section, cnf)
 	}
-	return rest[:end]
+	return before
 }
 
 // countVarLines counts lines in a section block that set the given bare key.
 func countVarLines(block, key string) int {
 	n := 0
-	for _, line := range strings.Split(block, "\n") {
+	for line := range strings.SplitSeq(block, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
 			n++
 		}

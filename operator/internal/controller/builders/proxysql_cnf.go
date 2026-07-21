@@ -19,11 +19,16 @@ package builders
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
 	"strings"
 	"text/template"
 )
+
+// cnfTrue is the libconfig boolean literal ("true"), used for every
+// cnf variable the operator renders as an on/off flag.
+const cnfTrue = "true"
 
 // reservedCnfKeys are rejected in validateCnfVars: never overridable via
 // spec.variables. Two families:
@@ -193,9 +198,7 @@ type cnfVar struct {
 // rendering.
 func mergedCnfVars(defaults, user map[string]string, prefix string) []cnfVar {
 	merged := make(map[string]string, len(defaults)+len(user))
-	for k, v := range defaults {
-		merged[k] = v
-	}
+	maps.Copy(merged, defaults)
 	for k, v := range user {
 		merged[strings.TrimPrefix(k, prefix)] = v
 	}
@@ -217,20 +220,20 @@ func mergedCnfVars(defaults, user map[string]string, prefix string) []cnfVar {
 func (b *Builder) adminDefaultVars(clusterSync bool) map[string]string {
 	d := map[string]string{}
 	if isTrue(b.Spec.Metrics.Enabled) {
-		d["restapi_enabled"] = "true"
+		d["restapi_enabled"] = cnfTrue
 		d["restapi_port"] = fmt.Sprintf("%d", b.Spec.Metrics.Port)
 	}
 	if b.Spec.Protocols.Web.IsEnabled() {
-		d["web_enabled"] = "true"
+		d["web_enabled"] = cnfTrue
 		d["web_port"] = fmt.Sprintf("%d", b.Spec.Protocols.Web.Port)
 	}
 	if clusterSync {
 		d["cluster_check_interval_ms"] = "200"
 		d["cluster_check_status_frequency"] = "100"
-		d["cluster_mysql_query_rules_save_to_disk"] = "true"
-		d["cluster_mysql_servers_save_to_disk"] = "true"
-		d["cluster_mysql_users_save_to_disk"] = "true"
-		d["cluster_proxysql_servers_save_to_disk"] = "true"
+		d["cluster_mysql_query_rules_save_to_disk"] = cnfTrue
+		d["cluster_mysql_servers_save_to_disk"] = cnfTrue
+		d["cluster_mysql_users_save_to_disk"] = cnfTrue
+		d["cluster_proxysql_servers_save_to_disk"] = cnfTrue
 		d["cluster_mysql_query_rules_diffs_before_sync"] = "3"
 		d["cluster_mysql_servers_diffs_before_sync"] = "3"
 		d["cluster_mysql_users_diffs_before_sync"] = "3"
