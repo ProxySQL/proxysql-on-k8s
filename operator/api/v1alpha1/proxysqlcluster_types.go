@@ -110,6 +110,35 @@ type ProxySQLClusterSpec struct {
 	// Default off.
 	// +optional
 	Logging *LoggingSpec `json:"logging,omitempty"`
+
+	// Variables sets extra ProxySQL global variables baked into the
+	// bootstrap cnf, in addition to the operator's own bootstrap-structural
+	// settings (credentials, listening interfaces, etc).
+	// +optional
+	Variables VariablesSpec `json:"variables,omitempty"`
+}
+
+// VariablesSpec sets extra ProxySQL global variables in the bootstrap cnf.
+// Keys are full variable names (admin-*, mysql-*, pgsql-*). Values render
+// into the matching cnf section. Changes to runtime-settable variables are
+// applied to running replicas via the admin interface without a restart;
+// variables ProxySQL only honors at startup fall back to a rolling restart
+// automatically (runtime read-back is the oracle).
+type VariablesSpec struct {
+	// Admin sets admin_variables. Keys must be prefixed "admin-".
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.startsWith('admin-'))",message="all keys must start with 'admin-'"
+	Admin map[string]string `json:"admin,omitempty"`
+
+	// MySQL sets mysql_variables. Keys must be prefixed "mysql-".
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.startsWith('mysql-'))",message="all keys must start with 'mysql-'"
+	MySQL map[string]string `json:"mysql,omitempty"`
+
+	// PostgreSQL sets pgsql_variables. Keys must be prefixed "pgsql-".
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.startsWith('pgsql-'))",message="all keys must start with 'pgsql-'"
+	PostgreSQL map[string]string `json:"pgsql,omitempty"`
 }
 
 // LoggingSpec configures the optional Fluent Bit log-shipping sidecar.

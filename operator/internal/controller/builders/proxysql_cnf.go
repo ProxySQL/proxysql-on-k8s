@@ -19,9 +19,20 @@ package builders
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 	"text/template"
 )
+
+// reservedCnfKeys are bootstrap-structural: rendered by the template itself
+// and never overridable or runtime-applied. Task 2 (runtime apply) reuses
+// this set to reject the same keys in ProxySQLConfig pushes.
+var reservedCnfKeys = map[string]struct{}{
+	"admin-admin_credentials": {},
+	"admin-mysql_ifaces":      {},
+	"mysql-interfaces":        {},
+	"pgsql-interfaces":        {},
+}
 
 // bootstrapCnfTemplate is the minimal proxysql.cnf the operator writes into
 // the bootstrap ConfigMap. It contains only what ProxySQL needs to start
@@ -59,6 +70,9 @@ admin_variables=
   cluster_mysql_users_diffs_before_sync=3
   cluster_proxysql_servers_diffs_before_sync=3
 {{- end }}
+{{- range .AdminExtra }}
+  {{ .Name }}="{{ .Value }}"
+{{- end }}
 }
 
 {{- if .MySQLEnabled }}
@@ -75,6 +89,9 @@ mysql_variables=
   eventslog_format=2
   eventslog_filesize=52428800
 {{- end }}
+{{- range .MySQLExtra }}
+  {{ .Name }}="{{ .Value }}"
+{{- end }}
 }
 {{- end }}
 
@@ -86,6 +103,9 @@ pgsql_variables=
   monitor_username="monitor"
   monitor_password="{{ .MonitorPassword }}"
   threads=4
+{{- range .PgSQLExtra }}
+  {{ .Name }}="{{ .Value }}"
+{{- end }}
 }
 {{- end }}
 
@@ -121,12 +141,43 @@ type cnfData struct {
 	WebPort            int32
 	ClusterSync        bool
 	ProxySQLServers    []string
+	AdminExtra         []cnfVar
+	MySQLExtra         []cnfVar
+	PgSQLExtra         []cnfVar
+}
+
+// cnfVar is a single user-supplied global variable, already stripped of its
+// domain prefix, ready to render as `Name="Value"`.
+type cnfVar struct {
+	Name  string
+	Value string
+}
+
+// sortedCnfVars strips the given prefix from each key in vars and returns
+// the result sorted by (stripped) name for deterministic rendering.
+func sortedCnfVars(vars map[string]string, prefix string) []cnfVar {
+	if len(vars) == 0 {
+		return nil
+	}
+	out := make([]cnfVar, 0, len(vars))
+	for k, v := range vars {
+		out = append(out, cnfVar{Name: strings.TrimPrefix(k, prefix), Value: v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // BootstrapCnf renders the minimal proxysql.cnf for this cluster.
 // proxysqlServers is the list of peer pod DNS names for ProxySQL Cluster sync
 // (only populated when replicas > 1).
 func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
+	for _, vars := range []map[string]string{b.Spec.Variables.Admin, b.Spec.Variables.MySQL, b.Spec.Variables.PostgreSQL} {
+		for k := range vars {
+			if _, reserved := reservedCnfKeys[k]; reserved {
+				return "", fmt.Errorf("spec.variables: %q is reserved (bootstrap-structural)", k)
+			}
+		}
+	}
 	tpl, err := template.New("proxysql.cnf").Parse(bootstrapCnfTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse cnf template: %w", err)
@@ -150,6 +201,9 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 		WebPort:            b.Spec.Protocols.Web.Port,
 		ClusterSync:        len(proxysqlServers) > 0,
 		ProxySQLServers:    proxysqlServers,
+		AdminExtra:         sortedCnfVars(b.Spec.Variables.Admin, "admin-"),
+		MySQLExtra:         sortedCnfVars(b.Spec.Variables.MySQL, "mysql-"),
+		PgSQLExtra:         sortedCnfVars(b.Spec.Variables.PostgreSQL, "pgsql-"),
 	}
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, data); err != nil {

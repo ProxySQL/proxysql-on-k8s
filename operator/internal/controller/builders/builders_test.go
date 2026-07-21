@@ -785,6 +785,35 @@ func TestBootstrapCnf_ExtraAdminCredential(t *testing.T) {
 	}
 }
 
+func TestBootstrapCnf_SpecVariablesRendered(t *testing.T) {
+	c := newCluster("vars")
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	b.Spec.Variables = proxysqlv1alpha1.VariablesSpec{
+		MySQL: map[string]string{"mysql-max_connections": "700"},
+		Admin: map[string]string{"admin-refresh_interval": "2500"},
+	}
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`max_connections="700"`, `refresh_interval="2500"`} {
+		if !strings.Contains(cnf, want) {
+			t.Fatalf("cnf missing %q:\n%s", want, cnf)
+		}
+	}
+}
+
+func TestBootstrapCnf_SpecVariables_ReservedKeysRejected(t *testing.T) {
+	c := newCluster("vars-reserved")
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	b.Spec.Variables = proxysqlv1alpha1.VariablesSpec{
+		Admin: map[string]string{"admin-admin_credentials": "x:y"},
+	}
+	if _, err := b.BootstrapCnf(nil); err == nil {
+		t.Fatal("reserved key must be rejected")
+	}
+}
+
 func TestRandomPassword_Length(t *testing.T) {
 	p, err := RandomPassword()
 	if err != nil {
