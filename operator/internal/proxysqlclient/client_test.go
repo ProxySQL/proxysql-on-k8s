@@ -51,6 +51,30 @@ func TestSnippet_RedactsQuotedLiterals(t *testing.T) {
 			wantContain: []string{"UPDATE mysql_users SET password="},
 			wantAbsent:  []string{"it''s-a-secret", "it", "a-secret"},
 		},
+		{
+			name:        "double-quoted literal is redacted (MySQL dialect without ANSI_QUOTES)",
+			query:       `UPDATE global_variables SET variable_value="dq-s3cr3t-pw" WHERE variable_name="mysql-monitor_password"`,
+			wantContain: []string{"UPDATE global_variables SET variable_value=", "WHERE variable_name="},
+			wantAbsent:  []string{"dq-s3cr3t-pw", "mysql-monitor_password"},
+		},
+		{
+			name:        "doubled double-quote escape inside literal is not an early terminator",
+			query:       `INSERT INTO mysql_users (username,password) VALUES ("app_user","dq""escaped-secret")`,
+			wantContain: []string{"INSERT INTO mysql_users"},
+			wantAbsent:  []string{`dq""escaped-secret`, "escaped-secret", "app_user"},
+		},
+		{
+			name:        "mixed quote styles both redacted",
+			query:       `UPDATE mysql_users SET password="double-q-secret" WHERE username='single-q-user'`,
+			wantContain: []string{"UPDATE mysql_users SET password="},
+			wantAbsent:  []string{"double-q-secret", "single-q-user"},
+		},
+		{
+			name:        "single quote inside double-quoted literal does not open a literal",
+			query:       `UPDATE mysql_users SET comment="o'brien-secret" WHERE username='app_user'`,
+			wantContain: []string{"UPDATE mysql_users SET comment="},
+			wantAbsent:  []string{"o'brien-secret", "brien-secret", "app_user"},
+		},
 	}
 
 	for _, tt := range tests {

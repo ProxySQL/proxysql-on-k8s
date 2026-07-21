@@ -127,23 +127,27 @@ func snippet(q string) string {
 	return redacted[:max] + "..."
 }
 
-// redactQuotedLiterals replaces the contents of every single-quoted SQL
-// string literal in q with "***", preserving the surrounding statement
-// shape (verb, table, column names) for debuggability. It understands SQL's
-// doubled-quote escape (two single quotes inside a literal mean one literal
-// single quote, not the end of the literal) so it won't terminate a literal
-// early and leak the remainder of a secret.
+// redactQuotedLiterals replaces the contents of every quoted SQL string
+// literal in q with "***", preserving the surrounding statement shape
+// (verb, table, column names) for debuggability. Both quote styles the
+// MySQL dialect accepts for string literals are masked: single-quoted and —
+// without ANSI_QUOTES, which ProxySQL's admin doesn't set — double-quoted.
+// It understands SQL's doubled-quote escape (two of the delimiting quote
+// inside a literal mean one literal quote character, not the end of the
+// literal) so it won't terminate a literal early and leak the remainder of
+// a secret; the OTHER quote character is ordinary content inside a literal
+// and never opens or closes one.
 func redactQuotedLiterals(q string) string {
 	var out []rune
 	runes := []rune(q)
-	inLiteral := false
+	var quote rune // the delimiter of the literal we're inside; 0 = outside
 
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
-		if !inLiteral {
+		if quote == 0 {
 			out = append(out, r)
-			if r == '\'' {
-				inLiteral = true
+			if r == '\'' || r == '"' {
+				quote = r
 				out = append(out, '*', '*', '*')
 			}
 			continue
@@ -151,9 +155,10 @@ func redactQuotedLiterals(q string) string {
 
 		// Inside a literal: everything is masked already ("***" was emitted
 		// when we entered). Look for the terminating quote, being careful
-		// that a doubled '' is an escaped quote, not the end of the literal.
-		if r == '\'' {
-			if i+1 < len(runes) && runes[i+1] == '\'' {
+		// that a doubled delimiter is an escaped quote, not the end of the
+		// literal.
+		if r == quote {
+			if i+1 < len(runes) && runes[i+1] == quote {
 				// Escaped quote inside the literal: consume both runes,
 				// stay inside the literal, emit nothing more (already
 				// masked).
@@ -161,8 +166,8 @@ func redactQuotedLiterals(q string) string {
 				continue
 			}
 			// End of literal.
-			inLiteral = false
-			out = append(out, '\'')
+			out = append(out, quote)
+			quote = 0
 		}
 		// else: masked literal content, drop the original rune.
 	}
