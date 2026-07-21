@@ -15,14 +15,14 @@ metadata: {name: pxc}
 spec:
   replicas: 1
   persistence: {enabled: false}
-  protocols: {mysql: {enabled: true}, pgsql: {enabled: false}}
+  protocols: {mysql: {enabled: true, port: 6033}, pgsql: {enabled: false}}
   variables:
     mysql:
       mysql-max_connections: "700"
 YAML
   kubectl -n "$ns" wait --for=condition=Ready pod/pxc-0 --timeout=120s >/dev/null
 
-  local radmin out restarts0 annot0 i
+  local radmin out restarts0 annot0 varshash0
   radmin="$(radmin_pw "$ns" pxc)"
 
   # Assert initial runtime value
@@ -34,7 +34,8 @@ YAML
   # Record initial state
   restarts0="$(kubectl -n "$ns" get pod pxc-0 -o jsonpath='{.status.containerStatuses[0].restartCount}')"
   annot0="$(kubectl -n "$ns" get pod pxc-0 -o jsonpath='{.metadata.annotations.proxysql\.com/cnf-checksum}')"
-  log "runtimereconfig: recorded initial restartCount=$restarts0, annotation=$annot0"
+  varshash0="$(kubectl -n "$ns" get statefulset pxc -o jsonpath='{.metadata.annotations.proxysql\.com/vars-applied-hash}')"
+  log "runtimereconfig: recorded initial restartCount=$restarts0, annotation=$annot0, vars-applied-hash=$varshash0"
 
   # Patch to 701 (runtime-settable variable, no restart expected)
   kubectl -n "$ns" patch proxysqlcluster pxc --type=json \
@@ -62,11 +63,16 @@ YAML
   [[ "$annot_now" == "$annot0" ]] || { fail "pod annotation changed (was $annot0, now $annot_now)"; dump_ns "$ns"; return 1; }
   log "runtimereconfig: pod annotation unchanged"
 
-  # Assert Progressing condition message contains RuntimeApplied
-  local msg
-  msg="$(kubectl -n "$ns" get proxysqlcluster pxc -o jsonpath='{.status.conditions[?(@.type=="Progressing")].message}')"
-  [[ "$msg" == *"RuntimeApplied: mysql-max_connections"* ]] || { fail "Progressing condition message does not contain 'RuntimeApplied: mysql-max_connections' (got '$msg')"; dump_ns "$ns"; return 1; }
-  log "runtimereconfig: Progressing condition message contains 'RuntimeApplied: mysql-max_connections'"
+  # Assert the runtime-apply path was taken: the STS object-level
+  # vars-applied-hash annotation advanced (the operator records each runtime
+  # push there), which together with the unchanged restartCount and unchanged
+  # pod cnf-checksum proves runtime apply without a restart. (The Progressing
+  # condition's "RuntimeApplied: ..." message is transient — overwritten to
+  # Steady by the follow-up reconcile — so it is not asserted here.)
+  local varshash_now
+  varshash_now="$(kubectl -n "$ns" get statefulset pxc -o jsonpath='{.metadata.annotations.proxysql\.com/vars-applied-hash}')"
+  [[ "$varshash_now" != "$varshash0" ]] || { fail "vars-applied-hash did not change (still '$varshash0') — runtime apply path not taken"; dump_ns "$ns"; return 1; }
+  log "runtimereconfig: STS vars-applied-hash advanced ($varshash0 -> $varshash_now) — runtime apply confirmed"
 
   # Structural change: patch spec.protocols.mysql.port to 6034 (triggers rollout)
   kubectl -n "$ns" patch proxysqlcluster pxc --type=json \
