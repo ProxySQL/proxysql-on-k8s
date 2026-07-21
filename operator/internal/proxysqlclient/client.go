@@ -112,12 +112,60 @@ func (c *Client) Query(ctx context.Context, query string) ([][]string, error) {
 	return out, rows.Err()
 }
 
-// snippet returns a short prefix of q for use in error messages — full
-// queries can be hundreds of lines after batched inserts.
+// snippet returns a short, redacted prefix of q for use in error messages —
+// full queries can be hundreds of lines after batched inserts, and single-
+// quoted literals frequently carry secrets (passwords pushed via
+// UPDATE global_variables / INSERT INTO mysql_users, etc). Errors built from
+// this are logged by controller-runtime and can surface in status
+// conditions, so literals must never reach them verbatim.
 func snippet(q string) string {
 	const max = 80
-	if len(q) <= max {
-		return q
+	redacted := redactQuotedLiterals(q)
+	if len(redacted) <= max {
+		return redacted
 	}
-	return q[:max] + "..."
+	return redacted[:max] + "..."
+}
+
+// redactQuotedLiterals replaces the contents of every single-quoted SQL
+// string literal in q with "***", preserving the surrounding statement
+// shape (verb, table, column names) for debuggability. It understands SQL's
+// doubled-quote escape ('' inside a literal is a literal single quote, not
+// the end of the literal) so it won't terminate a literal early and leak the
+// remainder of a secret.
+func redactQuotedLiterals(q string) string {
+	var out []rune
+	runes := []rune(q)
+	inLiteral := false
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if !inLiteral {
+			out = append(out, r)
+			if r == '\'' {
+				inLiteral = true
+				out = append(out, '*', '*', '*')
+			}
+			continue
+		}
+
+		// Inside a literal: everything is masked already ("***" was emitted
+		// when we entered). Look for the terminating quote, being careful
+		// that a doubled '' is an escaped quote, not the end of the literal.
+		if r == '\'' {
+			if i+1 < len(runes) && runes[i+1] == '\'' {
+				// Escaped quote inside the literal: consume both runes,
+				// stay inside the literal, emit nothing more (already
+				// masked).
+				i++
+				continue
+			}
+			// End of literal.
+			inLiteral = false
+			out = append(out, '\'')
+		}
+		// else: masked literal content, drop the original rune.
+	}
+
+	return string(out)
 }
