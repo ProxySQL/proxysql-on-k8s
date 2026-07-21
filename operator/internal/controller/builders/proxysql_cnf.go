@@ -19,6 +19,7 @@ package builders
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"text/template"
@@ -32,6 +33,32 @@ var reservedCnfKeys = map[string]struct{}{
 	"admin-mysql_ifaces":      {},
 	"mysql-interfaces":        {},
 	"pgsql-interfaces":        {},
+}
+
+// cnfVarName constrains the variable name after its domain prefix. ProxySQL
+// global variable names are lowercase snake_case; anything else is either a
+// typo or an injection attempt.
+var cnfVarName = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// validateCnfVars rejects reserved keys, malformed names, and values that
+// could break out of the double-quoted `name="value"` cnf rendering
+// (quotes, backslashes, and control characters). Plain rejection — no
+// escaping — keeps the rendered cnf trivially safe.
+func validateCnfVars(vars map[string]string, prefix string) error {
+	for k, v := range vars {
+		if _, reserved := reservedCnfKeys[k]; reserved {
+			return fmt.Errorf("spec.variables: %q is reserved (bootstrap-structural)", k)
+		}
+		if !cnfVarName.MatchString(strings.TrimPrefix(k, prefix)) {
+			return fmt.Errorf("spec.variables: invalid variable name %q", k)
+		}
+		for _, r := range v {
+			if r == '"' || r == '\\' || r < 0x20 || r == 0x7f {
+				return fmt.Errorf("spec.variables: value for %q contains disallowed characters", k)
+			}
+		}
+	}
+	return nil
 }
 
 // bootstrapCnfTemplate is the minimal proxysql.cnf the operator writes into
@@ -171,11 +198,16 @@ func sortedCnfVars(vars map[string]string, prefix string) []cnfVar {
 // proxysqlServers is the list of peer pod DNS names for ProxySQL Cluster sync
 // (only populated when replicas > 1).
 func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
-	for _, vars := range []map[string]string{b.Spec.Variables.Admin, b.Spec.Variables.MySQL, b.Spec.Variables.PostgreSQL} {
-		for k := range vars {
-			if _, reserved := reservedCnfKeys[k]; reserved {
-				return "", fmt.Errorf("spec.variables: %q is reserved (bootstrap-structural)", k)
-			}
+	for _, m := range []struct {
+		vars   map[string]string
+		prefix string
+	}{
+		{b.Spec.Variables.Admin, "admin-"},
+		{b.Spec.Variables.MySQL, "mysql-"},
+		{b.Spec.Variables.PostgreSQL, "pgsql-"},
+	} {
+		if err := validateCnfVars(m.vars, m.prefix); err != nil {
+			return "", err
 		}
 	}
 	tpl, err := template.New("proxysql.cnf").Parse(bootstrapCnfTemplate)

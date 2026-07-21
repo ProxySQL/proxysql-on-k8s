@@ -814,6 +814,68 @@ func TestBootstrapCnf_SpecVariables_ReservedKeysRejected(t *testing.T) {
 	}
 }
 
+func TestBootstrapCnf_SpecVariables_InjectionRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		vars proxysqlv1alpha1.VariablesSpec
+	}{
+		{"value with quote and newline", proxysqlv1alpha1.VariablesSpec{
+			MySQL: map[string]string{"mysql-max_connections": "1\"\nadmin_credentials=\"evil:pw"},
+		}},
+		{"value with backslash", proxysqlv1alpha1.VariablesSpec{
+			Admin: map[string]string{"admin-refresh_interval": `2500\`},
+		}},
+		{"value with control char", proxysqlv1alpha1.VariablesSpec{
+			PostgreSQL: map[string]string{"pgsql-threads": "4\x01"},
+		}},
+		{"value with DEL char", proxysqlv1alpha1.VariablesSpec{
+			Admin: map[string]string{"admin-refresh_interval": "25\x7f00"},
+		}},
+		{"name with uppercase", proxysqlv1alpha1.VariablesSpec{
+			MySQL: map[string]string{"mysql-Max_Connections": "700"},
+		}},
+		{"name with quote", proxysqlv1alpha1.VariablesSpec{
+			Admin: map[string]string{`admin-x"y`: "1"},
+		}},
+		{"name with only prefix", proxysqlv1alpha1.VariablesSpec{
+			MySQL: map[string]string{"mysql-": "1"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := New(newCluster("inj"), newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+			b.Spec.Variables = tc.vars
+			if _, err := b.BootstrapCnf(nil); err == nil {
+				t.Fatalf("%s must be rejected", tc.name)
+			}
+		})
+	}
+}
+
+func TestBootstrapCnf_SpecVariables_NormalValuesAccepted(t *testing.T) {
+	b := New(newCluster("ok"), newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	b.Spec.Variables = proxysqlv1alpha1.VariablesSpec{
+		MySQL: map[string]string{
+			"mysql-monitor_local_dns_cache_ttl": "300000",
+			"mysql-server_version":              "8.0.40 (ProxySQL)",
+			"mysql-ssl_p2s_cipher":              "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384",
+		},
+		Admin: map[string]string{"admin-stats_credentials": "stats:0.0.0.0:6033"},
+	}
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("normal values must be accepted: %v", err)
+	}
+	for _, want := range []string{
+		`server_version="8.0.40 (ProxySQL)"`,
+		`stats_credentials="stats:0.0.0.0:6033"`,
+	} {
+		if !strings.Contains(cnf, want) {
+			t.Errorf("cnf missing %q:\n%s", want, cnf)
+		}
+	}
+}
+
 func TestRandomPassword_Length(t *testing.T) {
 	p, err := RandomPassword()
 	if err != nil {
