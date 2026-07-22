@@ -47,6 +47,20 @@ rules:
   - apiGroups: [proxysql.com]
     resources: [proxysqlclusters/finalizers, proxysqlconfigs/finalizers]
     verbs: [update]
+  {{- if and .Values.metrics.enabled .Values.metrics.secureServing }}
+  # controller-runtime's WithAuthenticationAndAuthorization filter (wired in
+  # cmd/main.go whenever --metrics-secure=true) authenticates and
+  # authorizes every request to the metrics endpoint by having the manager
+  # itself create TokenReviews/SubjectAccessReviews against the API server.
+  # Without this, the manager can't validate scraper credentials and every
+  # scrape gets a 401/403.
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -62,3 +76,22 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "proxysql-operator.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if and .Values.metrics.enabled .Values.metrics.secureServing }}
+---
+# Grants GET on the secured /metrics nonResourceURL. The chart doesn't know
+# which ServiceAccount does the scraping (Prometheus, a ServiceMonitor's
+# scrape credentials, etc.), so it renders this ClusterRole for operators to
+# bind themselves, e.g.:
+#   kubectl create clusterrolebinding <name>-metrics-reader \
+#     --clusterrole={{ include "proxysql-operator.fullname" . }}-metrics-reader \
+#     --serviceaccount=<scraper-namespace>:<scraper-serviceaccount>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "proxysql-operator.fullname" . }}-metrics-reader
+  labels:
+    {{- include "proxysql-operator.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: ["/metrics"]
+    verbs: [get]
+{{- end }}
