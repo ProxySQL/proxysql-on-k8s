@@ -50,23 +50,30 @@ func (b *Builder) ExternalService() *corev1.Service {
 			Annotations: ext.Annotations,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:                          externalServiceType(ext),
-			Selector:                      b.SelectorLabels(),
-			Ports:                         b.externalServicePorts(ext),
-			LoadBalancerClass:             ext.LoadBalancerClass,
-			ExternalTrafficPolicy:         ext.ExternalTrafficPolicy,
-			InternalTrafficPolicy:         ext.InternalTrafficPolicy,
-			LoadBalancerSourceRanges:      ext.LoadBalancerSourceRanges,
-			AllocateLoadBalancerNodePorts: ext.AllocateLoadBalancerNodePorts,
-			HealthCheckNodePort:           ext.HealthCheckNodePort,
-			IPFamilyPolicy:                ext.IPFamilyPolicy,
-			IPFamilies:                    ext.IPFamilies,
+			Type:                  externalServiceType(ext),
+			Selector:              b.SelectorLabels(),
+			Ports:                 b.externalServicePorts(ext),
+			ExternalTrafficPolicy: ext.ExternalTrafficPolicy,
+			InternalTrafficPolicy: ext.InternalTrafficPolicy,
+			IPFamilyPolicy:        ext.IPFamilyPolicy,
+			IPFamilies:            ext.IPFamilies,
 		},
 	}
-	// CRD default is true; apply it here too so a zero-value spec (unit
-	// tests, older API servers) produces the same desired state.
-	if svc.Spec.AllocateLoadBalancerNodePorts == nil {
-		svc.Spec.AllocateLoadBalancerNodePorts = boolPtr(true)
+	// LoadBalancer-only fields. The apiserver rejects
+	// allocateLoadBalancerNodePorts and loadBalancerClass on any other
+	// Service type ("may only be used when 'type' is 'LoadBalancer'"), and
+	// sourceRanges/healthCheckNodePort carry LB-only semantics — so on
+	// NodePort these are dropped even when the CRD default populated them.
+	if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		svc.Spec.LoadBalancerClass = ext.LoadBalancerClass
+		svc.Spec.LoadBalancerSourceRanges = ext.LoadBalancerSourceRanges
+		svc.Spec.HealthCheckNodePort = ext.HealthCheckNodePort
+		svc.Spec.AllocateLoadBalancerNodePorts = ext.AllocateLoadBalancerNodePorts
+		// CRD default is true; apply it here too so a zero-value spec (unit
+		// tests, older API servers) produces the same desired state.
+		if svc.Spec.AllocateLoadBalancerNodePorts == nil {
+			svc.Spec.AllocateLoadBalancerNodePorts = boolPtr(true)
+		}
 	}
 	return svc
 }

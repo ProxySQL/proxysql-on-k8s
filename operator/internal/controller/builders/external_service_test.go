@@ -281,6 +281,61 @@ func TestBuilder_ExternalService_TuningPassthrough(t *testing.T) {
 	}
 }
 
+// LoadBalancer-only fields must be dropped on a NodePort Service: the
+// apiserver rejects allocateLoadBalancerNodePorts and loadBalancerClass
+// outright ("may only be used when 'type' is 'LoadBalancer'"), and
+// sourceRanges/healthCheckNodePort are LB-only semantics.
+func TestBuilder_ExternalService_NodePortDropsLoadBalancerOnlyFields(t *testing.T) {
+	lbClass := "service.k8s.aws/nlb"
+	ext := func() *proxysqlv1alpha1.ExternalServiceSpec {
+		return &proxysqlv1alpha1.ExternalServiceSpec{
+			Enabled:                       true,
+			AllocateLoadBalancerNodePorts: boolPtr(true), // CRD default makes this non-nil in practice
+			LoadBalancerClass:             &lbClass,
+			LoadBalancerSourceRanges:      []string{"10.0.0.0/8"},
+			ExternalTrafficPolicy:         corev1.ServiceExternalTrafficPolicyLocal,
+			HealthCheckNodePort:           31234,
+		}
+	}
+
+	np := ext()
+	np.Type = corev1.ServiceTypeNodePort
+	svc := New(newCluster(clusterName, withExternal(np)), newScheme(t), Passwords{}).ExternalService()
+	if svc.Spec.AllocateLoadBalancerNodePorts != nil {
+		t.Errorf("NodePort: allocateLoadBalancerNodePorts = %v, want nil (apiserver forbids it)",
+			svc.Spec.AllocateLoadBalancerNodePorts)
+	}
+	if svc.Spec.LoadBalancerClass != nil {
+		t.Errorf("NodePort: loadBalancerClass = %v, want nil (apiserver forbids it)", svc.Spec.LoadBalancerClass)
+	}
+	if svc.Spec.LoadBalancerSourceRanges != nil {
+		t.Errorf("NodePort: loadBalancerSourceRanges = %v, want nil", svc.Spec.LoadBalancerSourceRanges)
+	}
+	if svc.Spec.HealthCheckNodePort != 0 {
+		t.Errorf("NodePort: healthCheckNodePort = %d, want 0", svc.Spec.HealthCheckNodePort)
+	}
+	// ExternalTrafficPolicy is valid on NodePort and must survive.
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
+		t.Errorf("NodePort: externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
+	}
+
+	// Same spec with type left empty (→ LoadBalancer default) keeps everything.
+	lb := ext()
+	svcLB := New(newCluster(clusterName, withExternal(lb)), newScheme(t), Passwords{}).ExternalService()
+	if svcLB.Spec.AllocateLoadBalancerNodePorts == nil || !*svcLB.Spec.AllocateLoadBalancerNodePorts {
+		t.Errorf("LoadBalancer: allocateLoadBalancerNodePorts = %v, want true", svcLB.Spec.AllocateLoadBalancerNodePorts)
+	}
+	if svcLB.Spec.LoadBalancerClass == nil || *svcLB.Spec.LoadBalancerClass != lbClass {
+		t.Errorf("LoadBalancer: loadBalancerClass = %v, want %q", svcLB.Spec.LoadBalancerClass, lbClass)
+	}
+	if !reflect.DeepEqual(svcLB.Spec.LoadBalancerSourceRanges, []string{"10.0.0.0/8"}) {
+		t.Errorf("LoadBalancer: loadBalancerSourceRanges = %v", svcLB.Spec.LoadBalancerSourceRanges)
+	}
+	if svcLB.Spec.HealthCheckNodePort != 31234 {
+		t.Errorf("LoadBalancer: healthCheckNodePort = %d, want 31234", svcLB.Spec.HealthCheckNodePort)
+	}
+}
+
 // Behavior 8: the external Service selects the same pods as the main Service.
 func TestBuilder_ExternalService_SelectorMatchesMainService(t *testing.T) {
 	b := New(newCluster(clusterName, withExternal(&proxysqlv1alpha1.ExternalServiceSpec{Enabled: true})), newScheme(t), Passwords{})
