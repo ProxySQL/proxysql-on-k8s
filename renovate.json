@@ -22,9 +22,17 @@
   "osvVulnerabilityAlerts": true,
   "packageRules": [
     {
-      "description": "GitHub Actions pins in .github/workflows/*.yaml - one PR per week for all of them.",
+      "description": "GitHub Actions pins in .github/workflows/*.yaml - one PR per week for all of them, automerged once CI is green (pre-existing behavior).",
       "matchManagers": ["github-actions"],
-      "groupName": "github-actions"
+      "groupName": "github-actions",
+      "automerge": true
+    },
+    {
+      "description": "Catch-all group for Go indirect deps. Deliberately placed BEFORE the golang.org/x/*, grpc+otel+genproto, and k8s.io/sigs.k8s.io rules: Renovate evaluates packageRules in array order with last-match-wins for scalar fields like groupName, and all of those modules are indirect in operator/go.mod - so the specific groups below must come later to override this one.",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "matchDepTypes": ["indirect"],
+      "groupName": "go indirect deps"
     },
     {
       "description": "golang.org/x/* std-adjacent packages (x/net, x/sys, x/crypto, x/text, ...) release together upstream - batch them into one PR instead of one-per-package.",
@@ -57,13 +65,6 @@
       "enabled": false
     },
     {
-      "description": "Group Go indirect deps not covered by a more specific rule above into a single PR.",
-      "matchManagers": ["gomod"],
-      "matchUpdateTypes": ["minor", "patch"],
-      "matchDepTypes": ["indirect"],
-      "groupName": "go indirect deps"
-    },
-    {
       "description": "kind's node image, tracked via the custom regex manager below (Makefile's KIND_VERSION default and each workflow's KIND_NODE_IMAGE env var).",
       "matchManagers": ["custom.regex"],
       "matchDepNames": ["kindest/node"],
@@ -73,7 +74,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "kind node image version pinned in the top-level Makefile (KIND_VERSION) and in .github/workflows/*.yaml (KIND_NODE_IMAGE).",
+      "description": "kind node image version pinned in the top-level Makefile (KIND_VERSION) and in .github/workflows/*.yaml (KIND_NODE_IMAGE). Intentionally bumps ALL pinned occurrences together: Makefile, ci.yaml, and examples-nightly.yaml converge on the same version in a single PR that runs full CI, instead of drifting apart.",
       "managerFilePatterns": ["/^Makefile$/", "/^\\.github/workflows/.*\\.ya?ml$/"],
       "matchStrings": [
         "KIND_VERSION\\s*\\?=\\s*(?<currentValue>v\\d+\\.\\d+\\.\\d+)",
