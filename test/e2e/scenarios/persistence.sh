@@ -14,18 +14,6 @@
 #     existing proxysql.db — the exact gap #50 fixes (without --reload the
 #     db won and the new key silently never took effect).
 
-# _persistence_wait_pod_ready NS POD TIMEOUT_LOOPS — wait for a pod to be
-# Ready, tolerating the not-found window right after a pod delete while the
-# StatefulSet recreates it.
-_persistence_wait_pod_ready() {
-  local ns="$1" pod="$2" loops="${3:-30}"
-  for _ in $(seq 1 "$loops"); do
-    kubectl -n "$ns" wait --for=condition=Ready "pod/$pod" --timeout=10s >/dev/null 2>&1 && return 0
-    sleep 2
-  done
-  fail "pod $ns/$pod did not become Ready"
-}
-
 scenario_persistence() {
   local ns=e2e-persistence
   kubectl create ns "$ns" >/dev/null
@@ -42,7 +30,7 @@ spec:
       mysql-max_connections: "600"
 YAML
   # First boot waits on PVC provisioning too — allow longer than usual.
-  _persistence_wait_pod_ready "$ns" pxc-0 60 || { dump_ns "$ns"; return 1; }
+  wait_pod_ready "$ns" pxc-0 60 || { dump_ns "$ns"; return 1; }
 
   local radmin out
   radmin="$(radmin_pw "$ns" pxc)"
@@ -56,7 +44,7 @@ YAML
   # (b) pod restart onto the existing PVC: proxysql.db and cnf agree, the
   # value must survive.
   kubectl -n "$ns" delete pod pxc-0 --wait=true >/dev/null
-  _persistence_wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
+  wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
   out="$(admin_query "$ns" pxc "$radmin" \
     "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_connections'")"
   [[ "$out" == "600" ]] || { fail "after pod restart mysql-max_connections='$out', want 600"; dump_ns "$ns"; return 1; }
@@ -90,7 +78,7 @@ YAML
   # DISK put 601 in proxysql.db, and the updated cnf merges the same 601
   # over it via --reload. db and cnf agree — crash consistency.
   kubectl -n "$ns" delete pod pxc-0 --wait=true >/dev/null
-  _persistence_wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
+  wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
   out="$(admin_query "$ns" pxc "$radmin" \
     "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_connections'")"
   [[ "$out" == "601" ]] || { fail "after restart runtime mysql-max_connections='$out', want 601"; dump_ns "$ns"; return 1; }
@@ -109,7 +97,7 @@ YAML
   done
   [[ "$annot_now" != "$annot0" ]] || { fail "added key did not roll the pod (cnf-checksum still $annot0)"; dump_ns "$ns"; return 1; }
   log "persistence: added key rolled the pod (cnf-checksum changed)"
-  _persistence_wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
+  wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
   out="$(admin_query "$ns" pxc "$radmin" \
     "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_allowed_packet'")"
   [[ "$out" == "33554432" ]] || { fail "added key runtime mysql-max_allowed_packet='$out', want 33554432 (cnf did not merge over proxysql.db)"; dump_ns "$ns"; return 1; }
@@ -133,7 +121,7 @@ YAML
     sleep 2
   done
   [[ "$annot_now" != "$annot0" ]] || { fail "removed key did not roll the pod"; dump_ns "$ns"; return 1; }
-  _persistence_wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
+  wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
   out="$(admin_query "$ns" pxc "$radmin" \
     "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_allowed_packet'")"
   [[ "$out" == "33554432" ]] || { fail "removed key expected to KEEP db value 33554432 (documented caveat), got '$out'"; dump_ns "$ns"; return 1; }

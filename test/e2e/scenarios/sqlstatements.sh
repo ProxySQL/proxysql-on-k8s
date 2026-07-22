@@ -26,7 +26,7 @@ spec:
     - "UPDATE global_variables SET variable_value='777' WHERE variable_name='mysql-max_connections'"
     - "LOAD MYSQL VARIABLES TO RUNTIME"
 YAML
-  kubectl -n "$ns" wait --for=condition=Ready pod/pxc-0 --timeout=120s >/dev/null
+  wait_pod_ready "$ns" pxc-0 || { fail "pxc-0 not Ready"; dump_ns "$ns"; return 1; }
   wait_config_synced "$ns" pxcfg 1 120 || { dump_ns "$ns"; return 1; }
 
   local radmin out hash0
