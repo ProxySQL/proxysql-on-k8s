@@ -42,6 +42,7 @@ re-deriving Service names and default ports.
 | Reason `AdminSecretMissing` / `AdminSecretIncomplete` | Auth Secret absent, partial operator schema, or cnf-invalid characters in a password | Condition message names the missing keys / offending key. See [Security](./security.md#the-two-auth-schemas-and-their-validation). |
 | Reason `UserSecretError` | A `passwordSecretRef` Secret or key doesn't exist | Message names the user and secret; create/fix the Secret — the watch re-syncs automatically. |
 | Reason `PartialSync`, `Degraded=SyncErrors` | Some replicas unreachable or rejecting the radmin login | Read the Degraded message (per-address errors). Auth errors after rotating the auth Secret on a persistent cluster → see the [proxysql.db precedence](./clusters.md#persistence-trade-offs). |
+| `Degraded=True`, reason `RuntimeApplyError` | A `spec.variables` runtime push to a replica's admin port failed — admin port unreachable, or bad radmin credential | The Degraded message names the failing replica; check its admin connectivity/credentials. The operator retries on requeue; StatefulSet updates are **not** blocked meanwhile — other pending template/replica changes still apply. |
 | `ClusterFound=False` | `clusterRef` names a missing cluster (or wrong namespace — must be the same one) | `kubectl get pxc -n <ns>`. |
 | `status.shunnedBackends > 0`; queries fail with no backend | ProxySQL shunned backends: connect failures, or **monitor auth failures** (no `monitor` user on the backend) | `SELECT * FROM runtime_mysql_servers` shows `SHUNNED`; the `monitor.mysql_server_connect_log` table on the admin port shows why. Fix per [the monitor user](./backends.md#the-monitor-user). |
 | Pod stuck `Pending`/rejected, event `SysctlForbidden` | `tcpKeepalive` set on a pre-1.29 cluster (or sysctls not on the node's safe list) | Upgrade K8s, allow the sysctls via kubelet `--allowed-unsafe-sysctls`, or drop `spec.networking.tcpKeepalive`. |
@@ -120,6 +121,12 @@ kubectl get pxc proxysql -o jsonpath='{.status.conditions[?(@.type=="Progressing
 ```
 
 No pod restarts; `kubectl get pods` shows unchanged `AGE`/`RESTARTS`.
+
+**If a push fails.** An unreachable admin port or bad radmin credential on
+one replica surfaces as `Degraded=True`, reason `RuntimeApplyError`,
+naming the failing replica — the operator retries on the next requeue and
+does not wedge: the StatefulSet is still ensured and every other pending
+change still applies.
 
 **Automatic fallback to a restart.** Not every ProxySQL variable is
 runtime-settable — some only take effect on the next start (e.g.
