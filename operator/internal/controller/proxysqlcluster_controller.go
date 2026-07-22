@@ -69,6 +69,12 @@ const (
 	condTypeAvailable   = "Available"
 	condTypeProgressing = "Progressing"
 	condTypeDegraded    = "Degraded"
+	// condTypePaused reports spec.pause's effect on the StatefulSet: always
+	// present (unlike Degraded, which is removed when clean) so pollers can
+	// rely on it being set. True only once the StatefulSet has actually
+	// reached 0 ready replicas; False while unpaused OR while still
+	// stopping (ready > 0) — see updateStatus/updatePausedStatus.
+	condTypePaused = "Paused"
 )
 
 // Reconcile drives the ProxySQLCluster toward its desired state.
@@ -567,7 +573,12 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	cluster.Status.UpdatedReplicas = ss.Status.UpdatedReplicas
 	cluster.Status.AdminSecretName = b.SecretName()
 	cluster.Status.Endpoints = b.Endpoints()
-	cluster.Status.Phase = derivePhase(&ss, notFound, desired)
+	cluster.Status.Phase = derivePhase(&ss, notFound, desired, b.Spec.Pause)
+
+	if b.Spec.Pause {
+		return r.updatePausedStatus(ctx, cluster, &ss)
+	}
+	r.setCondition(cluster, condTypePaused, metav1.ConditionFalse, "NotPaused", "cluster is not paused")
 
 	replicasReady := ss.Status.ReadyReplicas == desired && desired > 0
 	if replicasReady {
@@ -608,13 +619,47 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	return r.Status().Update(ctx, cluster)
 }
 
+// updatePausedStatus is updateStatus's branch for spec.pause=true: it skips
+// the normal Available/Progressing semantics (which would otherwise read as
+// "0/N replicas ready" — technically true but misleading for an
+// intentional, operator-driven scale-down) and instead distinguishes
+// Stopping (ready > 0: the StatefulSet is still draining down to 0) from
+// Paused (ready == 0: fully scaled down) — the Percona pattern referenced
+// in #56. condTypePaused is only ConditionTrue once fully paused; Degraded
+// is cleared since a paused cluster isn't in an error state.
+func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, ss *appsv1.StatefulSet) error {
+	if ss.Status.ReadyReplicas > 0 {
+		msg := fmt.Sprintf("scaling down to 0 replicas (%d still ready)", ss.Status.ReadyReplicas)
+		r.setCondition(cluster, condTypePaused, metav1.ConditionFalse, "Stopping", msg)
+		r.setCondition(cluster, condTypeAvailable, metav1.ConditionFalse, "Stopping", msg)
+		r.setCondition(cluster, condTypeProgressing, metav1.ConditionTrue, "Stopping", msg)
+	} else {
+		const msg = "all replicas scaled to 0; Services/Secrets/PVCs retained"
+		r.setCondition(cluster, condTypePaused, metav1.ConditionTrue, "Paused", msg)
+		r.setCondition(cluster, condTypeAvailable, metav1.ConditionFalse, "Paused", msg)
+		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "Paused", "no rollout in progress; cluster is paused")
+	}
+	meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
+	return r.Status().Update(ctx, cluster)
+}
+
 // derivePhase projects StatefulSet state onto a single coarse phase string.
 // Conditions remain the source of truth; this exists for dashboards and
 // external pollers. Failed is reserved for future terminal states the
 // operator can positively identify. Note the deliberate coarseness: "SS
 // exists, 0 ready" maps to Creating even during a total outage of a
 // previously-running cluster.
-func derivePhase(ss *appsv1.StatefulSet, ssMissing bool, desired int32) string {
+//
+// paused is spec.pause: when true it wins over everything else, projecting
+// to Stopping (still-ready replicas draining down) or Paused (fully scaled
+// to 0) instead of the usual Pending/Creating/Running/Updating ladder.
+func derivePhase(ss *appsv1.StatefulSet, ssMissing bool, desired int32, paused bool) string {
+	if paused {
+		if !ssMissing && ss.Status.ReadyReplicas > 0 {
+			return proxysqlv1alpha1.PhaseStopping
+		}
+		return proxysqlv1alpha1.PhasePaused
+	}
 	switch {
 	case ssMissing || ss.CreationTimestamp.IsZero():
 		return proxysqlv1alpha1.PhasePending

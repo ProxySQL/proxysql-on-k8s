@@ -14,7 +14,7 @@ runtime configuration pushed to these pods see the
 | Short name | `pxc` (`kubectl get pxc`) |
 | Scope | Namespaced |
 | Subresources | `status` |
-| Printer columns | `Replicas`, `Ready`, `Phase`, `Age` |
+| Printer columns | `Replicas`, `Ready`, `Phase`, `Age` (`Paused` at `-o wide` / priority 1) |
 
 The operator reconciles a `ProxySQLCluster` into: a StatefulSet (named after
 the cluster), a headless Service (`<name>-headless`), a client-facing Service
@@ -46,6 +46,7 @@ says which.
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `replicas` | `*int32` | `3` (CRD + operator) | min 1 | Number of ProxySQL control-plane pods. |
+| `pause` | `bool` | `false` | — | Scales the StatefulSet to 0 while retaining Services/Secrets/PVCs; never mutates `replicas`. See [Pausing a cluster](../user-guide/clusters.md#pausing-a-cluster). |
 | `image` | `ImageSpec` | see [Image](#image) | — | ProxySQL container image. |
 | `imagePullSecrets` | `[]LocalObjectReference` | `[]` | — | Pull secrets for the pod. |
 | `auth` | `AuthSpec` | see [Auth](#auth) | — | Secret holding admin/radmin/monitor passwords. |
@@ -529,7 +530,7 @@ just landed.
 | `phase` | `string` | Coarse single-word projection for dashboards; see table below. Conditions remain the source of truth. |
 | `endpoints` | `*ClusterEndpoints` | In-cluster DNS `host:port` per enabled surface, pointing at the regular Service: `mysql`, `pgsql`, `admin`, `web`, `metrics`. Empty field = surface disabled (`admin` is always set). Host form: `<name>.<namespace>.svc`. |
 | `adminSecretName` | `string` | The auth Secret the operator wired in (created or referenced). |
-| `conditions` | `[]metav1.Condition` | `Available`, `Progressing`, `Degraded`, `ServiceMonitorReady` — full reason inventory in the [status reference](status.md). |
+| `conditions` | `[]metav1.Condition` | `Available`, `Progressing`, `Degraded`, `Paused`, `ServiceMonitorReady` — full reason inventory in the [status reference](status.md). |
 
 ### Phase semantics
 
@@ -541,3 +542,5 @@ just landed.
 | `Updating` | Any other state (partial readiness or revision mismatch). |
 | `Degraded` | Auth-Secret resolution failed (missing external Secret, partial schema, invalid credential characters). |
 | `Failed` | Reserved; never currently emitted — the operator reports `Degraded` for error states it can observe. |
+| `Stopping` | `spec.pause: true` and at least one replica is still ready — the StatefulSet is draining down to 0. Wins over every phase above. |
+| `Paused` | `spec.pause: true` and 0 ready replicas — the StatefulSet has fully scaled to 0. Wins over every phase above. See [Pausing a cluster](../user-guide/clusters.md#pausing-a-cluster). |

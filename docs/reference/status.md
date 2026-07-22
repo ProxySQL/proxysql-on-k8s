@@ -22,6 +22,9 @@ time they were written.
 | `Progressing` | `False` | `RuntimeApplied` | A `spec.variables` change was pushed to every ready replica over the admin port and read back successfully — restart-free. Message: `RuntimeApplied: <sorted variable names>`. Takes priority over `Steady` for the reconcile in which it fires; nothing is rolling out, but it's worth surfacing what just changed. See [ProxySQLCluster reference](proxysqlcluster.md#configuration-changes-runtime-vs-restart). |
 | `Degraded` | `True` | `AuthSecretError` | Auth-Secret resolution failed: external Secret missing, partial operator schema, schema mismatch, or invalid credential characters. The reconcile aborts (no resources are touched) and `phase` is set to `Degraded`. |
 | `Degraded` | `True` | `RuntimeApplyError` | The restart-free runtime variable push failed on some replica (dial/SQL/read-back error; the message names the failing replica address). The StatefulSet is still ensured with its previous annotations — pending template/replica changes are NOT blocked and no rollout is triggered — and the push is retried on requeue. Cleared by the next clean reconcile. |
+| `Paused` | `True` | `Paused` | `spec.pause: true` and `readyReplicas == 0` — the StatefulSet has fully scaled to 0. `Available`/`Progressing` are also set to `False/Paused` in this state instead of their usual "waiting for replicas" reasons. |
+| `Paused` | `False` | `Stopping` | `spec.pause: true` but `readyReplicas > 0` — still draining down to 0. `Available` goes `False`/`Stopping`; `Progressing` goes `True`/`Stopping`. |
+| `Paused` | `False` | `NotPaused` | `spec.pause: false` (or unset) — always set in this case so pollers can rely on the condition being present. |
 | `ServiceMonitorReady` | `True` | `Synced` | ServiceMonitor applied. |
 | `ServiceMonitorReady` | `False` | `CRDNotInstalledOrFailed` | ServiceMonitor create/update failed — most commonly the `monitoring.coreos.com/v1` CRD is not installed. **Non-fatal**: the rest of the reconcile is unaffected. |
 | `ServiceMonitorReady` | `False` | `OwnerRefError` | Setting the controller reference on the ServiceMonitor failed (non-fatal). |
@@ -29,11 +32,15 @@ time they were written.
 Removal rules:
 
 - `Degraded` is **removed** on every successful status update (i.e. whenever
-  auth resolution and resource ensure-steps succeed).
+  auth resolution and resource ensure-steps succeed) — including while
+  paused: a paused cluster isn't in an error state.
 - `ServiceMonitorReady` is **removed entirely** when the ServiceMonitor is
   not desired (`metrics.enabled: false` or
   `metrics.serviceMonitor.enabled: false`); any previously created,
   operator-owned ServiceMonitor is deleted best-effort.
+- `Paused` is **never removed** — it is always set to one of
+  `True/Paused`, `False/Stopping`, or `False/NotPaused` so pollers can
+  rely on it being present.
 
 ### Phase derivation
 
@@ -43,6 +50,8 @@ and external pollers; conditions are the source of truth.
 | Phase | Rule (evaluated in order) |
 |---|---|
 | `Degraded` | Auth-Secret resolution failed (set before the StatefulSet is even examined). |
+| `Stopping` | `spec.pause: true` and `readyReplicas > 0`. Wins over everything below. |
+| `Paused` | `spec.pause: true` and `readyReplicas == 0` (including when the StatefulSet doesn't exist yet). Wins over everything below. |
 | `Pending` | StatefulSet missing / not yet created. |
 | `Creating` | StatefulSet exists, `readyReplicas == 0`. Deliberately coarse: a previously running cluster in total outage also reads `Creating`. |
 | `Running` | `readyReplicas == replicas` and update revision == current revision (or no update revision). |
@@ -68,6 +77,7 @@ backoff.
 | `Ready` | `False` | `AdminSecretIncomplete` | The admin Secret matches no accepted credential schema (see [auth schemas](proxysqlcluster.md#accepted-secret-schemas-and-precedence)). | 5s |
 | `Ready` | `False` | `UserSecretError` | A `passwordSecretRef` Secret or key is missing (message names the user). | 5s |
 | `Ready` | `False` | `NoReadyReplicas` | No ready ProxySQL pods to push to. | 5s |
+| `Ready` | `False` | `ClusterPaused` | The target `ProxySQLCluster` has `spec.pause: true` (0 ready pods by design — the StatefulSet is intentionally scaled to 0). Takes precedence over `NoReadyReplicas` so it reads as intentional, not an outage. | 5s |
 | `Ready` | `False` | `PartialSync` | Some replicas failed the push. Message: `synced n/N replicas (k re-push targets, m succeeded)`. `Degraded=True/SyncErrors` is set alongside. | 5s |
 | `Progressing` | `False` | `Steady` | Set on every fully successful sync. (The reconciler never sets `Progressing=True`; absence or `False/Steady` are the only states.) | — |
 | `Degraded` | `True` | `PgsqlDisabled` | The spec declares pgsql servers/users/rules but the referenced cluster has `protocols.pgsql` disabled. The push still happens (the admin tables exist regardless); this is a loud warning. | — |

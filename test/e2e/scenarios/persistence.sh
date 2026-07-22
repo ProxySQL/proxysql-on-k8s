@@ -126,4 +126,30 @@ YAML
     "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_allowed_packet'")"
   [[ "$out" == "33554432" ]] || { fail "removed key expected to KEEP db value 33554432 (documented caveat), got '$out'"; dump_ns "$ns"; return 1; }
   log "persistence: removed key kept its proxysql.db value (documented removal caveat pinned)"
+
+  # --- pause/resume (#56): the StatefulSet scales to 0 but the PVC and its
+  # data survive — this is the persistence scenario, so it's the natural
+  # place to pin that the runtime-applied value (601) comes back untouched
+  # on resume, with no reconfiguration.
+  local phase
+  kubectl -n "$ns" patch proxysqlcluster pxc --type=merge -p='{"spec":{"pause":true}}' >/dev/null
+  for _ in $(seq 1 30); do
+    phase="$(kubectl -n "$ns" get proxysqlcluster pxc -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    [[ "$phase" == "Paused" ]] && break
+    sleep 2
+  done
+  [[ "$phase" == "Paused" ]] || { fail "cluster did not reach phase=Paused (last seen '$phase')"; dump_ns "$ns"; return 1; }
+  # phase=Paused fires on readyReplicas==0, which can precede the pod object's
+  # deletion (Terminating grace) — wait for deletion instead of asserting
+  # instant absence.
+  kubectl -n "$ns" wait --for=delete pod/pxc-0 --timeout=60s >/dev/null 2>&1 || { fail "pod pxc-0 not deleted after pause"; dump_ns "$ns"; return 1; }
+  kubectl -n "$ns" get pvc data-pxc-0 >/dev/null 2>&1 || { fail "PVC data-pxc-0 was deleted by pause (must be retained)"; dump_ns "$ns"; return 1; }
+  log "persistence: pause scaled to 0 (phase=Paused), PVC data-pxc-0 retained"
+
+  kubectl -n "$ns" patch proxysqlcluster pxc --type=merge -p='{"spec":{"pause":false}}' >/dev/null
+  wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
+  out="$(admin_query "$ns" pxc "$radmin" \
+    "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_connections'")"
+  [[ "$out" == "601" ]] || { fail "after resume mysql-max_connections='$out', want 601 (PVC data must survive pause/resume)"; dump_ns "$ns"; return 1; }
+  log "persistence: resume restored spec.replicas and the PVC-backed value survived (601)"
 }

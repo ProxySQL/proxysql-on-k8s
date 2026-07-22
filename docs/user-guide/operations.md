@@ -21,11 +21,15 @@ revision), `Updating` (anything in between), `Degraded` (observed error
 state). The coarseness has a sharp edge: a previously-healthy cluster
 that loses *all* replicas reports `Creating`, not an error — only the
 `Available=False` condition (and your monitoring) tells you it is an
-outage. `Failed` is reserved and currently never set.
+outage. `Failed` is reserved and currently never set. Two more phases
+apply only while `spec.pause: true` and win over everything above:
+`Stopping` (still draining down to 0 ready) and `Paused` (fully scaled
+to 0) — see [Pausing a cluster](clusters.md#pausing-a-cluster).
 
 Cluster conditions: `Available` (full ready-replica count),
 `Progressing` (rollout in flight), `Degraded` (specific error, e.g.
-`AuthSecretError`), plus `ServiceMonitorReady` when a ServiceMonitor was
+`AuthSecretError`), `Paused` (mirrors `spec.pause`; `True` only once
+fully scaled to 0), plus `ServiceMonitorReady` when a ServiceMonitor was
 requested. Config conditions: `Ready`, `Progressing`, `Degraded`,
 `ClusterFound`.
 

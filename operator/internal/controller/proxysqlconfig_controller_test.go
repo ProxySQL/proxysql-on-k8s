@@ -626,6 +626,72 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 		})
 	})
 
+	// #56: a paused ProxySQLCluster has 0 ready pods by design (its
+	// StatefulSet is intentionally scaled to 0), so the config reconciler
+	// must surface that as ClusterPaused rather than the generic
+	// NoReadyReplicas — the latter reads as an unexpected outage.
+	Context("paused target cluster", func() {
+		const ns = "default"
+
+		It("sets Ready=False reason ClusterPaused instead of NoReadyReplicas", func() {
+			ctx := context.Background()
+			const name = "paused-cfg"
+			const clusterName = "paused-cluster"
+
+			cluster := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+				Spec:       proxysqlv1alpha1.ProxySQLClusterSpec{Pause: true},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			adminSec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: b.SecretName(), Namespace: ns},
+				Data: map[string][]byte{
+					b.SecretKeys().AdminPassword:   []byte("admin-pass"),
+					b.SecretKeys().RadminPassword:  []byte("radmin-pass"),
+					b.SecretKeys().MonitorPassword: []byte("monitor-pass"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, adminSec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, adminSec) })
+
+			cfg := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: clusterName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
+			DeferCleanup(func() {
+				var cur proxysqlv1alpha1.ProxySQLConfig
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err != nil {
+					return
+				}
+				cur.Finalizers = nil
+				_ = k8sClient.Update(ctx, &cur)
+				_ = k8sClient.Delete(ctx, &cur)
+			})
+
+			r := &ProxySQLConfigReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var cur proxysqlv1alpha1.ProxySQLConfig
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &cur)).To(Succeed())
+			ready := meta.FindStatusCondition(cur.Status.Conditions, cfgCondReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal("ClusterPaused"))
+		})
+	})
+
 	Context("secret watch mapping", func() {
 		const ns = "default"
 

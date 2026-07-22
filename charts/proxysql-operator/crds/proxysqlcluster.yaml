@@ -26,6 +26,10 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .spec.pause
+      name: Paused
+      priority: 1
+      type: boolean
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -1495,6 +1499,18 @@ spec:
                   type: string
                 description: NodeSelector for pod scheduling.
                 type: object
+              pause:
+                description: |-
+                  Pause stops the ProxySQL control-plane pods without deleting the
+                  cluster: the StatefulSet is scaled to 0 while the Services, Secrets,
+                  and PVCs are retained. Useful to cut compute cost during a
+                  maintenance window or while backends are unavailable, without losing
+                  the on-disk admin database or having to recreate the cluster. Set
+                  back to false (or omit) to resume — the operator restores the
+                  StatefulSet to spec.replicas, which is never modified by pausing.
+                  Default false (per convention for default-off booleans; see
+                  PersistenceSpec.Enabled for the default-true counterpart).
+                type: boolean
               persistence:
                 description: Persistence configures the per-pod PVC mounted at /var/lib/proxysql.
                 properties:
@@ -2595,9 +2611,11 @@ spec:
                 description: |-
                   Phase is a coarse, single-word projection of the conditions for
                   dashboards and external pollers. Conditions remain the source of truth.
-                  One of: Pending, Creating, Running, Updating, Degraded, Failed.
-                  (Failed is reserved; the operator currently reports Degraded for error
-                  states it can observe.)
+                  One of: Pending, Creating, Running, Updating, Degraded, Failed,
+                  Stopping, Paused. (Failed is reserved; the operator currently reports
+                  Degraded for error states it can observe.) Stopping and Paused only
+                  apply when spec.pause is true: Stopping while replicas are still
+                  scaling down to 0, Paused once none are ready.
                 type: string
               readyReplicas:
                 description: ReadyReplicas is the ready replica count of the underlying
