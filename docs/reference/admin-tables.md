@@ -205,8 +205,10 @@ the target cluster runs more than one replica, the operator auto-populates
 the rows from the cluster's stable per-pod DNS names (admin port, weight 0,
 comment `operator-populated from ProxySQLCluster pods`) before the table is
 re-asserted; at `replicas ≤ 1` the table is left empty. Deletion cleanup
-still clears it ([#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42))
-— see the [proxysqlServers field notes](proxysqlconfig.md#proxysqlservers).
+preserves the auto-populated peers the same way (an explicit
+`proxysqlServers` list is cleared instead,
+[#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42)) — see the
+[proxysqlServers field notes](proxysqlconfig.md#proxysqlservers).
 
 ### global_variables
 

@@ -424,16 +424,28 @@ func autoPopulatedProxySQLServers(b *builders.Builder) []proxysqlclient.ProxySQL
 
 // cleanupDesired returns the Desired pushed when a ProxySQLConfig is deleted.
 // Every managed table is cleared (DELETE via LOAD/SAVE) except
-// proxysql_servers, which keeps the operator's auto-populated peer list
-// (same derivation as buildDesired's auto-populate branch) when the
-// still-existing target cluster runs more than one replica.
+// proxysql_servers when autoPopulated is true (the deleted config had an
+// empty spec.proxysqlServers, i.e. the operator owned the peer list): then
+// the operator's auto-populated peers are re-pushed (same derivation as
+// buildDesired's auto-populate branch) so a still-existing multi-replica
+// cluster keeps syncing.
 //
 // Without this, deleting a ProxySQLConfig pushed a fully empty Desired,
 // which DELETEd proxysql_servers even though the referenced cluster (and its
 // need to peer via ProxySQL Cluster) still exists — the peer list only came
 // back after a pod restart re-read the cnf, or via a peer's cluster-sync
 // (#42).
-func cleanupDesired(b *builders.Builder) *proxysqlclient.Desired {
+//
+// autoPopulated must be false when the config carried an explicit
+// spec.proxysqlServers list: documented semantics are that an explicit list
+// fully replaces auto-population (it exists for topologies the operator
+// cannot derive, e.g. peers outside this cluster), so substituting derived
+// in-cluster DNS names on deletion would overwrite a custom topology with
+// fabricated peers. There, cleanup clears the table like every other one.
+func cleanupDesired(b *builders.Builder, autoPopulated bool) *proxysqlclient.Desired {
+	if !autoPopulated {
+		return &proxysqlclient.Desired{}
+	}
 	return &proxysqlclient.Desired{ProxySQLServers: autoPopulatedProxySQLServers(b)}
 }
 
@@ -564,13 +576,16 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
 
-	// cleanupDesired DELETEs every managed table and LOAD/SAVEs each section,
-	// except it preserves proxysql_servers' auto-populated peer list when the
-	// cluster still has more than one replica (#42) — the cluster still
-	// exists and still needs its peers to sync. Variables are left as-is:
-	// ProxySQL has no "unset", and resetting values blind would be worse than
-	// leaving them.
-	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword, cleanupDesired(b))
+	// cleanupDesired DELETEs every managed table and LOAD/SAVEs each section.
+	// When the config's peer list was operator-populated (empty
+	// spec.proxysqlServers — same condition as buildDesired's auto-populate
+	// branch), the auto-derived peers are re-pushed instead of cleared (#42):
+	// the cluster still exists and still needs its peers to sync. An explicit
+	// spec.proxysqlServers list is cleared like every other table. Variables
+	// are left as-is: ProxySQL has no "unset", and resetting values blind
+	// would be worse than leaving them.
+	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword,
+		cleanupDesired(b, len(cfg.Spec.ProxySQLServers) == 0))
 	if cleaned != len(addrs) {
 		log.Info("cleanup incomplete; retrying", "cleaned", cleaned, "total", len(addrs), "errors", joinErrs(errs))
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil

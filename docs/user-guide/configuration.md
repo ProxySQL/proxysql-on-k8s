@@ -245,8 +245,10 @@ operator first clears every managed table (servers, users, query rules —
 runtime *and* disk) on each ready replica, then releases the CR. The
 pods keep running; they just stop carrying that config. **Variables are
 deliberately not reset** on deletion, for the no-unset reason above.
-(Cleanup currently also clears the `proxysql_servers` peer table —
-tracked as [#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42).)
+(Cleanup preserves the `proxysql_servers` peer table when it was
+auto-populated by the operator and the cluster still runs more than one
+replica; an explicit `proxysqlServers` list is cleared —
+[#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42).)
 
 The wedge policy is "never block deletion when cleanup is impossible"
 (authoritative table in the

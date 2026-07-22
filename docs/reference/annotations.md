@@ -105,13 +105,16 @@ selector labels in the pod template (selector labels win for selection).
 ## Finalizer: `proxysql.com/config-cleanup`
 
 Added to every `ProxySQLConfig` on first reconcile. On deletion the operator
-pushes an **empty desired state** to every ready replica — which DELETEs
-every managed admin table and LOAD/SAVEs each section — then releases the
+pushes a cleanup desired state to every ready replica — DELETEing every
+managed admin table and LOAD/SAVEing each section — then releases the
 finalizer. Variables are deliberately left as-is: ProxySQL has no "unset",
-and blind resets would be worse than leaving the last-asserted values. Note
-that the cleanup push currently also clears `proxysql_servers` (the deletion
-path does not auto-populate peers —
-[#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42)).
+and blind resets would be worse than leaving the last-asserted values.
+`proxysql_servers` is the one table with an exception: when the config's
+peer list was operator-populated (empty `spec.proxysqlServers`), cleanup
+re-pushes the auto-derived peers instead of clearing them while the target
+cluster still runs more than one replica
+([#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42)); an explicit
+peer list is cleared like every other table.
 
 ### Wedge policy
 

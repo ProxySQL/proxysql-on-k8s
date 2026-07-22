@@ -78,9 +78,11 @@ belt-and-braces backup between operator syncs.
 > never wipes the cnf-seeded peers, and native cluster sync stays active
 > alongside the operator's direct writes. An explicit `proxysqlServers`
 > list is passed through unchanged; at `replicas: 1` the peer table stays
-> empty (there are no peers). One remaining caveat: *deleting* a
-> `ProxySQLConfig` clears the peer table as part of its cleanup until
-> [#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42) is resolved.
+> empty (there are no peers). *Deleting* a `ProxySQLConfig` also preserves
+> the auto-populated peers: its cleanup clears every managed table but
+> re-pushes the derived peer list while the cluster still runs more than
+> one replica
+> ([#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42)).
 > Details in the
 > [proxysqlServers reference](../reference/proxysqlconfig.md#proxysqlservers).
 

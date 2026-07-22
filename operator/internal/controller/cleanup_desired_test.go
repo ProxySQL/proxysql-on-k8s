@@ -46,7 +46,7 @@ func newCleanupTestBuilder(replicas *int32) *builders.Builder {
 func TestCleanupDesired_PreservesAutoPopulatedPeers_MultiReplica(t *testing.T) {
 	b := newCleanupTestBuilder(int32Ptr(3))
 
-	d := cleanupDesired(b)
+	d := cleanupDesired(b, true)
 
 	wantHosts := b.ProxySQLServerDNS()
 	if len(wantHosts) != 3 {
@@ -74,19 +74,39 @@ func TestCleanupDesired_PreservesAutoPopulatedPeers_MultiReplica(t *testing.T) {
 func TestCleanupDesired_SingleReplica_EmptyPeerList(t *testing.T) {
 	b := newCleanupTestBuilder(int32Ptr(1))
 
-	d := cleanupDesired(b)
+	d := cleanupDesired(b, true)
 
 	if len(d.ProxySQLServers) != 0 {
 		t.Errorf("ProxySQLServers = %v, want empty for a single-replica cluster", d.ProxySQLServers)
 	}
 }
 
+// When the deleted config carried an EXPLICIT spec.proxysqlServers list
+// (autoPopulated=false), cleanup must NOT substitute the auto-derived
+// in-cluster peer rows: the documented semantics of an explicit list are
+// that it fully replaces auto-population — it exists precisely for
+// topologies the operator cannot derive (e.g. peers outside this cluster).
+// Fabricating per-pod DNS names on deletion would overwrite a custom
+// topology with wrong peers; the correct cleanup is the pre-#42 behavior
+// of clearing the table.
+func TestCleanupDesired_ExplicitPeerList_ClearsTable(t *testing.T) {
+	b := newCleanupTestBuilder(int32Ptr(3))
+
+	d := cleanupDesired(b, false)
+
+	if len(d.ProxySQLServers) != 0 {
+		t.Errorf("ProxySQLServers = %v, want empty: an explicit spec.proxysqlServers list must be cleared on deletion, not replaced with derived in-cluster peers", d.ProxySQLServers)
+	}
+}
+
 // Every other managed table must still be cleared on cleanup — only
-// proxysql_servers gets the preserved-peers treatment.
+// proxysql_servers gets the preserved-peers treatment. Enumerates every
+// Desired field except ProxySQLServers (covered above) and the variables
+// maps (deliberately left untouched on cleanup: ProxySQL has no "unset").
 func TestCleanupDesired_ClearsEverythingElse(t *testing.T) {
 	b := newCleanupTestBuilder(int32Ptr(3))
 
-	d := cleanupDesired(b)
+	d := cleanupDesired(b, true)
 
 	if len(d.MySQLServers) != 0 {
 		t.Errorf("MySQLServers = %v, want empty", d.MySQLServers)
@@ -97,8 +117,20 @@ func TestCleanupDesired_ClearsEverythingElse(t *testing.T) {
 	if len(d.MySQLQueryRules) != 0 {
 		t.Errorf("MySQLQueryRules = %v, want empty", d.MySQLQueryRules)
 	}
+	if len(d.MySQLReplicationHostgroups) != 0 {
+		t.Errorf("MySQLReplicationHostgroups = %v, want empty", d.MySQLReplicationHostgroups)
+	}
+	if len(d.MySQLHostgroupAttributes) != 0 {
+		t.Errorf("MySQLHostgroupAttributes = %v, want empty", d.MySQLHostgroupAttributes)
+	}
 	if len(d.PostgreSQLServers) != 0 {
 		t.Errorf("PostgreSQLServers = %v, want empty", d.PostgreSQLServers)
+	}
+	if len(d.PostgreSQLUsers) != 0 {
+		t.Errorf("PostgreSQLUsers = %v, want empty", d.PostgreSQLUsers)
+	}
+	if len(d.PostgreSQLQueryRules) != 0 {
+		t.Errorf("PostgreSQLQueryRules = %v, want empty", d.PostgreSQLQueryRules)
 	}
 	if len(d.SQLStatements) != 0 {
 		t.Errorf("SQLStatements = %v, want empty", d.SQLStatements)
@@ -123,7 +155,7 @@ func TestAutoPopulatedProxySQLServers_MatchesBuildDesired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildDesired: %v", err)
 	}
-	cleanup := cleanupDesired(b)
+	cleanup := cleanupDesired(b, true)
 
 	if !reflect.DeepEqual(built.ProxySQLServers, cleanup.ProxySQLServers) {
 		t.Errorf("buildDesired ProxySQLServers = %v, cleanupDesired ProxySQLServers = %v, want equal",

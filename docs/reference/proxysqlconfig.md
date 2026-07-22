@@ -236,10 +236,16 @@ An explicitly non-empty list is passed through unchanged and fully replaces
 the auto-populated peers — use it only for topologies the operator cannot
 derive (e.g. peers outside this cluster).
 
-Known limitation: *deleting* a `ProxySQLConfig` pushes an empty desired
-state as cleanup, which currently clears the runtime peer table too —
-tracked as [#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42).
-The operator's direct write-to-all distribution is unaffected either way.
+On *deletion*, the cleanup finalizer clears every managed table, with one
+exception: when `proxysqlServers` was empty (operator-owned peer list), the
+auto-populated peers are re-pushed instead of cleared — the referenced
+cluster still exists and, with `replicas > 1`, still needs its peer table
+for ProxySQL Cluster sync
+([#42](https://github.com/ProxySQL/proxysql-on-k8s/issues/42)). An
+explicitly set `proxysqlServers` list is cleared like every other table
+(the operator cannot know whether those external peers should outlive the
+config). The operator's direct write-to-all distribution is unaffected
+either way.
 
 ### Variables maps
 
