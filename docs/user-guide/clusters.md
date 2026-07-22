@@ -85,11 +85,17 @@ into the cnf grammar and could never work otherwise. If the referenced
 Secret is missing or invalid the cluster goes `Degraded` with reason
 `AuthSecretError`. Details in [Security](./security.md).
 
-**Rotation behavior.** Changing the auth Secret re-renders the
-`<cluster>-cnf` Secret, and the cnf checksum rolls the pods. On a
-cluster with **persistence disabled** that is the whole story: pods come
-back with the new credentials. With **persistence enabled**, read the
-next section carefully.
+**Rotation behavior.** Rotating `admin`/`radmin` re-renders the
+`<cluster>-cnf` Secret (the `admin_credentials` cnf line changes) and the
+cnf checksum rolls the pods. Rotating `monitor` is different: its
+password is an ordinary variable value, not part of `admin_credentials`,
+so the operator applies it at runtime (`UPDATE` + `LOAD ... TO RUNTIME` +
+`SAVE ... TO DISK`) with **no restart** — see [configuration changes:
+runtime vs
+restart](../reference/proxysqlcluster.md#configuration-changes-runtime-vs-restart).
+On a cluster with **persistence disabled**, an admin/radmin rotation is
+the whole story: pods come back with the new credentials. With
+**persistence enabled**, read the next section carefully.
 
 ## Persistence trade-offs
 
@@ -113,10 +119,12 @@ directory. After that, **`proxysql.db` wins over the cnf** on every
 restart. Consequences:
 
 - Settings carried by the bootstrap cnf — admin credentials, listener
-  interfaces, monitor credentials, query-log (eventslog) variables —
-  do not change on a persistent cluster just because the cnf changed
-  and the pods rolled. ProxySQL reloads its previous state from disk.
-- Rotating the auth Secret on a persistent cluster can therefore leave
+  interfaces, query-log (eventslog) variables — do not change on a
+  persistent cluster just because the cnf changed and the pods rolled.
+  ProxySQL reloads its previous state from disk. Monitor credentials are
+  the exception: rotation is pushed at runtime (`SAVE ... TO DISK`), so
+  it **does** land on persistent clusters, restart or not.
+- Rotating `admin`/`radmin` on a persistent cluster can therefore leave
   pods running the *old* admin password while the operator tries the
   new one, surfacing as sync failures (`PartialSync`). Prefer changing
   such values through the admin interface / `ProxySQLConfig` variables
@@ -269,12 +277,18 @@ When `replicas > 1`, two things switch on:
 
 The pod template carries a `proxysql.com/cnf-checksum` annotation — a
 hash over the rendered bootstrap cnf (and the Fluent Bit config when
-logging is enabled). Any change that alters the cnf rolls the pods:
-auth Secret contents, protocol/port changes, metrics or web toggles,
-replica count (peer list), logging settings. Image and resource changes
-roll the pods the normal StatefulSet way. Pod management is `Parallel`,
-so initial creation doesn't serialize, while updates follow the
-StatefulSet rolling-update semantics.
+logging is enabled). **Structural** cnf changes roll the pods: auth
+Secret contents (admin/radmin credentials), protocol/port/interface
+changes, metrics or web toggles, replica count (peer list), logging
+settings. A change confined to `spec.variables` *values* is the
+exception: the operator applies it to running replicas over the admin
+port without a restart, falling back to a roll only when a variable
+doesn't take at runtime or a key is added/removed — see
+[runtime vs. restart
+semantics](../reference/proxysqlcluster.md#configuration-changes-runtime-vs-restart).
+Image and resource changes roll the pods the normal StatefulSet way.
+Pod management is `Parallel`, so initial creation doesn't serialize,
+while updates follow the StatefulSet rolling-update semantics.
 
 Watch a rollout:
 

@@ -112,12 +112,65 @@ func (c *Client) Query(ctx context.Context, query string) ([][]string, error) {
 	return out, rows.Err()
 }
 
-// snippet returns a short prefix of q for use in error messages — full
-// queries can be hundreds of lines after batched inserts.
+// snippet returns a short, redacted prefix of q for use in error messages —
+// full queries can be hundreds of lines after batched inserts, and single-
+// quoted literals frequently carry secrets (passwords pushed via
+// UPDATE global_variables / INSERT INTO mysql_users, etc). Errors built from
+// this are logged by controller-runtime and can surface in status
+// conditions, so literals must never reach them verbatim.
 func snippet(q string) string {
 	const max = 80
-	if len(q) <= max {
-		return q
+	redacted := redactQuotedLiterals(q)
+	if len(redacted) <= max {
+		return redacted
 	}
-	return q[:max] + "..."
+	return redacted[:max] + "..."
+}
+
+// redactQuotedLiterals replaces the contents of every quoted SQL string
+// literal in q with "***", preserving the surrounding statement shape
+// (verb, table, column names) for debuggability. Both quote styles the
+// MySQL dialect accepts for string literals are masked: single-quoted and —
+// without ANSI_QUOTES, which ProxySQL's admin doesn't set — double-quoted.
+// It understands SQL's doubled-quote escape (two of the delimiting quote
+// inside a literal mean one literal quote character, not the end of the
+// literal) so it won't terminate a literal early and leak the remainder of
+// a secret; the OTHER quote character is ordinary content inside a literal
+// and never opens or closes one.
+func redactQuotedLiterals(q string) string {
+	var out []rune
+	runes := []rune(q)
+	var quote rune // the delimiter of the literal we're inside; 0 = outside
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if quote == 0 {
+			out = append(out, r)
+			if r == '\'' || r == '"' {
+				quote = r
+				out = append(out, '*', '*', '*')
+			}
+			continue
+		}
+
+		// Inside a literal: everything is masked already ("***" was emitted
+		// when we entered). Look for the terminating quote, being careful
+		// that a doubled delimiter is an escaped quote, not the end of the
+		// literal.
+		if r == quote {
+			if i+1 < len(runes) && runes[i+1] == quote {
+				// Escaped quote inside the literal: consume both runes,
+				// stay inside the literal, emit nothing more (already
+				// masked).
+				i++
+				continue
+			}
+			// End of literal.
+			out = append(out, quote)
+			quote = 0
+		}
+		// else: masked literal content, drop the original rune.
+	}
+
+	return string(out)
 }

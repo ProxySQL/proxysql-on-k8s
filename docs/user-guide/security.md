@@ -31,6 +31,11 @@ Three operator-level credentials per cluster, one Secret:
 When the operator mints the Secret, passwords are random 32-character
 hex strings (~128 bits of entropy), preserved across reconciles.
 
+Rotation semantics — which credential rotations restart pods and which
+apply at runtime — are covered in
+[Operations](./operations.md#what-restarts-pods-what-doesnt) and
+[Managing clusters](./clusters.md#auth-secrets).
+
 ### Why the bootstrap cnf is a Secret, not a ConfigMap
 
 ProxySQL must know its admin and monitor credentials at boot, so the

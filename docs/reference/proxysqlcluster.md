@@ -64,6 +64,7 @@ says which.
 | `service` | `ServiceSpec` | see [Service](#service) | — | Customizes the client-facing Service only. |
 | `networking` | `NetworkingSpec` | see [Networking](#networking-tcpkeepalive) | — | TCP keepalive sysctls. |
 | `logging` | `*LoggingSpec` | `nil` (sidecar off) | CEL rules, see [Logging](#logging) | Optional Fluent Bit query-log sidecar. |
+| `variables` | `VariablesSpec` | see [Variables](#variables) | CEL + operator validation | Extra ProxySQL global variables baked into the bootstrap cnf. |
 
 ### Image
 
@@ -318,6 +319,165 @@ UPDATE global_variables SET variable_value='false'
   WHERE variable_name='mysql-eventslog_default_log';
 LOAD MYSQL VARIABLES TO RUNTIME; SAVE MYSQL VARIABLES TO DISK;
 ```
+
+### Variables
+
+`spec.variables` adds extra ProxySQL global variables to the bootstrap cnf,
+on top of the operator's own bootstrap-structural settings (credentials,
+listening interfaces). It has three maps, one per ProxySQL variable domain:
+
+| Field | Type | Validation | Description |
+|---|---|---|---|
+| `variables.admin` | `map[string]string` | CEL: every key must start with `admin-` | Rendered into the cnf's `admin_variables` block. |
+| `variables.mysql` | `map[string]string` | CEL: every key must start with `mysql-` | Rendered into `mysql_variables`. Not rendered at all when `protocols.mysql` is disabled. |
+| `variables.pgsql` | `map[string]string` | CEL: every key must start with `pgsql-` | Rendered into `pgsql_variables`. Not rendered at all when `protocols.pgsql` is disabled. |
+
+Keys are ProxySQL's **full** variable names, prefix included (e.g.
+`mysql-max_connections`, not `max_connections`) — the same convention as
+`ProxySQLConfig`'s [variables maps](proxysqlconfig.md#variables-maps). Two
+layers of validation apply:
+
+- **CEL (admission)**: each map's keys must carry that map's domain prefix
+  (`admin-`, `mysql-`, `pgsql-` respectively) — enforced by the
+  `XValidation` rules above; a mismatched key is rejected at `kubectl apply`
+  time.
+- **Operator (reconcile)**: after stripping the domain prefix, the
+  remaining variable name must match `^[a-z0-9_]+$` (lowercase snake_case);
+  values may not contain double quotes (`"`), backslashes (`\`), control
+  characters, or DEL — these could break out of the double-quoted
+  `name="value"` line the operator renders. Anything else, including
+  non-ASCII, is allowed. A violation fails the reconcile (rejected, not
+  escaped) and retries with backoff; nothing is written until it's fixed.
+
+**Reserved keys** — always rejected, because the operator owns these
+values: it renders them from other spec fields (`spec.auth`,
+`spec.protocols`, `spec.metrics`), and for the port/toggle keys the values
+are additionally coupled to the StatefulSet (container ports, probe
+wiring) — a cnf-only override would desync the pod spec:
+
+| Key | Owned by |
+|---|---|
+| `admin-admin_credentials` | `spec.auth` (admin/radmin/extra credentials) |
+| `admin-mysql_ifaces` | `spec.protocols.admin.port` |
+| `mysql-interfaces` | `spec.protocols.mysql.port` |
+| `pgsql-interfaces` | `spec.protocols.pgsql.port` |
+| `mysql-monitor_username`, `mysql-monitor_password` | `spec.auth` (monitor credentials) |
+| `pgsql-monitor_username`, `pgsql-monitor_password` | `spec.auth` (monitor credentials) |
+| `admin-cluster_username`, `admin-cluster_password` | `spec.auth` (radmin; ProxySQL Cluster sync login) |
+| `admin-restapi_enabled`, `admin-restapi_port` | `spec.metrics` (STS container-port coupling) |
+| `admin-web_enabled`, `admin-web_port` | `spec.protocols.web` (STS container-port coupling) |
+
+The error is `spec.variables: "<key>" is reserved (bootstrap-structural)`.
+
+Keys the operator renders *by default* but does **not** reserve —
+`mysql-threads`, `pgsql-threads`, `admin-cluster_check_*` and the other
+cluster-sync tuning values, the `eventslog_*` family — are overridable: the
+operator overlay-merges `spec.variables` over its own per-section defaults,
+so each key renders exactly once and your value replaces the default
+(libconfig rejects duplicate settings, so double-rendering would crashloop
+the pod — the overlay guarantees it can't happen). Reserving the
+monitor-credential keys only blocks *user overrides*: rotating the monitor
+password through `spec.auth` still takes the restart-free runtime-apply
+path — see [below](#configuration-changes-runtime-vs-restart).
+
+## Configuration changes: runtime vs restart
+
+Every change to `spec` that affects the bootstrap cnf goes through the same
+two-step pipeline: (1) the `<cluster>-cnf` Secret is updated first, always;
+(2) the operator then decides whether that change can be pushed to already-
+running pods over the admin port, restart-free, or whether it requires a
+StatefulSet rolling restart. Step 1 happens unconditionally, so even when
+step 2 can't apply something at runtime, a pod with a *fresh* datadir (a
+new pod on a new/ephemeral volume) boots from the correct, already-updated
+cnf. **Persistence caveat:** the container starts without `--initial` or
+`--reload`, so on a persistence-enabled cluster (the default) a pod that
+merely *restarts* onto its existing PVC loads `proxysql.db`, which wins
+over the cnf — restart-fallback semantics then rely on the
+`SAVE ... TO DISK` the runtime pass performed on pushed replicas, and
+added/removed bootstrap variables may not take effect on PVC-backed pods
+until set at runtime. See
+[operations](../user-guide/operations.md#what-restarts-pods-what-doesnt)
+for the full caveat.
+
+**What can be applied at runtime (no restart):** a change confined to
+`spec.variables` values — an existing key's value changes, no keys are
+added or removed. The operator diffs the old and new rendered cnf; if the
+only difference is variable values within `admin`/`mysql`/`pgsql`
+variable-domain lines, it connects to every **Ready** replica over the
+admin port and, per changed domain:
+
+```sql
+UPDATE global_variables SET variable_value=<v> WHERE variable_name=<k>;
+LOAD {ADMIN|MYSQL|PGSQL} VARIABLES TO RUNTIME;
+SAVE {ADMIN|MYSQL|PGSQL} VARIABLES TO DISK;
+```
+
+It then reads `runtime_global_variables` back on that replica and compares
+against the intended value. This read-back is the oracle for whether the
+variable actually took effect at runtime — there is no hardcoded list of
+"dynamic" vs "static" ProxySQL variables. If every changed variable reads
+back as expected on every replica, **no pod restarts**: the pod template's
+`proxysql.com/cnf-checksum` annotation is left unchanged, and the
+StatefulSet-object-level `proxysql.com/vars-applied-hash` annotation is
+updated to record the applied set (see [annotations
+reference](annotations.md)).
+
+**What always requires a rolling restart:**
+
+- **Any variable ProxySQL doesn't honor at runtime.** If the read-back
+  after `LOAD ... TO RUNTIME` doesn't match the intended value on any
+  replica (e.g. `mysql-threads`, which ProxySQL only reads at startup), the
+  operator falls back to a restart automatically — the `cnf-checksum`
+  annotation changes and the mismatched variable names are named in the
+  `Progressing` message.
+- **Adding or removing a variable key.** Removing a key is a restart *by
+  design*, not a limitation: ProxySQL has no "unset" for a global variable,
+  so a runtime apply could only leave the old value in place while the
+  Secret says otherwise — silently wrong. With persistence disabled, the
+  restart re-bootstraps from the cnf's variable set as a whole, dropping
+  the previously-set value; with persistence enabled (the default) the old
+  value can survive in `proxysql.db` (see the persistence caveat above) —
+  verify on the admin port, or set the intended state at runtime via
+  `ProxySQLConfig`.
+- **Structural changes** — anything outside `spec.variables` values:
+  listening ports/interfaces, admin/radmin credential rotation (the
+  `admin_credentials` line), `replicas`/the `proxysql_servers` peer list,
+  toggling `logging.queryLog` (which adds/removes the `eventslog_*` lines
+  in `proxysql.cnf`), protocol enable/disable, and so on. These always
+  roll every pod. Note the runtime-vs-restart classification diffs
+  `proxysql.cnf` only.
+- **Zero ready replicas at push time.** Nothing is pushed anywhere (there's
+  nothing to dial); the cnf Secret is already updated, so a pod with a
+  fresh datadir bootstraps from it once it comes up — a PVC-backed pod
+  restarting onto an existing `proxysql.db` may keep old values (see the
+  persistence caveat above). No restart is *triggered* by this path
+  specifically, but nothing runtime-applies either until pods exist.
+
+**The monitor-credential exception.** Credential rotation normally always
+restarts, because `admin`/`radmin` live in the bootstrap-structural
+`admin-admin_credentials` line. The `monitor` user's credentials are
+different: `mysql-monitor_password` and `pgsql-monitor_password` are
+ordinary variable lines rendered from `spec.auth` (reserved only against
+`spec.variables` *overrides*, not bootstrap-structural for classification),
+so rotating the monitor password is just a variable-value change like any
+other — it goes through the runtime-apply path above and is restart-free.
+
+**Progressing condition messages.** The reconciler surfaces the outcome in
+the `Progressing` condition (see the [status reference](status.md)):
+
+| Outcome | Condition | Message |
+|---|---|---|
+| Runtime apply succeeded | `Progressing=False`, reason `RuntimeApplied` | `RuntimeApplied: <sorted variable names>` |
+| Runtime apply failed read-back / restart needed for a variable change | `Progressing=True`, reason `Rolling` | `RestartRequired: <sorted variable names> (runtime read-back mismatch)` |
+| Structural `proxysql.cnf` change | `Progressing=True`, reason `Rolling` | `RestartRequired: structural cnf change` |
+| Change confined to non-`proxysql.cnf` Secret keys (e.g. `fluent-bit.conf`) | `Progressing=True`, reason `Rolling` | `RestartRequired: structural cnf change (<keys>)` |
+| Interrupted reconcile left a structural restart pending (`structural-applied-hash` mismatch) | `Progressing=True`, reason `Rolling` | `RestartRequired: structural change pending from interrupted reconcile` |
+| Runtime push failed on a replica | `Degraded=True`, reason `RuntimeApplyError` | the push error, naming the replica address (retried on requeue; StatefulSet updates are not blocked) |
+| Normal rollout, no variables-specific reason | `Progressing=True`, reason `Rolling` | `waiting for replicas` |
+
+A `RuntimeApplied` outcome is reported even though `Progressing=False` —
+nothing is rolling out, but it's worth surfacing that a restart-free change
+just landed.
 
 ## Status
 

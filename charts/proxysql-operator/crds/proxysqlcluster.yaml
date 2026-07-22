@@ -1981,6 +1981,40 @@ spec:
                       type: string
                   type: object
                 type: array
+              variables:
+                description: |-
+                  Variables sets extra ProxySQL global variables baked into the
+                  bootstrap cnf, in addition to the operator's own bootstrap-structural
+                  settings (credentials, listening interfaces, etc).
+                properties:
+                  admin:
+                    additionalProperties:
+                      type: string
+                    description: Admin sets admin_variables. Keys must be prefixed
+                      "admin-".
+                    type: object
+                    x-kubernetes-validations:
+                    - message: all keys must start with 'admin-'
+                      rule: self.all(k, k.startsWith('admin-'))
+                  mysql:
+                    additionalProperties:
+                      type: string
+                    description: MySQL sets mysql_variables. Keys must be prefixed
+                      "mysql-".
+                    type: object
+                    x-kubernetes-validations:
+                    - message: all keys must start with 'mysql-'
+                      rule: self.all(k, k.startsWith('mysql-'))
+                  pgsql:
+                    additionalProperties:
+                      type: string
+                    description: PostgreSQL sets pgsql_variables. Keys must be prefixed
+                      "pgsql-".
+                    type: object
+                    x-kubernetes-validations:
+                    - message: all keys must start with 'pgsql-'
+                      rule: self.all(k, k.startsWith('pgsql-'))
+                type: object
             type: object
           status:
             description: status defines the observed state of ProxySQLCluster

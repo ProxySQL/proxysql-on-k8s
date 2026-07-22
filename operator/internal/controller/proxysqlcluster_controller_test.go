@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -475,7 +476,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			var sec corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
-			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring("web_enabled=true"))
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring(`web_enabled="true"`))
 
 			var after appsv1.StatefulSet
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
@@ -483,6 +484,267 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(checksumAfter).NotTo(Equal(checksumBefore), "cnf change must roll the checksum annotation")
 			Expect(checksumAfter).To(Equal(builders.CnfChecksum(sec.Data)),
 				"annotation must be the deterministic SHA-256 over every cnf Secret key")
+		})
+	})
+
+	When("a spec.variables change is variables-only (restart-free runtime apply)", func() {
+		const name = "pxc-runtime-vars"
+
+		It("updates the cnf Secret but leaves the pod-template checksum annotation unchanged", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Variables.MySQL = map[string]string{"mysql-max_connections": "700"}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var sec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring(`max_connections="700"`))
+
+			var before appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &before)).To(Succeed())
+			checksumBefore := before.Spec.Template.Annotations[annotationCnfChecksum]
+			Expect(checksumBefore).NotTo(BeEmpty())
+
+			// envtest never brings up a real kubelet, so no pod ever goes
+			// Ready — discoverPodAddresses returns no addresses and
+			// resolveRestartChecksum takes the "nothing running yet" branch,
+			// keeping the previous annotation. Production behaves the same
+			// way when no replica is reachable; when replicas ARE reachable
+			// it dials radmin and applies the diff via SQL instead (covered
+			// by the pure classifyCnfChange unit tests + proxysqlclient's
+			// own ApplyVariables/ReadGlobalVariables tests).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Variables.MySQL = map[string]string{"mysql-max_connections": "701"}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring(`max_connections="701"`),
+				"the cnf Secret must still reflect the new value")
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			Expect(after.Spec.Template.Annotations[annotationCnfChecksum]).To(Equal(checksumBefore),
+				"a variables-only cnf change must not roll the pod-template checksum annotation")
+		})
+	})
+
+	When("a spec change is structural (adds the proxysql_servers block)", func() {
+		const name = "pxc-runtime-structural"
+
+		It("rolls the pod-template checksum annotation to the new CnfChecksum", func() {
+			ctx := context.Background()
+			one := int32(1)
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Replicas = &one
+			})
+			reconcileAndExpectSuccess(name)
+
+			var before appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &before)).To(Succeed())
+			checksumBefore := before.Spec.Template.Annotations[annotationCnfChecksum]
+			Expect(checksumBefore).NotTo(BeEmpty())
+
+			// Scaling past 1 replica adds the proxysql_servers block to the
+			// rendered cnf — structural, not a variable-value change.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			three := int32(3)
+			cluster.Spec.Replicas = &three
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			var sec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &sec)).To(Succeed())
+			Expect(string(sec.Data["proxysql.cnf"])).To(ContainSubstring("proxysql_servers="))
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			checksumAfter := after.Spec.Template.Annotations[annotationCnfChecksum]
+			Expect(checksumAfter).NotTo(Equal(checksumBefore),
+				"a structural cnf change must roll the pod-template checksum annotation")
+			Expect(checksumAfter).To(Equal(builders.CnfChecksum(sec.Data)),
+				"the rolled annotation must be the new deterministic CnfChecksum")
+		})
+	})
+
+	When("a fluent-bit-only Secret key changes (logging sink host)", func() {
+		const name = "pxc-flb-only-change"
+
+		It("rolls the pod-template checksum annotation even though proxysql.cnf is unchanged", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Logging = &proxysqlv1alpha1.LoggingSpec{
+					Enabled: true, QueryLog: true, SinkType: "http",
+					HTTP: &proxysqlv1alpha1.HTTPSinkSpec{Host: "collector-a.example.com"},
+				}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var secBefore corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &secBefore)).To(Succeed())
+			Expect(string(secBefore.Data["fluent-bit.conf"])).To(ContainSubstring("collector-a.example.com"))
+			cnfBefore := string(secBefore.Data["proxysql.cnf"])
+
+			var before appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &before)).To(Succeed())
+			checksumBefore := before.Spec.Template.Annotations[annotationCnfChecksum]
+			Expect(checksumBefore).NotTo(BeEmpty())
+
+			// Changing only the HTTP sink host rewrites fluent-bit.conf but
+			// leaves proxysql.cnf byte-identical (the cnf depends on queryLog,
+			// not the sink). Regression pin: a diff limited to a
+			// non-proxysql.cnf key must still take the restart path, or the
+			// sidecar keeps running with stale config forever.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Logging.HTTP.Host = "collector-b.example.com"
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			var secAfter corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &secAfter)).To(Succeed())
+			Expect(string(secAfter.Data["fluent-bit.conf"])).To(ContainSubstring("collector-b.example.com"))
+			Expect(string(secAfter.Data["proxysql.cnf"])).To(Equal(cnfBefore),
+				"test premise: the sink-host change must not touch proxysql.cnf")
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			checksumAfter := after.Spec.Template.Annotations[annotationCnfChecksum]
+			Expect(checksumAfter).NotTo(Equal(checksumBefore),
+				"a fluent-bit.conf-only change must roll the checksum annotation (stale sidecar config otherwise)")
+			Expect(checksumAfter).To(Equal(builders.CnfChecksum(secAfter.Data)))
+		})
+	})
+
+	When("a StatefulSet carries a legacy-scheme checksum annotation and the cnf is unchanged", func() {
+		const name = "pxc-legacy-annotation"
+
+		It("keeps the legacy annotation verbatim instead of adopting the new-scheme hash", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			// Simulate an annotation written under a pre-runtime-reconfig
+			// scheme (e.g. a bare hash of proxysql.cnf alone, not
+			// builders.CnfChecksum's hash over every Secret key).
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			ss.Spec.Template.Annotations[annotationCnfChecksum] = "legacy-scheme-checksum-value"
+			Expect(k8sClient.Update(ctx, &ss)).To(Succeed())
+
+			// No spec change at all: the rendered cnf is byte-identical.
+			reconcileAndExpectSuccess(name)
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			Expect(after.Spec.Template.Annotations[annotationCnfChecksum]).To(Equal("legacy-scheme-checksum-value"),
+				"an unchanged cnf must never force adoption of the new checksum scheme")
+		})
+	})
+
+	// The full runtime-push failure path (a ready replica whose admin port
+	// can't be dialed) can't be exercised end-to-end in envtest: no kubelet
+	// ever marks a pod Ready, so discoverPodAddresses always returns zero
+	// addresses and the dial never happens. handleRuntimeApplyError is
+	// therefore covered directly (the reconciler wires it 1:1 to the
+	// resolveRestartChecksum error), plus a normal-flow spec asserting the
+	// Degraded condition is absent when nothing fails.
+	When("the runtime variable push fails (RuntimeApplyError path)", func() {
+		const name = "pxc-runtime-push-fail"
+
+		It("still ensures the StatefulSet with the previous annotations and surfaces a Degraded condition", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			var before appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &before)).To(Succeed())
+			prev := before.Spec.Template.Annotations[annotationCnfChecksum]
+			appliedVars := before.Annotations[annotationVarsAppliedHash]
+			structuralApplied := before.Annotations[annotationStructuralAppliedHash]
+			Expect(prev).NotTo(BeEmpty())
+
+			// A pending replica change rides along in the same reconcile that
+			// hits the push failure: it must NOT be blocked.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			five := int32(5)
+			cluster.Spec.Replicas = &five
+
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			pushErr := errors.New("apply variables on 10.1.2.3:6032: dial tcp: i/o timeout")
+			err := reconciler.handleRuntimeApplyError(ctx, cluster, b, prev, appliedVars, structuralApplied, pushErr)
+			Expect(err).To(MatchError(pushErr), "the push error must be returned for requeue")
+
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			Expect(after.Spec.Template.Annotations[annotationCnfChecksum]).To(Equal(prev),
+				"the failed push must not move the pod-template checksum (no rollout)")
+			Expect(after.Annotations[annotationVarsAppliedHash]).To(Equal(appliedVars),
+				"the vars marker must not advance, so the retry re-pushes")
+			Expect(after.Annotations[annotationStructuralAppliedHash]).To(Equal(structuralApplied))
+			Expect(*after.Spec.Replicas).To(Equal(five),
+				"a pending replica change must survive the failed push (no wedged StatefulSet)")
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil(), "a Degraded condition must surface the push failure")
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("RuntimeApplyError"))
+			Expect(cond.Message).To(ContainSubstring("10.1.2.3:6032"), "the message must name the failing replica")
+		})
+
+		It("leaves no Degraded condition in the normal flow", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Variables.MySQL = map[string]string{"mysql-max_connections": "700"}
+			})
+			reconcileAndExpectSuccess(name)
+
+			// A variables-only change through the full reconcile (no ready
+			// replicas in envtest, so nothing is dialed and nothing fails).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Variables.MySQL = map[string]string{"mysql-max_connections": "701"}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil(),
+				"no Degraded condition may linger after a clean reconcile")
+		})
+	})
+
+	When("updateStatus gets a RestartRequired summary while all replicas are ready", func() {
+		const name = "pxc-restart-required-msg"
+
+		It("surfaces the RestartRequired message on the Progressing condition instead of Steady", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			// Fake a fully-ready StatefulSet via the status subresource: at
+			// the moment a restart-required change is detected, the OLD pods
+			// are typically all still Ready — the Steady branch must not
+			// swallow the RestartRequired explanation.
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			desired := *ss.Spec.Replicas
+			ss.Status.Replicas = desired
+			ss.Status.ReadyReplicas = desired
+			ss.Status.UpdatedReplicas = desired
+			Expect(k8sClient.Status().Update(ctx, &ss)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			summary := "RestartRequired: structural cnf change (fluent-bit.conf)"
+			Expect(reconciler.updateStatus(ctx, cluster, b, summary)).To(Succeed())
+
+			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypeProgressing)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("Rolling"))
+			Expect(cond.Message).To(Equal(summary))
 		})
 	})
 
