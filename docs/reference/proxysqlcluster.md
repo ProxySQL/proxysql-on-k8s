@@ -65,6 +65,7 @@ says which.
 | `networking` | `NetworkingSpec` | see [Networking](#networking-tcpkeepalive) | — | TCP keepalive sysctls. |
 | `logging` | `*LoggingSpec` | `nil` (sidecar off) | CEL rules, see [Logging](#logging) | Optional Fluent Bit query-log sidecar. |
 | `variables` | `VariablesSpec` | see [Variables](#variables) | CEL + operator validation | Extra ProxySQL global variables baked into the bootstrap cnf. |
+| `probes` | `ProbesSpec` | see [Probes](#probes) | — | Overrides the `proxysql` container's startup/readiness/liveness probes. |
 
 ### Image
 
@@ -380,6 +381,38 @@ the pod — the overlay guarantees it can't happen). Reserving the
 monitor-credential keys only blocks *user overrides*: rotating the monitor
 password through `spec.auth` still takes the restart-free runtime-apply
 path — see [below](#configuration-changes-runtime-vs-restart).
+
+### Probes
+
+`spec.probes` overrides the `proxysql` container's `startupProbe`,
+`readinessProbe`, and `livenessProbe`. Each field is a full
+`corev1.Probe` — set one to **replace** the operator's default probe
+entirely (handler, timings, thresholds, everything); there is no
+per-field merging with the default (e.g. setting only
+`probes.readiness.periodSeconds` still requires the rest of the probe,
+including the handler, since the whole object replaces the default).
+Leave a field unset to keep the operator's built-in default for it.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `probes.startup` | `*corev1.Probe` | none (no startup probe) | ProxySQL boots fast with no external dependency to wait on, so the operator configures no default startup probe. |
+| `probes.readiness` | `*corev1.Probe` | TCP check on the `admin` port, `initialDelaySeconds: 5`, `periodSeconds: 5`, `failureThreshold: 3` | Only verifies ProxySQL's admin interface is accepting connections. |
+| `probes.liveness` | `*corev1.Probe` | TCP check on the `admin` port, `initialDelaySeconds: 15`, `periodSeconds: 10`, `failureThreshold: 3` | Same check, longer initial delay/period so transient admin-port hiccups don't trigger a restart. |
+
+**Avoid backend-coupled readiness:** a custom `probes.readiness` that
+depends on a MySQL/PostgreSQL backend being reachable *through* the proxy
+(for example, an `exec` or `httpGet` probe that runs a query against a
+backend) ties every replica's readiness to that backend's health. Because
+every pod in the StatefulSet runs the same probe, a single backend outage
+can flip every ProxySQL replica to `NotReady` simultaneously, pulling the
+entire Service out of rotation — including for client traffic destined to
+backends that are perfectly healthy. Prefer probing ProxySQL itself (the
+default behavior) and let ProxySQL's own backend health checks and query
+routing absorb backend failures instead of the kubelet.
+
+Changing `spec.probes` changes the pod template, so it triggers a normal
+StatefulSet rolling update — independent of the cnf runtime-vs-restart
+pipeline described below.
 
 ## Configuration changes: runtime vs restart
 

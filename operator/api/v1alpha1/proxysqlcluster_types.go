@@ -116,6 +116,51 @@ type ProxySQLClusterSpec struct {
 	// settings (credentials, listening interfaces, etc).
 	// +optional
 	Variables VariablesSpec `json:"variables,omitempty"`
+
+	// Probes overrides the proxysql container's startup/readiness/liveness
+	// probes. Each field is a full corev1.Probe: when unset, the operator's
+	// built-in default for that probe applies unchanged; when set, it
+	// REPLACES the default probe entirely — there is no per-field merging
+	// (e.g. setting readiness.periodSeconds alone still requires the rest of
+	// the probe, such as the handler, to be specified). See ProbesSpec for
+	// per-probe defaults and the readiness/backend-coupling warning.
+	// +optional
+	Probes ProbesSpec `json:"probes,omitempty"`
+}
+
+// ProbesSpec overrides the proxysql container's probes. Every field is a
+// full corev1.Probe; a set field replaces the operator's default probe
+// wholesale (handler, timings, thresholds — everything), not just the
+// timing knobs. Leave a field unset to keep the operator's built-in default.
+type ProbesSpec struct {
+	// Startup overrides the container's startupProbe. No startup probe is
+	// configured by default (nil), matching ProxySQL's fast, dependency-free
+	// boot.
+	// +optional
+	Startup *corev1.Probe `json:"startup,omitempty"`
+
+	// Readiness overrides the container's readinessProbe. Defaults to a TCP
+	// check on the admin port (initialDelaySeconds=5, periodSeconds=5,
+	// failureThreshold=3) — it only verifies ProxySQL's admin interface is
+	// accepting connections, not that any backend is reachable.
+	//
+	// **Avoid backend-coupled readiness:** a custom readiness probe that
+	// depends on a MySQL/PostgreSQL backend being reachable *through* the
+	// proxy (e.g. an exec/HTTP probe that runs a query) ties every replica's
+	// readiness to that backend's health. Because all replicas share the
+	// same probe, a single backend outage can flip every ProxySQL pod to
+	// NotReady at once, pulling the whole Service out of rotation — including
+	// for traffic to backends that are perfectly healthy. Prefer probing
+	// ProxySQL itself (the default) and let ProxySQL's own backend health
+	// checks and query routing handle backend failures.
+	// +optional
+	Readiness *corev1.Probe `json:"readiness,omitempty"`
+
+	// Liveness overrides the container's livenessProbe. Defaults to a TCP
+	// check on the admin port (initialDelaySeconds=15, periodSeconds=10,
+	// failureThreshold=3).
+	// +optional
+	Liveness *corev1.Probe `json:"liveness,omitempty"`
 }
 
 // VariablesSpec sets extra ProxySQL global variables in the bootstrap cnf.

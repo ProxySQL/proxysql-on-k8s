@@ -170,25 +170,51 @@ func (b *Builder) container() corev1.Container {
 			"-D", "/var/lib/proxysql",
 			"--reload",
 		},
-		Ports: ports,
-		LivenessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
-			},
-			InitialDelaySeconds: 15,
-			PeriodSeconds:       10,
-			FailureThreshold:    3,
+		Ports:          ports,
+		StartupProbe:   b.startupProbe(),
+		LivenessProbe:  b.livenessProbe(),
+		ReadinessProbe: b.readinessProbe(),
+		Resources:      b.Spec.Resources,
+		VolumeMounts:   b.proxysqlVolumeMounts(),
+	}
+}
+
+// startupProbe, livenessProbe, and readinessProbe resolve spec.probes
+// against the operator's built-in defaults. A set override REPLACES the
+// default probe wholesale (see ProbesSpec doc); an unset field keeps the
+// hardcoded default exactly as it was before spec.probes existed — this is
+// what keeps TestGolden (issue #58) stable for specs that don't set probes.
+func (b *Builder) startupProbe() *corev1.Probe {
+	// No default startup probe: ProxySQL boots fast and has no dependency
+	// wait, so this stays nil unless the user opts in.
+	return b.Spec.Probes.Startup
+}
+
+func (b *Builder) livenessProbe() *corev1.Probe {
+	if b.Spec.Probes.Liveness != nil {
+		return b.Spec.Probes.Liveness
+	}
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
 		},
-		ReadinessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
-			},
-			InitialDelaySeconds: 5,
-			PeriodSeconds:       5,
-			FailureThreshold:    3,
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       10,
+		FailureThreshold:    3,
+	}
+}
+
+func (b *Builder) readinessProbe() *corev1.Probe {
+	if b.Spec.Probes.Readiness != nil {
+		return b.Spec.Probes.Readiness
+	}
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
 		},
-		Resources:    b.Spec.Resources,
-		VolumeMounts: b.proxysqlVolumeMounts(),
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       5,
+		FailureThreshold:    3,
 	}
 }
 
