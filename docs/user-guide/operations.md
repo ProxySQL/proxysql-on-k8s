@@ -215,6 +215,170 @@ variable.
   trusting the `Progressing` message alone — it reflects only the
   replicas that were Ready at push time.
 
+## Rotating the monitor credential
+
+The [monitor-credential exception](#what-restarts-pods-what-doesnt) above
+means a `spec.auth` monitor-password rotation is restart-free: the operator
+re-renders the `<cluster>-cnf` Secret, then pushes `mysql-monitor_password`
+(and `pgsql-monitor_password`, when `protocols.pgsql` is on) to every
+**Ready** replica over the admin port with no pod restart. This section is
+the full backend-to-ProxySQL rotation runbook, MySQL and PostgreSQL, using
+each engine's own credential-rotation primitive.
+
+**One password drives both protocols.** The auth Secret has a single
+`monitor-password` key (default; overridable via `spec.auth.keys.monitorPassword`),
+and the operator renders that one value into *both* `mysql-monitor_password`
+and `pgsql-monitor_password` when both protocols are enabled on the same
+cluster (`operator/internal/controller/builders/proxysql_cnf.go`) — there's
+no separate key per protocol. If a single `ProxySQLCluster` fronts both
+MySQL and PostgreSQL backends, plan the two backends' monitor-user rotations
+around the same Secret update; you can't dual-password-rotate one protocol's
+backends while leaving the other on the old password.
+
+### MySQL: dual-password rotation
+
+MySQL 8.0.14+ lets the `monitor` account hold two valid passwords at once,
+so ProxySQL keeps authenticating with the old one for as long as it takes
+the new one to reach every replica — no window where the monitor is locked
+out.
+
+1. **On the backend primary**, add the new password without invalidating
+   the current one:
+
+   ```sql
+   ALTER USER 'monitor'@'%' IDENTIFIED BY '<new-password>' RETAIN CURRENT PASSWORD;
+   ```
+
+   Both passwords authenticate from this point on. (Generic MySQL behavior,
+   not operator-specific — if your backends aren't a single replicated
+   topology the primary's `ALTER USER` replicates to, run it against every
+   node independently.)
+
+2. **Update the operator-referenced auth Secret's monitor key** to the same
+   new password:
+
+   ```bash
+   NS=default; CLUSTER=proxysql
+   kubectl -n $NS patch secret $CLUSTER --type=merge \
+     -p="{\"data\":{\"monitor-password\":\"$(printf '%s' '<new-password>' | base64 -w0)\"}}"
+   ```
+
+   The Secret watch fires the next reconcile immediately (see [drift
+   self-healing](#drift-self-healing-what-to-expect)): the `<cluster>-cnf`
+   Secret is re-rendered first, then the new password is pushed to every
+   Ready replica at runtime — no restart, no manual `LOAD`/`SAVE`.
+
+3. **Verify before discarding the old password.** Two independent signals,
+   both worth checking — don't rely on either alone:
+
+   - The `Progressing` condition confirms the runtime push landed:
+
+     ```bash
+     kubectl get pxc $CLUSTER -o jsonpath='{.status.conditions[?(@.type=="Progressing")]}'
+     # reason: RuntimeApplied, message: "RuntimeApplied: mysql-monitor_password"
+     ```
+
+     This only reflects replicas that were **Ready** at push time (the
+     [Not-Ready-replica gap](#what-restarts-pods-what-doesnt) applies here
+     too) — if a replica was down or failing readiness during the push, it
+     didn't get the new password and this message won't tell you that.
+   - On the admin port (see [manual admin-port
+     access](#manual-admin-port-access)), confirm every replica actually has
+     the new value and is connecting successfully:
+
+     ```sql
+     SELECT variable_name, variable_value FROM runtime_global_variables
+       WHERE variable_name='mysql-monitor_password';
+     SELECT hostname, port, time_start_us, connect_success_time_us, connect_error
+       FROM monitor.mysql_server_connect_log ORDER BY time_start_us DESC LIMIT 10;
+     SELECT hostname, port, time_start_us, ping_success_time_us, ping_error
+       FROM monitor.mysql_server_ping_log ORDER BY time_start_us DESC LIMIT 10;
+     ```
+
+     `runtime_global_variables` returns `mysql-monitor_password` in
+     **plaintext, not masked** — this is a known upstream ProxySQL
+     characteristic, not something the operator adds; treat admin-port
+     access accordingly (it's already restricted to the operator and DBA
+     tooling per the [network exposure
+     surface](./security.md#network-exposure-surface)). A `connect_error`/
+     `ping_error` of `NULL` on rows timestamped after the rotation is your
+     per-replica confirmation.
+
+   Repeat the admin-port check against **every** replica — `radmin` on
+   6032 only shows you the one pod you connected to, and the Not-Ready-replica
+   gap means a healthy-looking `Progressing` message can still leave one pod
+   behind.
+
+4. **Once every replica confirms**, discard the old password on the
+   backend:
+
+   ```sql
+   ALTER USER 'monitor'@'%' DISCARD OLD PASSWORD;
+   ```
+
+   Discarding before every replica has the new password locks out whichever
+   replica didn't get it — the entire point of the dual-password window is
+   to not have to race that.
+
+### PostgreSQL: no dual passwords
+
+Vanilla PostgreSQL has no equivalent to MySQL's `RETAIN CURRENT PASSWORD`:
+`ALTER ROLE ... PASSWORD` replaces the password atomically, and `VALID
+UNTIL` sets an expiry timestamp, not a second valid password. There is an
+unavoidable moment where the old password stops working before every
+ProxySQL replica has the new one — the goal is to make that window as short
+as possible, not to eliminate it.
+
+1. **Prepare the new password** ahead of time so both commands below can
+   fire back-to-back with no thinking time in between.
+2. **Run the backend change and the Secret update in quick succession**:
+
+   ```sql
+   -- backend primary
+   ALTER ROLE monitor WITH PASSWORD '<new-password>';
+   ```
+
+   ```bash
+   # immediately after, same terminal session
+   NS=default; CLUSTER=proxysql
+   kubectl -n $NS patch secret $CLUSTER --type=merge \
+     -p="{\"data\":{\"monitor-password\":\"$(printf '%s' '<new-password>' | base64 -w0)\"}}"
+   ```
+
+   The shorter the gap, the fewer failed probes. ProxySQL's monitor module
+   retries connect/ping checks on its own interval
+   (`pgsql-monitor_connect_interval` / `pgsql-monitor_ping_interval`); a
+   handful of failed probes during the gap is expected and, per [the
+   monitor user](./backends.md#the-monitor-user), it takes sustained
+   failures — not one blip — before ProxySQL shuns an otherwise-healthy
+   backend. Still, watch `status.shunnedBackends` on the `ProxySQLConfig`
+   if the gap runs longer than expected.
+3. **Verify** the same way as MySQL, using the PostgreSQL monitor log
+   tables:
+
+   ```sql
+   SELECT variable_name, variable_value FROM runtime_global_variables
+     WHERE variable_name='pgsql-monitor_password';
+   SELECT hostname, port, time_start_us, connect_success_time_us, connect_error
+     FROM monitor.pgsql_server_connect_log ORDER BY time_start_us DESC LIMIT 10;
+   SELECT hostname, port, time_start_us, ping_success_time_us, ping_error
+     FROM monitor.pgsql_server_ping_log ORDER BY time_start_us DESC LIMIT 10;
+   ```
+
+   `connect_error`/`ping_error` clearing up (`NULL`) on rows timestamped
+   after the coordinated update, on every replica, is confirmation the
+   rotation reached them. There's no step 4: with no second password to
+   discard, this is the whole rotation.
+
+A **Not-Ready replica at push time** is worth calling out specifically
+here: without a dual-password grace window, that replica keeps trying the
+*old* password against a backend that no longer accepts it until the next
+reconcile reaches it — a longer, but still self-recovering, version of the
+same gap [documented above](#what-restarts-pods-what-doesnt). It clears up
+the moment that replica becomes Ready and picks up the new password from
+the next resync; nothing to do but be aware it can outlast the "quick
+succession" window if a replica is down for a while.
+
 ## Manual admin-port access
 
 Sometimes you need to look inside ProxySQL. Do it read-only, as

@@ -26,7 +26,7 @@ Three operator-level credentials per cluster, one Secret:
 | --- | --- | --- |
 | `admin` | humans, inside the pod only | ProxySQL hardcodes `admin` to localhost — a remote login is rejected with "User 'admin' can only connect locally". |
 | `radmin` | the operator (config pushes, runtime read-back) and ProxySQL Cluster sync | The remote-capable admin account. Use it for any admin access over the pod network. |
-| `monitor` | ProxySQL's monitor module, *toward your backends* | The same user must exist on the backend databases for health/read_only checks — see [Backends](./backends.md#the-monitor-user). |
+| `monitor` | ProxySQL's monitor module, *toward your backends* | The same user must exist on the backend databases for health/read_only checks — see [Backends](./backends.md#the-monitor-user). One Secret key drives both `mysql-monitor_password` and `pgsql-monitor_password`; end-to-end rotation runbook (MySQL dual passwords, PostgreSQL's no-dual-password window) in [Operations](./operations.md#rotating-the-monitor-credential). |
 
 When the operator mints the Secret, passwords are random 32-character
 hex strings (~128 bits of entropy), preserved across reconciles.

@@ -116,6 +116,10 @@ trade-off analysis in the
 ProxySQL's monitor module logs into every backend to run connect, ping,
 and `read_only` checks. The bootstrap cnf configures it as user
 `monitor` with the `monitor-password` from the cluster's auth Secret.
+A single failed check does not shun a backend: ProxySQL requires
+consecutive failures (`mysql-monitor_ping_max_failures` /
+`pgsql-monitor_ping_max_failures`, default 3) before it marks an
+otherwise-healthy server SHUNNED — brief monitor blips are absorbed.
 Three ways to make it work, in order of preference:
 
 1. **Create the user on the backends** with the operator-minted
