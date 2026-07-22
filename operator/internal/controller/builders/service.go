@@ -20,6 +20,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 )
 
 // Service builds the load-balanced ClusterIP Service exposing MySQL, PostgreSQL,
@@ -35,7 +37,7 @@ func (b *Builder) Service() *corev1.Service {
 			Annotations: b.Spec.Service.Annotations,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     corev1.ServiceTypeClusterIP,
+			Type:     mainServiceType(b.Spec),
 			Selector: b.SelectorLabels(),
 			Ports:    b.servicePorts(false),
 		},
@@ -68,6 +70,17 @@ func (b *Builder) HeadlessService() *corev1.Service {
 			Ports:                    b.servicePorts(true),
 		},
 	}
+}
+
+// mainServiceType returns the desired type for the main Service. The CRD
+// defaults spec.service.type to ClusterIP, but unit tests can construct a
+// spec with the zero value, so default explicitly rather than panic or emit
+// an empty (invalid) Service.Spec.Type.
+func mainServiceType(spec proxysqlv1alpha1.ProxySQLClusterSpec) corev1.ServiceType {
+	if spec.Service.Type == "" {
+		return corev1.ServiceTypeClusterIP
+	}
+	return spec.Service.Type
 }
 
 // servicePorts returns the port list for either the regular or headless
