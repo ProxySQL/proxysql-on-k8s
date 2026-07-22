@@ -92,6 +92,13 @@ The operator is level-based with bounded staleness:
 - **A 30-second safety requeue** runs between resyncs as a cheap
   no-op check.
 
+What is *not* drift at all: ProxySQL's own monitor-driven placement.
+Within a `mysqlReplicationHostgroups` pair the drift check enforces
+membership only — a server the `read_only` monitor moved between the
+pair's writer and reader hostgroups, or a `SHUNNED` backend, never
+triggers a re-push (see
+[Backends](./backends.md#drift-detection-and-replication-hostgroups)).
+
 What is *not* self-healed: variables you set out-of-band that the spec
 doesn't mention (the operator only writes declared variables), tables
 outside the managed set, and anything on a `ProxySQLConfig` that was

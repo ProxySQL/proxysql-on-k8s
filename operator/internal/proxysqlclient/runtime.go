@@ -146,6 +146,19 @@ func (rs *RuntimeState) ShunnedCount() int32 {
 // present, not drifted — shunning is ProxySQL's own health reaction, not a
 // config divergence.
 //
+// Servers are compared as MEMBERSHIP, not placement: for every hostgroup
+// covered by a mysql_replication_hostgroups pair, a desired server counts as
+// present when runtime holds it in ANY hostgroup of that pair's equivalence
+// class. ProxySQL's read_only monitor legitimately moves servers between the
+// writer and reader hostgroups of a pair (demotion, failover promotion,
+// writer_is_also_reader mirroring) — re-pushing the spec's static placement
+// against those moves would demote a just-promoted writer every resync
+// (issue #34). A server absent from every hostgroup of its class, or an
+// unknown server present in one, is real drift. Hostgroups outside every
+// pair keep exact placement: with no pair there is no legitimate mover.
+// pgsql_servers always use exact placement — this operator carries no
+// PostgreSQL replication-hostgroup concept.
+//
 // mysql_replication_hostgroups, mysql_hostgroup_attributes and
 // proxysql_servers are deliberately outside drift detection: the first two are
 // loaded/saved together with mysql_servers (so external wipes of servers — the
@@ -153,31 +166,119 @@ func (rs *RuntimeState) ShunnedCount() int32 {
 // that ProxySQL Cluster sync self-heals. All are still re-asserted whenever
 // any drift triggers a push, since Sync always writes every table.
 func (d *Desired) Drift(rs *RuntimeState) []string {
+	classes := replicationClasses(d.MySQLReplicationHostgroups)
 	diffs := make([]string, 0, 8)
-	diffs = append(diffs, diffServers("mysql_servers", mysqlServerKeys(d.MySQLServers), rs.MySQLServers)...)
+	diffs = append(diffs, diffServers("mysql_servers", mysqlServerKeys(d.MySQLServers, classes), runtimeServerKeys(rs.MySQLServers, classes))...)
 	diffs = append(diffs, diffKeys("mysql_users", userKeys(mysqlUsernames(d.MySQLUsers)), rs.MySQLUsers)...)
 	diffs = append(diffs, diffKeys("mysql_query_rules", ruleKeys(mysqlRuleIDs(d.MySQLQueryRules)), rs.MySQLRules)...)
-	diffs = append(diffs, diffServers("pgsql_servers", pgsqlServerKeys(d.PostgreSQLServers), rs.PgSQLServers)...)
+	diffs = append(diffs, diffServers("pgsql_servers", pgsqlServerKeys(d.PostgreSQLServers), runtimeServerKeys(rs.PgSQLServers, nil))...)
 	diffs = append(diffs, diffKeys("pgsql_users", userKeys(pgsqlUsernames(d.PostgreSQLUsers)), rs.PgSQLUsers)...)
 	diffs = append(diffs, diffKeys("pgsql_query_rules", ruleKeys(pgsqlRuleIDs(d.PostgreSQLQueryRules)), rs.PgSQLRules)...)
 	sort.Strings(diffs)
 	return diffs
 }
 
-// ---- key builders ----
+// ---- replication-hostgroup equivalence ----
 
-func mysqlServerKeys(servers []MySQLServer) map[string]bool {
-	keys := make(map[string]bool, len(servers))
+// replicationClasses maps every hostgroup covered by a
+// mysql_replication_hostgroups pair to a canonical class representative (the
+// smallest hostgroup id in its class). Pairs sharing a hostgroup chain into
+// one class via union-find — ProxySQL treats hostgroups reachable through
+// shared pairs as one replication topology. Returns nil when no pairs are
+// configured, which keeps server comparison exact.
+func replicationClasses(pairs []MySQLReplicationHostgroup) map[int32]int32 {
+	if len(pairs) == 0 {
+		return nil
+	}
+	parent := map[int32]int32{}
+	var find func(x int32) int32
+	find = func(x int32) int32 {
+		p, ok := parent[x]
+		if !ok {
+			parent[x] = x
+			return x
+		}
+		if p == x {
+			return x
+		}
+		root := find(p)
+		parent[x] = root
+		return root
+	}
+	for _, p := range pairs {
+		rw, rr := find(p.WriterHostgroup), find(p.ReaderHostgroup)
+		if rw != rr {
+			if rr < rw {
+				rw, rr = rr, rw
+			}
+			parent[rr] = rw // smaller id becomes the representative
+		}
+	}
+	classes := make(map[int32]int32, len(parent))
+	for hg := range parent {
+		classes[hg] = find(hg)
+	}
+	return classes
+}
+
+// canonServerKey returns the comparison key for a server row: hostgroups in a
+// replication class compare by the class representative ("rhg<rep>:host:port",
+// a prefix no literal hostgroup id can produce), everything else by the exact
+// "hg:host:port" identity.
+func canonServerKey(hg int32, hostPort string, classes map[int32]int32) string {
+	if rep, ok := classes[hg]; ok {
+		return fmt.Sprintf("rhg%d:%s", rep, hostPort)
+	}
+	return fmt.Sprintf("%d:%s", hg, hostPort)
+}
+
+// ---- key builders ----
+//
+// Server key maps are canonical-key → display-key: the canonical key drives
+// the membership comparison, the display key keeps drift messages naming the
+// concrete row (spec placement for "missing", runtime row for "extra"). When
+// several rows collapse onto one canonical key (writer_is_also_reader), the
+// lexicographically smallest display wins for determinism.
+
+func mysqlServerKeys(servers []MySQLServer, classes map[int32]int32) map[string]string {
+	keys := make(map[string]string, len(servers))
 	for _, s := range servers {
-		keys[fmt.Sprintf("%d:%s:%d", s.Hostgroup, s.Hostname, defaultInt32(s.Port, 3306))] = true
+		hostPort := fmt.Sprintf("%s:%d", s.Hostname, defaultInt32(s.Port, 3306))
+		display := fmt.Sprintf("%d:%s", s.Hostgroup, hostPort)
+		canon := canonServerKey(s.Hostgroup, hostPort, classes)
+		if prev, ok := keys[canon]; !ok || display < prev {
+			keys[canon] = display
+		}
 	}
 	return keys
 }
 
-func pgsqlServerKeys(servers []PostgreSQLServer) map[string]bool {
-	keys := make(map[string]bool, len(servers))
+func pgsqlServerKeys(servers []PostgreSQLServer) map[string]string {
+	keys := make(map[string]string, len(servers))
 	for _, s := range servers {
-		keys[fmt.Sprintf("%d:%s:%d", s.Hostgroup, s.Hostname, defaultInt32(s.Port, 5432))] = true
+		k := fmt.Sprintf("%d:%s:%d", s.Hostgroup, s.Hostname, defaultInt32(s.Port, 5432))
+		keys[k] = k
+	}
+	return keys
+}
+
+// runtimeServerKeys canonicalizes a runtime "hg:host:port"→status map for
+// comparison. Only the leading hostgroup id is parsed — the host:port tail is
+// carried verbatim, so IPv6 hostnames survive.
+func runtimeServerKeys(have map[string]string, classes map[int32]int32) map[string]string {
+	keys := make(map[string]string, len(have))
+	for k := range have {
+		canon := k
+		if len(classes) > 0 {
+			if i := strings.IndexByte(k, ':'); i > 0 {
+				if hg, err := strconv.ParseInt(k[:i], 10, 32); err == nil {
+					canon = canonServerKey(int32(hg), k[i+1:], classes)
+				}
+			}
+		}
+		if prev, ok := keys[canon]; !ok || k < prev {
+			keys[canon] = k
+		}
 	}
 	return keys
 }
@@ -249,14 +350,22 @@ func diffKeys(table string, want, have map[string]bool) []string {
 	return diffs
 }
 
-// diffServers is diffKeys against a status-valued runtime map; the status is
-// ignored — presence is what matters.
-func diffServers(table string, want map[string]bool, have map[string]string) []string {
-	haveKeys := make(map[string]bool, len(have))
-	for k := range have {
-		haveKeys[k] = true
+// diffServers is diffKeys over canonical-key → display-key maps: membership
+// is decided on the canonical keys, messages carry the display keys. Runtime
+// status never participates — presence is what matters.
+func diffServers(table string, want, have map[string]string) []string {
+	var diffs []string
+	for canon, display := range want {
+		if _, ok := have[canon]; !ok {
+			diffs = append(diffs, table+": missing "+display)
+		}
 	}
-	return diffKeys(table, want, haveKeys)
+	for canon, display := range have {
+		if _, ok := want[canon]; !ok {
+			diffs = append(diffs, table+": extra "+display)
+		}
+	}
+	return diffs
 }
 
 // ReadGlobalVariables returns variable_name→variable_value from

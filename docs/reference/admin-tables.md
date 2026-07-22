@@ -230,7 +230,7 @@ back **identity keys only** from the `runtime_*` tables and compares:
 
 | Table | In drift detection | Compared key |
 |---|---|---|
-| `runtime_mysql_servers` | yes | `hostgroup_id:hostname:port` (status read but ignored for drift; counted for `shunnedBackends`) |
+| `runtime_mysql_servers` | yes | `hostgroup_id:hostname:port` — membership-aware: hostgroups joined by a `mysqlReplicationHostgroups` pair compare as one equivalence class, so a server in either hostgroup of its pair is present (status read but ignored for drift; counted for `shunnedBackends`) |
 | `runtime_mysql_users` | yes | `username` (DISTINCT — runtime holds frontend + backend rows per user) |
 | `runtime_mysql_query_rules` | yes | `rule_id` |
 | `runtime_pgsql_servers` | yes | `hostgroup_id:hostname:port` |
@@ -250,6 +250,13 @@ Notes:
 - A `SHUNNED` server is *present*, therefore **not** drifted — shunning is
   ProxySQL's own health reaction, surfaced separately as
   `status.shunnedBackends`.
+- Server comparison enforces **membership, not placement** (#34): within
+  the hostgroups of a `mysqlReplicationHostgroups` pair, monitor-driven
+  moves (`read_only` demotion, failover promotion, writer-is-also-reader
+  mirroring) are not drift; a server missing from every hostgroup of its
+  pair, or an unknown server, is. Pairs sharing a hostgroup chain into one
+  equivalence class. Hostgroups outside every pair — and all
+  `pgsql_servers` — keep exact-placement comparison.
 - Passwords are never read back; the read-back queries select identity
   columns only.
 - A replica whose read-back fails is treated as drifted (it cannot be proven

@@ -152,19 +152,33 @@ A misconfigured monitor is the classic silent failure: backends get
 `ProxySQLConfig.status.shunnedBackends` climbs. Diagnosis steps in
 [Operations](./operations.md#troubleshooting).
 
-## Known limitation with replication hostgroups
+## Drift detection and replication hostgroups
 
-The operator's drift detection currently keys servers by
-`hostgroup:hostname:port`. After the monitor moves a server (writer
-demoted to the reader hostgroup), runtime no longer matches the spec's
-static placement, so each periodic resync re-pushes the spec placement
-and the monitor re-corrects it within one `read_only` interval. The
-visible effects: recurring `driftedReplicas` on such configs, and a
-sub-2-second window after each resync where a write could hit a
-now-read-only server and fail. Making drift detection
-replication-hostgroup-aware is a planned follow-up of the
-[failover design](../superpowers/specs/2026-06-10-external-failover-design.md).
-Until then: where a role Service exists (pattern 1 above), prefer it.
+The operator's drift detection enforces **membership, not placement**.
+For every hostgroup covered by a `mysqlReplicationHostgroups` pair, a
+listed server counts as converged when runtime holds it in *either*
+hostgroup of the pair — so the monitor demoting a writer to the reader
+hostgroup on a `read_only` flip, promoting a replica during failover, or
+mirroring the writer into the reader hostgroup
+(`mysql-monitor_writer_is_also_reader`) is ProxySQL doing its job, never
+drift. The same goes for health status: a `SHUNNED` backend is present,
+not drifted. What *is* drift: a listed server missing from every
+hostgroup of its pair, or an unknown server appearing in one — both
+trigger a re-push. Hostgroups not covered by any pair keep exact
+placement enforcement (without a pair, nothing may legitimately move a
+server), and `pgsqlServers` are always exact — this operator exposes no
+PostgreSQL replication-hostgroup field. If you configure pgsql
+replication hostgroups out-of-band via `sqlStatements`, pgsql drift
+detection will fight the monitor's placement moves exactly as described
+in [#34](https://github.com/ProxySQL/proxysql-on-k8s/issues/34) — don't.
+
+One transient to know about: when a re-push *does* happen on a config
+with replication hostgroups — a spec change, or healing real drift — the
+full table write momentarily resets servers to the spec's static
+placement. The monitor re-places them within one
+`mysql-monitor_read_only_interval` (1.5 s by default). That window only
+opens on actual changes, not on the periodic resync of a converged
+cluster.
 
 ## What's coming: backend auto-discovery
 
