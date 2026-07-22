@@ -172,13 +172,16 @@ Full field reference:
 
 ## 5. The persistence caveat
 
-The eventslog switch lives in ProxySQL's bootstrap config file — but on a
-cluster with **persistence enabled** (the default), ProxySQL's own on-disk
-database (`proxysql.db`) takes precedence over that file after the first
-start. Consequence: on a persistence-enabled cluster, **toggling
-`queryLog` off in the CR does not stop an already-running eventslog** — the
-pods restart, read their `proxysql.db`, and keep logging. To actually stop
-it there, flip the variable at runtime on the admin port:
+The eventslog switch lives in ProxySQL's bootstrap config file. Toggling
+`queryLog` off *removes* the eventslog lines from that file — and on a
+cluster with **persistence enabled** (the default), the container's
+`--reload` startup merge re-applies config-file lines over ProxySQL's
+on-disk database (`proxysql.db`) but never deletes db entries that are
+simply absent from the file. Consequence: on a persistence-enabled
+cluster, **toggling `queryLog` off in the CR does not stop an
+already-running eventslog** — the pods restart, keep the saved eventslog
+settings from `proxysql.db`, and keep logging. To actually stop it there,
+flip the variable at runtime on the admin port:
 
 ```sql
 UPDATE global_variables SET variable_value='false'

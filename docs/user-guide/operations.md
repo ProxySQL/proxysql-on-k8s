@@ -41,7 +41,7 @@ re-deriving Service names and default ports.
 | `pxcfg` `Ready=False`, reason `NoReadyReplicas` | Cluster pods not Ready yet (or all down) | `kubectl get pods -l proxysql.com/cluster=<name>`; fix the cluster first. |
 | Reason `AdminSecretMissing` / `AdminSecretIncomplete` | Auth Secret absent, partial operator schema, or cnf-invalid characters in a password | Condition message names the missing keys / offending key. See [Security](./security.md#the-two-auth-schemas-and-their-validation). |
 | Reason `UserSecretError` | A `passwordSecretRef` Secret or key doesn't exist | Message names the user and secret; create/fix the Secret — the watch re-syncs automatically. |
-| Reason `PartialSync`, `Degraded=SyncErrors` | Some replicas unreachable or rejecting the radmin login | Read the Degraded message (per-address errors). Auth errors after rotating the auth Secret on a persistent cluster → see the [proxysql.db precedence](./clusters.md#persistence-trade-offs). |
+| Reason `PartialSync`, `Degraded=SyncErrors` | Some replicas unreachable or rejecting the radmin login | Read the Degraded message (per-address errors). Auth errors right after rotating the auth Secret are transient while pods roll; if they persist on a PVC-backed cluster, see the [cnf/proxysql.db merge rules](./clusters.md#persistence-trade-offs). |
 | `Degraded=True`, reason `RuntimeApplyError` | A `spec.variables` runtime push to a replica's admin port failed — admin port unreachable, or bad radmin credential | The Degraded message names the failing replica; check its admin connectivity/credentials. The operator retries on requeue; StatefulSet updates are **not** blocked meanwhile — other pending template/replica changes still apply. |
 | `ClusterFound=False` | `clusterRef` names a missing cluster (or wrong namespace — must be the same one) | `kubectl get pxc -n <ns>`. |
 | `status.shunnedBackends > 0`; queries fail with no backend | ProxySQL shunned backends: connect failures, or **monitor auth failures** (no `monitor` user on the backend) | `SELECT * FROM runtime_mysql_servers` shows `SHUNNED`; the `monitor.mysql_server_connect_log` table on the admin port shows why. Fix per [the monitor user](./backends.md#the-monitor-user). |
@@ -145,30 +145,32 @@ never remove one. So deleting a key from `spec.variables` can't be applied
 at runtime without silently keeping the old value; the operator forces a
 rolling restart instead. With persistence disabled that restart
 re-bootstraps from the new cnf's variable set as a whole; with persistence
-**enabled (the default)** the removed value can survive the restart in
-`proxysql.db` — see the persistence caveat below. This is the same reason
+**enabled (the default)** the removed value survives the restart in
+`proxysql.db` — the `--reload` merge re-applies cnf lines over the db but
+never deletes db entries absent from the cnf (see the persistence note
+below). This is the same reason
 `ProxySQLConfig`'s variable maps document "removing a key does not reset
 the variable" — different mechanism, same underlying ProxySQL limitation.
 
 **Persistence: what a restart actually reloads.** The ProxySQL container
-starts without `--initial` or `--reload`, so on a persistence-enabled
-cluster (the **default**, `persistence.enabled: true`) an existing
-`proxysql.db` on the PVC wins over the bootstrap cnf on every start after
-the first — a restart does **not** re-read the updated cnf's variables.
-The automatic restart fallback still lands the common case because of
-ordering: the runtime pass runs `UPDATE ... SAVE ... TO DISK` on every
-Ready replica *before* falling back, so the intended value is already in
-`proxysql.db` and the restarted pod picks it up from there. The gaps:
-bootstrap variables *added to or removed from* the cnf, and replicas that
-were **not** Ready at push time, may come back from a restart still
-carrying their old `proxysql.db` state. Prefer runtime-settable *value
-edits of existing `spec.variables` keys* — those are pushed (and SAVEd)
-directly by the operator, restart-free. For adding/removing bootstrap
-variables on PVC-backed clusters, verify the result on the admin port (or
-set the value at runtime via `ProxySQLConfig`) rather than trusting the
-restart alone; closing this gap operator-side is tracked as a follow-up.
-Persistence-disabled (`emptyDir`) clusters re-bootstrap from the cnf on
-every pod start and don't have this caveat.
+starts with `--reload`, so on a persistence-enabled cluster (the
+**default**, `persistence.enabled: true`) every start merges the bootstrap
+cnf **over** the existing `proxysql.db` on the PVC: a variable present in
+both takes the **cnf value**, a variable present only in the db keeps its
+db value, and the merged result is saved back to disk. A restart therefore
+*does* re-read the updated cnf's variables — variables **added** to the
+cnf land after the rollout, and replicas that missed a runtime push (e.g.
+not Ready at push time) converge to the cnf on their next start. The one
+remaining gap is **removal**: a variable deleted from the cnf keeps its
+old value in `proxysql.db` (the merge never deletes db-only entries) —
+after removing a `spec.variables` key on a PVC-backed cluster, verify on
+the admin port and, if needed, set the intended value explicitly (via
+`spec.variables` or `ProxySQLConfig`) or recreate the PVC. Upstream
+documents the `--reload` merge as best-effort ("no guarantee … validate
+that the merge was as expected"), so treat the admin port as the source of
+truth for anything critical. Persistence-disabled (`emptyDir`) clusters
+re-bootstrap from the cnf alone on every pod start and have neither
+behavior to think about.
 
 **What always restarts, unconditionally:** listening ports/interfaces,
 `replicas`, admin/radmin credential rotation, and toggling the logging
@@ -196,12 +198,12 @@ variable.
 
 - **Zero ready replicas.** If no replica is Ready when a `spec.variables`
   change lands, nothing is pushed anywhere — there's no pod to dial. The
-  cnf Secret is already updated, so a pod with a *fresh* datadir
-  (persistence disabled, or a brand-new PVC) bootstraps from it when it
-  comes up — but a PVC-backed pod restarting into an existing
-  `proxysql.db` can keep the old values (see the persistence caveat
-  above). If that window bites, re-touch the value under `spec.variables`
-  once replicas are Ready, or set it at runtime via `ProxySQLConfig`.
+  cnf Secret is already updated, so a pod bootstraps the intended values
+  when it comes up: a fresh datadir reads the cnf outright, and a
+  PVC-backed pod restarting into an existing `proxysql.db` merges the
+  updated cnf over it via `--reload` (removed keys excepted — see the
+  persistence note above). If in doubt once replicas are Ready, verify on
+  the admin port or re-touch the value under `spec.variables`.
 - **A Not-Ready replica at push time.** The runtime push only dials
   **Ready** pods. A replica that's transiently Not-Ready (not restarting,
   just failing readiness) at the moment of the push can miss that

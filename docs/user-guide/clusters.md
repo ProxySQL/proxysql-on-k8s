@@ -113,25 +113,33 @@ an emptyDir is used and every restart starts blank (the operator's
 pod-watch re-pushes `ProxySQLConfig` within seconds, so this is less
 scary than it sounds).
 
-**The precedence rule that matters:** the bootstrap `proxysql.cnf` is
-only authoritative on the *first* start against an empty data
-directory. After that, **`proxysql.db` wins over the cnf** on every
-restart. Consequences:
+**The precedence rule that matters:** the container runs
+`proxysql --reload`, so on **every** start ProxySQL merges the bootstrap
+`proxysql.cnf` over the persisted `proxysql.db`: for a setting present in
+**both**, the cnf value wins; a setting present **only in the db** (set at
+runtime and `SAVE`d, or removed from the cnf since) is left untouched; the
+merged result is saved back to `proxysql.db`. (Upstream documents the
+`--reload` merge as best-effort — "no guarantee … validate that the merge
+was as expected" — so verify on the admin port after anything
+security-sensitive.) Consequences:
 
 - Settings carried by the bootstrap cnf — admin credentials, listener
-  interfaces, query-log (eventslog) variables — do not change on a
-  persistent cluster just because the cnf changed and the pods rolled.
-  ProxySQL reloads its previous state from disk. Monitor credentials are
-  the exception: rotation is pushed at runtime (`SAVE ... TO DISK`), so
-  it **does** land on persistent clusters, restart or not.
-- Rotating `admin`/`radmin` on a persistent cluster can therefore leave
-  pods running the *old* admin password while the operator tries the
-  new one, surfacing as sync failures (`PartialSync`). Prefer changing
-  such values through the admin interface / `ProxySQLConfig` variables
-  (which are pushed via SQL and `SAVE ... TO DISK`, so they survive
-  restarts correctly), or recreate the PVCs to re-bootstrap.
-- Toggling `spec.logging.queryLog` off does not stop an already-running
-  eventslog on a persistent cluster, for the same reason — see
+  interfaces, `spec.variables`, query-log (eventslog) variables — **do**
+  take effect on a persistent cluster when the cnf changes and the pods
+  roll: the restarted pod re-applies the cnf lines over its `proxysql.db`.
+  Monitor credentials additionally land restart-free (pushed at runtime
+  with `SAVE ... TO DISK`).
+- Rotating `admin`/`radmin` on a persistent cluster therefore works: the
+  rotation rolls the pods and each one comes back with the new
+  `admin_credentials` line merged from the cnf. Given the upstream
+  best-effort caveat above, verify after rotating (a failed merge would
+  surface as `PartialSync` while the operator dials with the new
+  password).
+- What does **not** converge on restart is *removal*: a line deleted from
+  the cnf keeps its old value in `proxysql.db` — the merge never deletes
+  db entries. Toggling `spec.logging.queryLog` **off** is the canonical
+  example: it removes the `eventslog_*` cnf lines, so an already-running
+  eventslog keeps running — see
   [Tutorial 05 — query logging](../tutorials/05-query-logging.md).
 
 PVCs are retained when the cluster (or its StatefulSet) is deleted —
