@@ -116,6 +116,17 @@ Pods only roll if a new operator version changes the generated pod
 template or bootstrap config (the cnf checksum annotation triggers the
 rolling restart; see [Managing clusters](./clusters.md#rolling-updates)).
 
+### Upgrading to v0.5.0+: one rolling restart, `--reload` boot semantics
+
+v0.5.0 adds `--reload` to the ProxySQL container command so the bootstrap
+cnf merges over a persisted `proxysql.db` at start. The pod-template
+change rolls every managed cluster **once** on the first reconcile after
+the operator upgrade. That first restart is also corrective on
+PVC-backed clusters: any `proxysql.db` value that had drifted from the
+bootstrap cnf (stale admin credentials being the classic case) converges
+to the cnf. Details in
+[Managing clusters](./clusters.md#persistence-trade-offs).
+
 ### Upgrading from < v0.3.0: cnf ConfigMap → Secret
 
 Operator versions before v0.3.0 rendered the bootstrap `proxysql.cnf`

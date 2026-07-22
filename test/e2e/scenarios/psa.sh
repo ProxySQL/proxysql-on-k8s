@@ -33,7 +33,7 @@ YAML
   # not on the node's safe-sysctl list), the StatefulSet controller would
   # emit FailedCreate "violates PodSecurity" / the kubelet would reject the
   # pod instead of it reaching Ready.
-  if ! kubectl -n "$ns" wait --for=condition=Ready pod/pxc-0 --timeout=120s >/dev/null 2>&1; then
+  if ! wait_pod_ready "$ns" pxc-0; then
     fail "pxc-0 not Ready under restricted PSA (tcpKeepalive sysctls set)"
     kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>&1 | grep -iE "violate|forbidden|FailedCreate|sysctl|security" | tail -5 >&2 || true
     dump_ns "$ns"

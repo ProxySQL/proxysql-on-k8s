@@ -157,10 +157,11 @@ type LoggingSpec struct {
 	// ships it. Currently the sidecar's only input, so admission rejects
 	// enabled=true with queryLog=false until more inputs exist.
 	//
-	// LIMITATION: the eventslog variables live in the bootstrap cnf, and on a
-	// persistence-enabled cluster ProxySQL's own proxysql.db wins over the
-	// cnf after the first start. Toggling queryLog OFF therefore does not
-	// stop an already-running eventslog there: run
+	// LIMITATION: toggling queryLog OFF removes the eventslog lines from the
+	// bootstrap cnf, and the container's --reload merge re-applies cnf lines
+	// over proxysql.db but never deletes db entries absent from the cnf. On a
+	// persistence-enabled cluster the saved eventslog settings therefore
+	// survive the restart and the eventslog keeps running: run
 	//   UPDATE global_variables SET variable_value='false'
 	//     WHERE variable_name='mysql-eventslog_default_log';
 	//   LOAD MYSQL VARIABLES TO RUNTIME; SAVE MYSQL VARIABLES TO DISK;

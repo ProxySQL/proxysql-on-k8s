@@ -20,7 +20,7 @@ spec:
     mysql:
       mysql-max_connections: "700"
 YAML
-  kubectl -n "$ns" wait --for=condition=Ready pod/pxc-0 --timeout=120s >/dev/null
+  wait_pod_ready "$ns" pxc-0 || { fail "pxc-0 not Ready"; dump_ns "$ns"; return 1; }
 
   local radmin out restarts0 annot0 varshash0
   radmin="$(radmin_pw "$ns" pxc)"
@@ -88,6 +88,6 @@ YAML
   log "runtimereconfig: pod rolled out (annotation changed)"
 
   # Wait for cluster to become Ready again
-  kubectl -n "$ns" wait --for=condition=Ready pod/pxc-0 --timeout=120s >/dev/null || { dump_ns "$ns"; return 1; }
+  wait_pod_ready "$ns" pxc-0 || { fail "pxc-0 not Ready after rollout"; dump_ns "$ns"; return 1; }
   log "runtimereconfig: cluster returned to Ready after structural change"
 }

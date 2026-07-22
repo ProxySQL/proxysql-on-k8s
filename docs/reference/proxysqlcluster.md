@@ -307,11 +307,12 @@ Sidecar mechanics (all verified in the builders):
   key; any change to either key rolls the pods via the
   [`proxysql.com/cnf-checksum`](annotations.md) annotation.
 
-**Persistence-toggle limitation.** The eventslog variables live in the
-bootstrap cnf, and on a persistence-enabled cluster ProxySQL's own
-`proxysql.db` wins over the cnf after the first start. Toggling
-`queryLog` **off** therefore does not stop an already-running eventslog
-there. To actually stop it, run on the admin port (or set via
+**Persistence-toggle limitation.** Toggling `queryLog` **off** *removes*
+the `eventslog_*` lines from the bootstrap cnf, and the container's
+`--reload` merge re-applies cnf lines over `proxysql.db` but never deletes
+db entries absent from the cnf — so on a persistence-enabled cluster the
+previously-saved eventslog settings survive the restart and the eventslog
+keeps running. To actually stop it, run on the admin port (or set via
 `ProxySQLConfig.spec.mysqlVariables`):
 
 ```sql
@@ -389,15 +390,16 @@ running pods over the admin port, restart-free, or whether it requires a
 StatefulSet rolling restart. Step 1 happens unconditionally, so even when
 step 2 can't apply something at runtime, a pod with a *fresh* datadir (a
 new pod on a new/ephemeral volume) boots from the correct, already-updated
-cnf. **Persistence caveat:** the container starts without `--initial` or
-`--reload`, so on a persistence-enabled cluster (the default) a pod that
-merely *restarts* onto its existing PVC loads `proxysql.db`, which wins
-over the cnf — restart-fallback semantics then rely on the
-`SAVE ... TO DISK` the runtime pass performed on pushed replicas, and
-added/removed bootstrap variables may not take effect on PVC-backed pods
-until set at runtime. See
+cnf. **Persistence note:** the container starts with `--reload`, so on a
+persistence-enabled cluster (the default) a pod that *restarts* onto its
+existing PVC merges the cnf **over** `proxysql.db`: cnf values win for
+keys present in both, db-only entries survive untouched, and the merged
+state is saved back to disk. Restarts therefore converge PVC-backed pods
+to the current cnf — including variables *added* since first boot — with
+one exception: a line *removed* from the cnf keeps its old db value (the
+merge never deletes). See
 [operations](../user-guide/operations.md#what-restarts-pods-what-doesnt)
-for the full caveat.
+for the full behavior.
 
 **What can be applied at runtime (no restart):** a change confined to
 `spec.variables` values — an existing key's value changes, no keys are
@@ -430,14 +432,17 @@ reference](annotations.md)).
   operator falls back to a restart automatically — the `cnf-checksum`
   annotation changes and the mismatched variable names are named in the
   `Progressing` message.
-- **Adding or removing a variable key.** Removing a key is a restart *by
-  design*, not a limitation: ProxySQL has no "unset" for a global variable,
-  so a runtime apply could only leave the old value in place while the
-  Secret says otherwise — silently wrong. With persistence disabled, the
-  restart re-bootstraps from the cnf's variable set as a whole, dropping
-  the previously-set value; with persistence enabled (the default) the old
-  value can survive in `proxysql.db` (see the persistence caveat above) —
-  verify on the admin port, or set the intended state at runtime via
+- **Adding or removing a variable key.** An **added** key takes effect
+  after the rollout on both fresh and PVC-backed pods (the `--reload`
+  merge applies the new cnf line over `proxysql.db`). **Removing** a key
+  is a restart *by design*, not a limitation: ProxySQL has no "unset" for
+  a global variable, so a runtime apply could only leave the old value in
+  place while the Secret says otherwise — silently wrong. With persistence
+  disabled, the restart re-bootstraps from the cnf's variable set as a
+  whole, dropping the previously-set value; with persistence enabled (the
+  default) the old value survives in `proxysql.db` (the merge never
+  deletes db-only entries — see the persistence note above) — verify on
+  the admin port, or set the intended state explicitly via
   `ProxySQLConfig`.
 - **Structural changes** — anything outside `spec.variables` values:
   listening ports/interfaces, admin/radmin credential rotation (the
@@ -447,10 +452,11 @@ reference](annotations.md)).
   roll every pod. Note the runtime-vs-restart classification diffs
   `proxysql.cnf` only.
 - **Zero ready replicas at push time.** Nothing is pushed anywhere (there's
-  nothing to dial); the cnf Secret is already updated, so a pod with a
-  fresh datadir bootstraps from it once it comes up — a PVC-backed pod
-  restarting onto an existing `proxysql.db` may keep old values (see the
-  persistence caveat above). No restart is *triggered* by this path
+  nothing to dial); the cnf Secret is already updated, so a pod bootstraps
+  the intended values once it comes up — a fresh datadir reads the cnf
+  outright, and a PVC-backed pod merges the updated cnf over its existing
+  `proxysql.db` via `--reload` (removed keys excepted — see the
+  persistence note above). No restart is *triggered* by this path
   specifically, but nothing runtime-applies either until pods exist.
 
 **The monitor-credential exception.** Credential rotation normally always

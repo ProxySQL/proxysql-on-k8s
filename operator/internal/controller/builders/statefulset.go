@@ -155,10 +155,20 @@ func (b *Builder) container() corev1.Container {
 		// container CrashLoops with `exec: "-f": executable file not found`. So
 		// command must be set explicitly.
 		Command: []string{"proxysql"},
+		// --reload merges the bootstrap cnf over the persisted proxysql.db on
+		// every start (issue #50): without it, an existing proxysql.db on a PVC
+		// wins over the cnf, so variables added to the cnf after first boot
+		// never take effect on persistence-enabled clusters. With --reload,
+		// ProxySQL loads proxysql.db into memory, then applies each cnf entry
+		// via INSERT OR REPLACE (cnf wins for keys present in both; db-only
+		// entries survive), and saves the merged result back to disk. Keys
+		// REMOVED from the cnf still keep their db value — that caveat stands.
+		// Harmless when persistence is off (fresh datadir every start).
 		Args: []string{
 			"-f",
 			"-c", "/etc/proxysql/proxysql.cnf",
 			"-D", "/var/lib/proxysql",
+			"--reload",
 		},
 		Ports: ports,
 		LivenessProbe: &corev1.Probe{

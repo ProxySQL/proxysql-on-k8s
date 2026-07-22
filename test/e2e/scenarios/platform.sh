@@ -18,7 +18,7 @@ spec:
   auth: {secretName: platform-admin}
   protocols: {mysql: {enabled: true}, pgsql: {enabled: false}, web: {enabled: true}}
 YAML
-  kubectl -n "$ns" wait --for=condition=Ready pod/pxc-0 --timeout=120s >/dev/null
+  wait_pod_ready "$ns" pxc-0 || { fail "pxc-0 not Ready"; dump_ns "$ns"; return 1; }
 
   local out _
   # Phase converges to Running once the pod is ready.

@@ -48,7 +48,7 @@ YAML
   oldip="$(kubectl -n "$ns" get pod pxc-1 -o jsonpath='{.status.podIP}')"
   log "multireplica: deleting pxc-1 (old IP $oldip)"
   kubectl -n "$ns" delete pod pxc-1 --wait=true >/dev/null
-  kubectl -n "$ns" wait --for=condition=Ready pod/pxc-1 --timeout=120s >/dev/null
+  wait_pod_ready "$ns" pxc-1 || { fail "pxc-1 not Ready"; dump_ns "$ns"; return 1; }
   newip="$(kubectl -n "$ns" get pod pxc-1 -o jsonpath='{.status.podIP}')"
   log "multireplica: pxc-1 recreated (new IP $newip)"
 

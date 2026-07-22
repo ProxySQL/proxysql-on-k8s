@@ -146,3 +146,16 @@ dump_ns() {
     kubectl -n "$OPERATOR_NS" logs deploy/proxysql-operator --tail=120 2>&1 | grep -i "$ns" || true
   } >&2
 }
+
+# wait_pod_ready NS POD [LOOPS] -> wait for a pod to become Ready, tolerating
+# the not-found window before the StatefulSet controller has created it (a
+# bare `kubectl wait` exits immediately on NotFound, which races pod creation
+# on slow runners). Each loop is a 10s bounded wait + 2s pause.
+wait_pod_ready() {
+  local ns="$1" pod="$2" loops="${3:-12}"
+  for _ in $(seq 1 "$loops"); do
+    kubectl -n "$ns" wait --for=condition=Ready "pod/$pod" --timeout=10s >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
