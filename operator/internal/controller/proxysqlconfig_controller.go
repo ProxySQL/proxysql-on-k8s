@@ -410,8 +410,12 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 // Shared by buildDesired (normal sync path) and cleanupDesired (deletion
 // finalizer, #42) so the derivation isn't duplicated.
 func autoPopulatedProxySQLServers(b *builders.Builder) []proxysqlclient.ProxySQLServer {
-	var out []proxysqlclient.ProxySQLServer
-	for _, host := range b.ProxySQLServerDNS() {
+	dns := b.ProxySQLServerDNS()
+	if len(dns) == 0 {
+		return nil // preserve nil (vs empty) so fingerprints match buildDesired's historical shape
+	}
+	out := make([]proxysqlclient.ProxySQLServer, 0, len(dns))
+	for _, host := range dns {
 		out = append(out, proxysqlclient.ProxySQLServer{
 			Hostname: host,
 			Port:     b.Spec.Protocols.Admin.Port,
