@@ -19,9 +19,82 @@ package builders
 import (
 	"bytes"
 	"fmt"
+	"maps"
+	"regexp"
+	"sort"
 	"strings"
 	"text/template"
 )
+
+// cnfTrue is the libconfig boolean literal ("true"), used for every
+// cnf variable the operator renders as an on/off flag.
+const cnfTrue = "true"
+
+// reservedCnfKeys are rejected in validateCnfVars: never overridable via
+// spec.variables. Two families:
+//
+//   - bootstrap-structural literals the template renders itself: credential
+//     lines (admin_credentials, monitor_username/password,
+//     cluster_username/password — values derived from the auth Secret) and
+//     listener ifaces/interfaces lines (values derived from spec ports).
+//   - keys owned by dedicated spec fields WITH StatefulSet coupling
+//     (container ports, probe wiring): restapi_*/web_* toggles and ports —
+//     overriding them in the cnf alone would desync the pod spec.
+//
+// Template-defaulted keys WITHOUT such coupling (mysql-threads,
+// admin-cluster_check_*, eventslog_*) are NOT reserved: they render through
+// the overlay-merge in BootstrapCnf, where a spec.variables value replaces
+// the default (each key renders exactly once — libconfig rejects duplicate
+// settings).
+//
+// NOTE: this is the OVERRIDE-rejection set only. Runtime-vs-restart
+// classification (ParseCnfVariables / NormalizeCnf) uses the narrower
+// structuralCnfKeys in cnf_variables.go — e.g. mysql-monitor_password is
+// reserved against user override here, yet a spec.auth monitor rotation
+// still runtime-applies restart-free (the documented monitor-credential
+// exception).
+var reservedCnfKeys = map[string]struct{}{
+	"admin-admin_credentials": {},
+	"admin-mysql_ifaces":      {},
+	"mysql-interfaces":        {},
+	"pgsql-interfaces":        {},
+	"mysql-monitor_username":  {},
+	"mysql-monitor_password":  {},
+	"pgsql-monitor_username":  {},
+	"pgsql-monitor_password":  {},
+	"admin-cluster_username":  {},
+	"admin-cluster_password":  {},
+	"admin-restapi_enabled":   {},
+	"admin-restapi_port":      {},
+	"admin-web_enabled":       {},
+	"admin-web_port":          {},
+}
+
+// cnfVarName constrains the variable name after its domain prefix. ProxySQL
+// global variable names are lowercase snake_case; anything else is either a
+// typo or an injection attempt.
+var cnfVarName = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// validateCnfVars rejects reserved keys, malformed names, and values that
+// could break out of the double-quoted `name="value"` cnf rendering
+// (quotes, backslashes, and control characters). Plain rejection — no
+// escaping — keeps the rendered cnf trivially safe.
+func validateCnfVars(vars map[string]string, prefix string) error {
+	for k, v := range vars {
+		if _, reserved := reservedCnfKeys[k]; reserved {
+			return fmt.Errorf("spec.variables: %q is reserved (bootstrap-structural)", k)
+		}
+		if !cnfVarName.MatchString(strings.TrimPrefix(k, prefix)) {
+			return fmt.Errorf("spec.variables: invalid variable name %q", k)
+		}
+		for _, r := range v {
+			if r == '"' || r == '\\' || r < 0x20 || r == 0x7f {
+				return fmt.Errorf("spec.variables: value for %q contains disallowed characters", k)
+			}
+		}
+	}
+	return nil
+}
 
 // bootstrapCnfTemplate is the minimal proxysql.cnf the operator writes into
 // the bootstrap ConfigMap. It contains only what ProxySQL needs to start
@@ -29,6 +102,13 @@ import (
 // monitor user, and (when replicas > 1) the proxysql_servers list for
 // ProxySQL Cluster sync. Backends/users/query rules are pushed at runtime
 // via ProxySQLConfig.
+//
+// Only credential lines and ifaces/interfaces listener lines are literal
+// here. Every other per-section variable (threads, restapi_*/web_*,
+// cluster_check_*/save/diffs, eventslog_*) comes in through the
+// {Admin,MySQL,PgSQL}Extra slices, pre-merged with the user's spec.variables
+// in BootstrapCnf so each key renders exactly once — libconfig treats a
+// duplicated setting as a parse error, which crashloops the pod at boot.
 const bootstrapCnfTemplate = `# Operator-managed bootstrap config for ProxySQLCluster {{ .ClusterName }}.
 # Backends, users, query rules, and runtime tuning are pushed via ProxySQLConfig.
 datadir="/var/lib/proxysql"
@@ -37,27 +117,12 @@ admin_variables=
 {
   admin_credentials="admin:{{ .AdminPassword }};radmin:{{ .RadminPassword }}{{ if .ExtraAdminUser }};{{ .ExtraAdminUser }}:{{ .ExtraAdminPassword }}{{ end }}"
   mysql_ifaces="0.0.0.0:{{ .AdminPort }}"
-{{- if .MetricsEnabled }}
-  restapi_enabled=true
-  restapi_port={{ .MetricsPort }}
-{{- end }}
-{{- if .WebEnabled }}
-  web_enabled=true
-  web_port={{ .WebPort }}
-{{- end }}
 {{- if .ClusterSync }}
   cluster_username="radmin"
   cluster_password="{{ .RadminPassword }}"
-  cluster_check_interval_ms=200
-  cluster_check_status_frequency=100
-  cluster_mysql_query_rules_save_to_disk=true
-  cluster_mysql_servers_save_to_disk=true
-  cluster_mysql_users_save_to_disk=true
-  cluster_proxysql_servers_save_to_disk=true
-  cluster_mysql_query_rules_diffs_before_sync=3
-  cluster_mysql_servers_diffs_before_sync=3
-  cluster_mysql_users_diffs_before_sync=3
-  cluster_proxysql_servers_diffs_before_sync=3
+{{- end }}
+{{- range .AdminExtra }}
+  {{ .Name }}="{{ .Value }}"
 {{- end }}
 }
 
@@ -68,12 +133,8 @@ mysql_variables=
   interfaces="0.0.0.0:{{ .MySQLPort }}"
   monitor_username="monitor"
   monitor_password="{{ .MonitorPassword }}"
-  threads=4
-{{- if .QueryLogEnabled }}
-  eventslog_filename="/var/log/proxysql/queries"
-  eventslog_default_log=1
-  eventslog_format=2
-  eventslog_filesize=52428800
+{{- range .MySQLExtra }}
+  {{ .Name }}="{{ .Value }}"
 {{- end }}
 }
 {{- end }}
@@ -85,7 +146,9 @@ pgsql_variables=
   interfaces="0.0.0.0:{{ .PostgreSQLPort }}"
   monitor_username="monitor"
   monitor_password="{{ .MonitorPassword }}"
-  threads=4
+{{- range .PgSQLExtra }}
+  {{ .Name }}="{{ .Value }}"
+{{- end }}
 }
 {{- end }}
 
@@ -114,23 +177,110 @@ type cnfData struct {
 	MySQLPort          int32
 	PostgreSQLEnabled  bool
 	PostgreSQLPort     int32
-	MetricsEnabled     bool
-	MetricsPort        int32
-	QueryLogEnabled    bool
-	WebEnabled         bool
-	WebPort            int32
 	ClusterSync        bool
 	ProxySQLServers    []string
+	AdminExtra         []cnfVar
+	MySQLExtra         []cnfVar
+	PgSQLExtra         []cnfVar
+}
+
+// cnfVar is a single user-supplied global variable, already stripped of its
+// domain prefix, ready to render as `Name="Value"`.
+type cnfVar struct {
+	Name  string
+	Value string
+}
+
+// mergedCnfVars overlays user-supplied variables (full-name keys; the domain
+// prefix is stripped) over the operator's per-section defaults (bare-name
+// keys). The user value wins for overlapping keys, so every key renders
+// exactly once; the result is sorted by bare name for deterministic
+// rendering.
+func mergedCnfVars(defaults, user map[string]string, prefix string) []cnfVar {
+	merged := make(map[string]string, len(defaults)+len(user))
+	maps.Copy(merged, defaults)
+	for k, v := range user {
+		merged[strings.TrimPrefix(k, prefix)] = v
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	out := make([]cnfVar, 0, len(merged))
+	for k, v := range merged {
+		out = append(out, cnfVar{Name: k, Value: v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// adminDefaultVars returns the admin_variables defaults the operator renders
+// when spec.variables doesn't override them. restapi_*/web_* are reserved
+// (spec-field-owned, STS-coupled) so they always carry the spec-derived
+// values; the cluster_check_*/save/diffs tuning is overridable.
+func (b *Builder) adminDefaultVars(clusterSync bool) map[string]string {
+	d := map[string]string{}
+	if isTrue(b.Spec.Metrics.Enabled) {
+		d["restapi_enabled"] = cnfTrue
+		d["restapi_port"] = fmt.Sprintf("%d", b.Spec.Metrics.Port)
+	}
+	if b.Spec.Protocols.Web.IsEnabled() {
+		d["web_enabled"] = cnfTrue
+		d["web_port"] = fmt.Sprintf("%d", b.Spec.Protocols.Web.Port)
+	}
+	if clusterSync {
+		d["cluster_check_interval_ms"] = "200"
+		d["cluster_check_status_frequency"] = "100"
+		d["cluster_mysql_query_rules_save_to_disk"] = cnfTrue
+		d["cluster_mysql_servers_save_to_disk"] = cnfTrue
+		d["cluster_mysql_users_save_to_disk"] = cnfTrue
+		d["cluster_proxysql_servers_save_to_disk"] = cnfTrue
+		d["cluster_mysql_query_rules_diffs_before_sync"] = "3"
+		d["cluster_mysql_servers_diffs_before_sync"] = "3"
+		d["cluster_mysql_users_diffs_before_sync"] = "3"
+		d["cluster_proxysql_servers_diffs_before_sync"] = "3"
+	}
+	return d
+}
+
+// mysqlDefaultVars returns the mysql_variables defaults (threads plus, with
+// query logging enabled, the eventslog_* wiring for the fluent-bit sidecar).
+func (b *Builder) mysqlDefaultVars() map[string]string {
+	d := map[string]string{"threads": "4"}
+	if b.LoggingEnabled() && b.Spec.Logging.QueryLog {
+		d["eventslog_filename"] = "/var/log/proxysql/queries"
+		d["eventslog_default_log"] = "1"
+		d["eventslog_format"] = "2"
+		d["eventslog_filesize"] = "52428800"
+	}
+	return d
+}
+
+// pgsqlDefaultVars returns the pgsql_variables defaults.
+func (b *Builder) pgsqlDefaultVars() map[string]string {
+	return map[string]string{"threads": "4"}
 }
 
 // BootstrapCnf renders the minimal proxysql.cnf for this cluster.
 // proxysqlServers is the list of peer pod DNS names for ProxySQL Cluster sync
 // (only populated when replicas > 1).
 func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
+	for _, m := range []struct {
+		vars   map[string]string
+		prefix string
+	}{
+		{b.Spec.Variables.Admin, "admin-"},
+		{b.Spec.Variables.MySQL, "mysql-"},
+		{b.Spec.Variables.PostgreSQL, "pgsql-"},
+	} {
+		if err := validateCnfVars(m.vars, m.prefix); err != nil {
+			return "", err
+		}
+	}
 	tpl, err := template.New("proxysql.cnf").Parse(bootstrapCnfTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse cnf template: %w", err)
 	}
+	clusterSync := len(proxysqlServers) > 0
 	data := cnfData{
 		ClusterName:        b.Name(),
 		AdminPassword:      b.Pw.Admin,
@@ -143,13 +293,11 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 		MySQLPort:          b.Spec.Protocols.MySQL.Port,
 		PostgreSQLEnabled:  b.Spec.Protocols.PostgreSQL.IsEnabled(),
 		PostgreSQLPort:     b.Spec.Protocols.PostgreSQL.Port,
-		MetricsEnabled:     isTrue(b.Spec.Metrics.Enabled),
-		MetricsPort:        b.Spec.Metrics.Port,
-		QueryLogEnabled:    b.LoggingEnabled() && b.Spec.Logging.QueryLog,
-		WebEnabled:         b.Spec.Protocols.Web.IsEnabled(),
-		WebPort:            b.Spec.Protocols.Web.Port,
-		ClusterSync:        len(proxysqlServers) > 0,
+		ClusterSync:        clusterSync,
 		ProxySQLServers:    proxysqlServers,
+		AdminExtra:         mergedCnfVars(b.adminDefaultVars(clusterSync), b.Spec.Variables.Admin, "admin-"),
+		MySQLExtra:         mergedCnfVars(b.mysqlDefaultVars(), b.Spec.Variables.MySQL, "mysql-"),
+		PgSQLExtra:         mergedCnfVars(b.pgsqlDefaultVars(), b.Spec.Variables.PostgreSQL, "pgsql-"),
 	}
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, data); err != nil {

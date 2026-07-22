@@ -109,3 +109,49 @@ func TestDrift_DetectsMissingAndExtra(t *testing.T) {
 		}
 	}
 }
+
+type recordingQuerier struct {
+	query string
+}
+
+func (r *recordingQuerier) Query(_ context.Context, q string) ([][]string, error) {
+	r.query = q
+	return [][]string{
+		{"mysql-max_connections", "2000"},
+		{"mysql-max_allowed_packet", "16777216"},
+	}, nil
+}
+
+func TestReadGlobalVariables_FiltersAndMaps(t *testing.T) {
+	rq := &recordingQuerier{}
+	result, err := ReadGlobalVariables(context.Background(), rq, []string{"mysql-max_connections", "mysql-max_allowed_packet"})
+	if err != nil {
+		t.Fatalf("ReadGlobalVariables: %v", err)
+	}
+	if got := result["mysql-max_connections"]; got != "2000" {
+		t.Errorf("mysql-max_connections = %q, want 2000", got)
+	}
+	if got := result["mysql-max_allowed_packet"]; got != "16777216" {
+		t.Errorf("mysql-max_allowed_packet = %q, want 16777216", got)
+	}
+	// Verify the query contains both quoted names
+	if !strings.Contains(rq.query, "'mysql-max_connections'") {
+		t.Errorf("query missing 'mysql-max_connections' in quoted form: %q", rq.query)
+	}
+	if !strings.Contains(rq.query, "'mysql-max_allowed_packet'") {
+		t.Errorf("query missing 'mysql-max_allowed_packet' in quoted form: %q", rq.query)
+	}
+}
+
+func TestReadGlobalVariables_EmptyNamesNoQuery(t *testing.T) {
+	fq := &fakeQuerier{
+		rows: map[string][][]string{},
+	}
+	result, err := ReadGlobalVariables(context.Background(), fq, []string{})
+	if err != nil {
+		t.Fatalf("ReadGlobalVariables: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("result = %v, want empty map", result)
+	}
+}

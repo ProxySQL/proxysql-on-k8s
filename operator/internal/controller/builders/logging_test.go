@@ -123,9 +123,9 @@ func TestBootstrapCnf_QueryLogVariables(t *testing.T) {
 	block := cnf[mysqlIdx:]
 	for _, want := range []string{
 		`eventslog_filename="/var/log/proxysql/queries"`,
-		"eventslog_default_log=1",
-		"eventslog_format=2",
-		"eventslog_filesize=52428800",
+		`eventslog_default_log="1"`,
+		`eventslog_format="2"`,
+		`eventslog_filesize="52428800"`,
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("cnf missing %q:\n%s", want, cnf)
@@ -140,6 +140,34 @@ func TestBootstrapCnf_QueryLogVariables(t *testing.T) {
 	}
 	if strings.Contains(cnf2, "eventslog") {
 		t.Errorf("cnf must not mention eventslog when logging is disabled:\n%s", cnf2)
+	}
+}
+
+// TestBootstrapCnf_EventslogOverrideRendersOnce: with logging enabled the
+// template supplies eventslog_* defaults; a user override of one of them must
+// yield exactly one line per eventslog key (duplicates are a libconfig parse
+// error), with the override winning.
+func TestBootstrapCnf_EventslogOverrideRendersOnce(t *testing.T) {
+	b := New(newCluster(clusterName, loggingOn()), newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	b.Spec.Variables = proxysqlv1alpha1.VariablesSpec{
+		MySQL: map[string]string{"mysql-eventslog_filesize": "1048576"},
+	}
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	block := cnfSectionBlock(t, cnf, "mysql")
+	for _, key := range []string{"eventslog_filename", "eventslog_default_log", "eventslog_format", "eventslog_filesize"} {
+		if got := countVarLines(block, key); got != 1 {
+			t.Errorf("%s rendered %d times, want exactly 1:\n%s", key, got, cnf)
+		}
+	}
+	vars := ParseCnfVariables(cnf)
+	if vars["mysql-eventslog_filesize"] != "1048576" {
+		t.Errorf("mysql-eventslog_filesize = %q, want %q (override must win)", vars["mysql-eventslog_filesize"], "1048576")
+	}
+	if vars["mysql-eventslog_filename"] != "/var/log/proxysql/queries" {
+		t.Errorf("mysql-eventslog_filename = %q, want the template default", vars["mysql-eventslog_filename"])
 	}
 }
 

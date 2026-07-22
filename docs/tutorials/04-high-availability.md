@@ -43,7 +43,8 @@ things happened:
 
 - The StatefulSet grew to `proxysql-0/1/2`. You may notice existing pods
   restart once: going above one replica changes the bootstrap config (the
-  peer list below), and config changes roll the StatefulSet.
+  peer list below), and bootstrap/structural config changes roll the
+  StatefulSet (variable value edits are applied at runtime instead).
 - A **PodDisruptionBudget** appeared, defaulting to `minAvailable: 2`
   (`replicas - 1`) — voluntary disruptions like node drains can never take
   the cluster below two ready proxies. It's omitted entirely at

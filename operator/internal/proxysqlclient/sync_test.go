@@ -493,3 +493,19 @@ func TestSync_SQLStatements_EmptyIsNoOp(t *testing.T) {
 		t.Fatalf("SQLStatements must add exactly one verbatim query at the end:\n got: %v\nwant: %v", withStatement.queries, want)
 	}
 }
+
+func TestApplyVariables_EmitsUpdateLoadSave(t *testing.T) {
+	rec := &recorder{}
+	if err := ApplyVariables(context.Background(), rec, map[string]string{"mysql-max_connections": "700"}, "MYSQL"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"UPDATE global_variables SET variable_value='700' WHERE variable_name='mysql-max_connections'",
+		"LOAD MYSQL VARIABLES TO RUNTIME",
+		"SAVE MYSQL VARIABLES TO DISK",
+	} {
+		if !rec.seen(want) {
+			t.Fatalf("missing %q in %v", want, rec.queries)
+		}
+	}
+}

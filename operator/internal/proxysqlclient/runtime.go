@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // Querier is the subset of *Client that ReadRuntime needs. Defined as an
@@ -256,4 +257,42 @@ func diffServers(table string, want map[string]bool, have map[string]string) []s
 		haveKeys[k] = true
 	}
 	return diffKeys(table, want, haveKeys)
+}
+
+// ReadGlobalVariables returns variable_name→variable_value from
+// runtime_global_variables for exactly the requested names.
+func ReadGlobalVariables(ctx context.Context, q Querier, names []string) (map[string]string, error) {
+	result := make(map[string]string)
+	if len(names) == 0 {
+		return result, nil
+	}
+
+	// Sort names for deterministic query
+	sortedNames := make([]string, len(names))
+	copy(sortedNames, names)
+	sort.Strings(sortedNames)
+
+	// Build IN clause with quoted, sorted names
+	var inClause []string
+	for _, name := range sortedNames {
+		inClause = append(inClause, quote(name))
+	}
+
+	query := fmt.Sprintf(
+		"SELECT variable_name, variable_value FROM runtime_global_variables WHERE variable_name IN (%s)",
+		strings.Join(inClause, ","),
+	)
+
+	rows, err := q.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, row := range rows {
+		if len(row) >= 2 {
+			result[row[0]] = row[1]
+		}
+	}
+
+	return result, nil
 }

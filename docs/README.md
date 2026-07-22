@@ -71,7 +71,9 @@ guide tells you *how*, the reference tells you *exactly what*.
 
 - [architecture.md](architecture.md) — components, reconcile-loop
   pseudocode, and the "why" behind every major decision (two CRDs,
-  write-to-all, cnf-in-a-Secret). The source of truth for design rationale.
+  write-to-all, cnf-in-a-Secret, runtime reconfiguration, the
+  `sqlStatements` escape hatch). The source of truth for design
+  rationale.
 - [superpowers/specs/](superpowers/specs/) — decision records for designs
   that shaped or will shape the operator (external failover, backend
   auto-discovery, logging sidecar, roadmap).

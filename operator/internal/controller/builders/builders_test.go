@@ -537,7 +537,7 @@ func TestBootstrapCnf_WebUI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BootstrapCnf: %v", err)
 	}
-	for _, want := range []string{"web_enabled=true", "web_port=6080"} {
+	for _, want := range []string{`web_enabled="true"`, `web_port="6080"`} {
 		if !strings.Contains(cnf, want) {
 			t.Errorf("cnf missing %q:\n%s", want, cnf)
 		}
@@ -782,6 +782,200 @@ func TestBootstrapCnf_ExtraAdminCredential(t *testing.T) {
 	}
 	if !strings.Contains(cnf2, `admin_credentials="admin:a;radmin:r"`) {
 		t.Errorf("two-account credentials line malformed:\n%s", cnf2)
+	}
+}
+
+func TestBootstrapCnf_SpecVariablesRendered(t *testing.T) {
+	c := newCluster("vars")
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	b.Spec.Variables = proxysqlv1alpha1.VariablesSpec{
+		MySQL: map[string]string{"mysql-max_connections": "700"},
+		Admin: map[string]string{"admin-refresh_interval": "2500"},
+	}
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`max_connections="700"`, `refresh_interval="2500"`} {
+		if !strings.Contains(cnf, want) {
+			t.Fatalf("cnf missing %q:\n%s", want, cnf)
+		}
+	}
+}
+
+func TestBootstrapCnf_SpecVariables_ReservedKeysRejected(t *testing.T) {
+	c := newCluster("vars-reserved")
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	b.Spec.Variables = proxysqlv1alpha1.VariablesSpec{
+		Admin: map[string]string{"admin-admin_credentials": "x:y"},
+	}
+	if _, err := b.BootstrapCnf(nil); err == nil {
+		t.Fatal("reserved key must be rejected")
+	}
+}
+
+func TestBootstrapCnf_SpecVariables_InjectionRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		vars proxysqlv1alpha1.VariablesSpec
+	}{
+		{"value with quote and newline", proxysqlv1alpha1.VariablesSpec{
+			MySQL: map[string]string{"mysql-max_connections": "1\"\nadmin_credentials=\"evil:pw"},
+		}},
+		{"value with backslash", proxysqlv1alpha1.VariablesSpec{
+			Admin: map[string]string{"admin-refresh_interval": `2500\`},
+		}},
+		{"value with control char", proxysqlv1alpha1.VariablesSpec{
+			PostgreSQL: map[string]string{"pgsql-threads": "4\x01"},
+		}},
+		{"value with DEL char", proxysqlv1alpha1.VariablesSpec{
+			Admin: map[string]string{"admin-refresh_interval": "25\x7f00"},
+		}},
+		{"name with uppercase", proxysqlv1alpha1.VariablesSpec{
+			MySQL: map[string]string{"mysql-Max_Connections": "700"},
+		}},
+		{"name with quote", proxysqlv1alpha1.VariablesSpec{
+			Admin: map[string]string{`admin-x"y`: "1"},
+		}},
+		{"name with only prefix", proxysqlv1alpha1.VariablesSpec{
+			MySQL: map[string]string{"mysql-": "1"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := New(newCluster("inj"), newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+			b.Spec.Variables = tc.vars
+			if _, err := b.BootstrapCnf(nil); err == nil {
+				t.Fatalf("%s must be rejected", tc.name)
+			}
+		})
+	}
+}
+
+func TestBootstrapCnf_SpecVariables_NormalValuesAccepted(t *testing.T) {
+	b := New(newCluster("ok"), newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	b.Spec.Variables = proxysqlv1alpha1.VariablesSpec{
+		MySQL: map[string]string{
+			"mysql-monitor_local_dns_cache_ttl": "300000",
+			"mysql-server_version":              "8.0.40 (ProxySQL)",
+			"mysql-ssl_p2s_cipher":              "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384",
+		},
+		Admin: map[string]string{"admin-stats_credentials": "stats:0.0.0.0:6033"},
+	}
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("normal values must be accepted: %v", err)
+	}
+	for _, want := range []string{
+		`server_version="8.0.40 (ProxySQL)"`,
+		`stats_credentials="stats:0.0.0.0:6033"`,
+	} {
+		if !strings.Contains(cnf, want) {
+			t.Errorf("cnf missing %q:\n%s", want, cnf)
+		}
+	}
+}
+
+// cnfSectionBlock extracts the body of the named *_variables section from a
+// rendered cnf (from the "<name>_variables=" line up to the closing "}").
+func cnfSectionBlock(t *testing.T, cnf, section string) string {
+	t.Helper()
+	start := strings.Index(cnf, section+"_variables=")
+	if start < 0 {
+		t.Fatalf("cnf missing %s_variables block:\n%s", section, cnf)
+	}
+	rest := cnf[start:]
+	before, _, found := strings.Cut(rest, "\n}")
+	if !found {
+		t.Fatalf("cnf %s_variables block unterminated:\n%s", section, cnf)
+	}
+	return before
+}
+
+// countVarLines counts lines in a section block that set the given bare key.
+func countVarLines(block, key string) int {
+	n := 0
+	for line := range strings.SplitSeq(block, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestBootstrapCnf_OverlayUserVariableOverTemplateDefault pins the
+// duplicate-setting fix: overriding a key the template used to hardcode
+// (threads) must render exactly ONE line carrying the user's value —
+// libconfig treats a duplicated setting as a parse error, which crashloops
+// the pod at boot.
+func TestBootstrapCnf_OverlayUserVariableOverTemplateDefault(t *testing.T) {
+	b := New(newCluster("overlay"), newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	b.Spec.Variables = proxysqlv1alpha1.VariablesSpec{
+		MySQL: map[string]string{"mysql-threads": "8"},
+	}
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	block := cnfSectionBlock(t, cnf, "mysql")
+	if got := countVarLines(block, "threads"); got != 1 {
+		t.Fatalf("threads rendered %d times in mysql_variables, want exactly 1:\n%s", got, cnf)
+	}
+	if got := ParseCnfVariables(cnf)["mysql-threads"]; got != "8" {
+		t.Errorf("mysql-threads = %q, want %q (user override must win)", got, "8")
+	}
+}
+
+// TestBootstrapCnf_TemplateDefaultRendersOnce: with no override the default
+// threads value still renders, exactly once per enabled section.
+func TestBootstrapCnf_TemplateDefaultRendersOnce(t *testing.T) {
+	c := newCluster("defaults", func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.PostgreSQL.Port = 6133 // implicitly enables the pgsql section
+	})
+	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	cnf, err := b.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	for _, section := range []string{"mysql", "pgsql"} {
+		block := cnfSectionBlock(t, cnf, section)
+		if got := countVarLines(block, "threads"); got != 1 {
+			t.Errorf("%s_variables: threads rendered %d times, want exactly 1:\n%s", section, got, cnf)
+		}
+		if got := ParseCnfVariables(cnf)[section+"-threads"]; got != "4" {
+			t.Errorf("%s-threads = %q, want default %q", section, got, "4")
+		}
+	}
+}
+
+// TestBootstrapCnf_SecretDerivedKeysRejected: keys whose values are derived
+// from the auth Secret or owned by dedicated spec fields (with StatefulSet
+// coupling: container ports, probe wiring) must be rejected, not silently
+// overridden.
+func TestBootstrapCnf_SecretDerivedKeysRejected(t *testing.T) {
+	cases := []struct {
+		key  string
+		vars proxysqlv1alpha1.VariablesSpec
+	}{
+		{"mysql-monitor_username", proxysqlv1alpha1.VariablesSpec{MySQL: map[string]string{"mysql-monitor_username": "evil"}}},
+		{"mysql-monitor_password", proxysqlv1alpha1.VariablesSpec{MySQL: map[string]string{"mysql-monitor_password": "evil"}}},
+		{"pgsql-monitor_username", proxysqlv1alpha1.VariablesSpec{PostgreSQL: map[string]string{"pgsql-monitor_username": "evil"}}},
+		{"pgsql-monitor_password", proxysqlv1alpha1.VariablesSpec{PostgreSQL: map[string]string{"pgsql-monitor_password": "evil"}}},
+		{"admin-cluster_username", proxysqlv1alpha1.VariablesSpec{Admin: map[string]string{"admin-cluster_username": "evil"}}},
+		{"admin-cluster_password", proxysqlv1alpha1.VariablesSpec{Admin: map[string]string{"admin-cluster_password": "evil"}}},
+		{"admin-restapi_port", proxysqlv1alpha1.VariablesSpec{Admin: map[string]string{"admin-restapi_port": "9999"}}},
+		{"admin-restapi_enabled", proxysqlv1alpha1.VariablesSpec{Admin: map[string]string{"admin-restapi_enabled": "false"}}},
+		{"admin-web_enabled", proxysqlv1alpha1.VariablesSpec{Admin: map[string]string{"admin-web_enabled": "true"}}},
+		{"admin-web_port", proxysqlv1alpha1.VariablesSpec{Admin: map[string]string{"admin-web_port": "9999"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			b := New(newCluster("reserved"), newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+			b.Spec.Variables = tc.vars
+			if _, err := b.BootstrapCnf(nil); err == nil {
+				t.Fatalf("override of %s must be rejected", tc.key)
+			}
+		})
 	}
 }
 

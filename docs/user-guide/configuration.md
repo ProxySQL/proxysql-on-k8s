@@ -193,6 +193,11 @@ or values beyond what ProxySQL itself enforces, and **removing a key
 does not reset the variable** — ProxySQL has no "unset", so the last
 written value persists until you write a new one.
 
+Cluster-level bootstrap variables also exist, as `ProxySQLCluster.spec.variables`
+([reference](../reference/proxysqlcluster.md#variables)); precedence
+between the two levels is discussed in
+[Operations](./operations.md#what-restarts-pods-what-doesnt).
+
 ## Raw SQL statements (escape hatch)
 
 `sqlStatements` is a list of raw admin SQL, executed verbatim, in order, on
