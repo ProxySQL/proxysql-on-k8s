@@ -6,38 +6,86 @@
     ":dependencyDashboard",
     "schedule:weekly"
   ],
+  "description": "Weekly, grouped dependency updates so a fresh CVE against a pinned transitive dep doesn't have to turn CI red before we notice (issue #59; see CLAUDE.md's Trivy CVE-response section). Groups mirror how upstream actually releases these families, so one PR = one coherent bump instead of a pile of single-package PRs.",
   "timezone": "UTC",
   "labels": ["dependencies"],
   "prHourlyLimit": 4,
   "prConcurrentLimit": 8,
   "rangeStrategy": "bump",
+  "vulnerabilityAlerts": {
+    "description": "Security fixes must not wait for Monday - open them the moment OSV/GHSA data says a pinned version is vulnerable. This is what turns the Trivy CI gate back into a backstop instead of the trigger.",
+    "schedule": ["at any time"],
+    "dependencyDashboardApproval": false,
+    "prCreation": "immediate",
+    "labels": ["dependencies", "security"]
+  },
+  "osvVulnerabilityAlerts": true,
   "packageRules": [
     {
-      "description": "Group GitHub Actions bumps into one PR",
+      "description": "GitHub Actions pins in .github/workflows/*.yaml - one PR per week for all of them, automerged once CI is green (pre-existing behavior).",
       "matchManagers": ["github-actions"],
       "groupName": "github-actions",
       "automerge": true
     },
     {
-      "description": "Group Go indirect deps under a single PR",
+      "description": "Catch-all group for Go indirect deps. Deliberately placed BEFORE the golang.org/x/*, grpc+otel+genproto, and k8s.io/sigs.k8s.io rules: Renovate evaluates packageRules in array order with last-match-wins for scalar fields like groupName, and all of those modules are indirect in operator/go.mod - so the specific groups below must come later to override this one.",
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["minor", "patch"],
       "matchDepTypes": ["indirect"],
       "groupName": "go indirect deps"
     },
     {
-      "description": "Hold back k8s.io/* major bumps — they require coordinated upgrades across controller-runtime",
-      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/controller-runtime"],
+      "description": "golang.org/x/* std-adjacent packages (x/net, x/sys, x/crypto, x/text, ...) release together upstream - batch them into one PR instead of one-per-package.",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["golang.org/x/**"],
+      "groupName": "golang.org/x/*"
+    },
+    {
+      "description": "grpc-go + OpenTelemetry + genproto are versioned/released in lockstep upstream and tend to break the build if bumped independently.",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": [
+        "google.golang.org/grpc**",
+        "google.golang.org/genproto**",
+        "go.opentelemetry.io/**"
+      ],
+      "groupName": "grpc + otel + genproto"
+    },
+    {
+      "description": "k8s.io/* and sigs.k8s.io/* (client-go, apimachinery, controller-runtime, ...) - only minor/patch bumps are auto-groupable; they must stay on the k8s 1.35 / controller-runtime v0.23 line this operator is pinned to (see operator/go.mod).",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/**"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "k8s.io/* + sigs.k8s.io/*"
+    },
+    {
+      "description": "Hold back k8s.io/*, sigs.k8s.io/* major bumps - they require a coordinated, manual controller-runtime upgrade, not an unattended PR.",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/**"],
       "matchUpdateTypes": ["major"],
       "enabled": false
     },
     {
-      "description": "Pin kindest/node to the kind action's supported list — manual bump only",
-      "matchPackageNames": ["kindest/node"],
-      "enabled": false
+      "description": "kind's node image, tracked via the custom regex manager below (Makefile's KIND_VERSION default and each workflow's KIND_NODE_IMAGE env var).",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["kindest/node"],
+      "groupName": "kindest/node"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "kind node image version pinned in the top-level Makefile (KIND_VERSION) and in .github/workflows/*.yaml (KIND_NODE_IMAGE). Intentionally bumps ALL pinned occurrences together: Makefile, ci.yaml, and examples-nightly.yaml converge on the same version in a single PR that runs full CI, instead of drifting apart.",
+      "managerFilePatterns": ["/^Makefile$/", "/^\\.github/workflows/.*\\.ya?ml$/"],
+      "matchStrings": [
+        "KIND_VERSION\\s*\\?=\\s*(?<currentValue>v\\d+\\.\\d+\\.\\d+)",
+        "KIND_NODE_IMAGE:\\s*kindest/node:(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "kindest/node",
+      "versioningTemplate": "docker"
     }
   ],
   "kubernetes": {
-    "fileMatch": ["charts/.+\\.yaml$"]
+    "managerFilePatterns": ["/charts/.+\\.yaml$/"]
   }
 }
