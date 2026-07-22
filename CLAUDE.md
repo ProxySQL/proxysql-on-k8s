@@ -97,6 +97,22 @@ runs no gRPC/HTTP servers beyond metrics + the admin-port MySQL client), but
 the gate is deliberate: keeping the image scanner-clean is part of the
 contract for people deploying it.
 
+### Upgrade stability: an unchanged spec must render byte-identical output
+
+`operator/internal/controller/builders/golden_test.go` (`TestGolden`) pins
+the rendered bootstrap cnf and StatefulSet pod template for a fixed
+reference `ProxySQLCluster` spec against committed goldens under
+`testdata/golden/`. Since builders are pure (see above), a diff here for an
+unchanged spec means every existing cluster gets a one-time rolling restart
+on the next reconcile after an operator upgrade — that's the #58
+upgrade-stability policy this test gates. If a change legitimately alters
+the rendered output (new default, security-context tightening, bugfix),
+regenerate with `UPDATE_GOLDEN=1 go test ./internal/controller/builders/ -run TestGolden`,
+review the diff, commit it, and add a release-note entry describing the
+expected restart (the v0.5.0 `--reload` rollout is the template for that
+note). Never regenerate goldens to silence a failure without understanding
+why the output changed.
+
 ## Branch policy
 
 Default branch is `main`. The legacy v1 demo charts live in the separate repo [`ProxySQL/kubernetes`](https://github.com/ProxySQL/kubernetes); fixes back-ported there don't apply here.
