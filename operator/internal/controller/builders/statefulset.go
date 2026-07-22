@@ -53,7 +53,7 @@ func (b *Builder) StatefulSet(cnfChecksum string) *appsv1.StatefulSet {
 		},
 		Spec: appsv1.StatefulSetSpec{
 			ServiceName:         b.HeadlessName(),
-			Replicas:            b.Spec.Replicas,
+			Replicas:            b.effectiveReplicas(),
 			PodManagementPolicy: appsv1.ParallelPodManagement,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: selector,
@@ -73,6 +73,19 @@ func (b *Builder) StatefulSet(cnfChecksum string) *appsv1.StatefulSet {
 	}
 
 	return ss
+}
+
+// effectiveReplicas returns the replica count the StatefulSet should carry:
+// 0 when the cluster is paused (spec.pause), otherwise the defaulted
+// spec.Replicas unchanged. Pausing never mutates spec.Replicas itself —
+// only the StatefulSet's actual replica count — so resuming (pause=false)
+// restores the StatefulSet to spec.Replicas with no further input needed.
+func (b *Builder) effectiveReplicas() *int32 {
+	if b.Spec.Pause {
+		zero := int32(0)
+		return &zero
+	}
+	return b.Spec.Replicas
 }
 
 func (b *Builder) podSpec() corev1.PodSpec {

@@ -281,6 +281,58 @@ When `replicas > 1`, two things switch on:
   same per-pod DNS names
   ([reference](../reference/proxysqlconfig.md#proxysqlservers)).
 
+## Pausing a cluster
+
+`spec.pause: true` scales the StatefulSet to 0 without deleting the
+cluster: the Services, both Secrets (`<name>` auth, `<name>-cnf`
+bootstrap), and every pod's PVC are all retained untouched. It's the
+knob for "I don't need this control plane running right now but I'm not
+ready to throw it away" — a maintenance window, a dev/staging cluster
+parked overnight or over a weekend, or a cluster whose backends are
+themselves down for a while. Since compute (CPU/memory requests) is
+what a cluster billed by node-hours or a cluster autoscaler cares about,
+and a paused `ProxySQLCluster` schedules zero pods, pausing is the cost
+lever: storage (the PVCs) keeps billing at its usual, much smaller rate,
+but the pod compute cost drops to zero for as long as it's paused.
+
+```yaml
+apiVersion: proxysql.com/v1alpha1
+kind: ProxySQLCluster
+metadata:
+  name: proxysql
+spec:
+  replicas: 3
+  pause: true
+```
+
+Pausing never touches `spec.replicas` — it only changes what the
+StatefulSet's *actual* replica count is set to. Resuming is the mirror
+image: flip `pause` back to `false` (or remove it) and the operator
+restores the StatefulSet to `spec.replicas` with no other input needed.
+Because persistence defaults to on, a resumed pod boots straight back
+onto its existing PVC — including the local ProxySQL admin database — no
+reconfiguration required. `ProxySQLConfig` pushes are skipped while
+paused (there are no ready pods to push to either way) and the config's
+`Ready` condition reports reason `ClusterPaused` instead of the generic
+`NoReadyReplicas`, so it reads as intentional rather than an outage.
+
+Status distinguishes two sub-states while `spec.pause: true` (mirroring
+the pattern used by other ProxySQL/MySQL Kubernetes operators):
+
+- **`Stopping`** (`phase`) / `Paused=False` (`reason: Stopping`) — the
+  scale-down is still in flight; at least one replica is still ready.
+- **`Paused`** (`phase`) / `Paused=True` (`reason: Paused`) — the
+  StatefulSet has reached 0 ready replicas.
+
+```bash
+kubectl get pxc proxysql            # PHASE column: Stopping, then Paused
+kubectl get pxc proxysql -o jsonpath='{.status.conditions[?(@.type=="Paused")]}'
+```
+
+The PodDisruptionBudget (when enabled) and any ServiceMonitor are left
+as-is — they key off `spec.replicas`/`spec.metrics`, not the paused
+StatefulSet, and are harmless with zero matching pods.
+
 ## Rolling updates
 
 The pod template carries a `proxysql.com/cnf-checksum` annotation — a

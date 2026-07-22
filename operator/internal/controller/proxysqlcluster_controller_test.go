@@ -842,6 +842,133 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "PDB should be omitted when replicas <= 1")
 		})
 	})
+
+	// #56: spec.pause scales the StatefulSet to 0 while retaining
+	// Services/Secrets/PVCs, and surfaces Stopping vs. Paused via status.
+	When("the user pauses the cluster", func() {
+		const name = "pxc-pause"
+
+		It("scales the StatefulSet to 0, keeps Services/Secrets/PVCs, and marks the cluster Paused", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(int32(3)), "sanity: unpaused cluster runs the spec'd replica count")
+
+			// Pause.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Pause = true
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(int32(0)), "paused StatefulSet must scale to 0")
+
+			// Services, cnf Secret, and auth Secret must survive the pause —
+			// only the StatefulSet's replica count changes.
+			var svc, headless corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &svc)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-headless", Namespace: ns}, &headless)).To(Succeed())
+			var authSec, cnfSec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &authSec)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec)).To(Succeed())
+
+			// envtest has no kubelet, so ReadyReplicas is already 0 — this
+			// reconcile lands directly on Paused (not Stopping).
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(got.Status.Phase).To(Equal(proxysqlv1alpha1.PhasePaused))
+			Expect(got.Status.Replicas).To(Equal(int32(3)), "status.replicas keeps reporting the target (spec.replicas), unaffected by pause")
+
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypePaused)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("Paused"))
+
+			avail := meta.FindStatusCondition(got.Status.Conditions, condTypeAvailable)
+			Expect(avail).NotTo(BeNil())
+			Expect(avail.Status).To(Equal(metav1.ConditionFalse))
+			Expect(avail.Reason).To(Equal("Paused"))
+		})
+
+		It("reports Stopping while replicas are still draining, then Paused once ready hits 0", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Pause = true
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			// Fake a StatefulSet that's mid-drain: still has ready replicas
+			// even though pause was requested (the real world in between the
+			// StatefulSet controller's scale-down and pods actually
+			// terminating).
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			// status.replicas must be >= status.readyReplicas (API server
+			// validated); this stays consistent with a real StatefulSet
+			// controller mid-drain.
+			ss.Status.Replicas = 2
+			ss.Status.ReadyReplicas = 2
+			Expect(k8sClient.Status().Update(ctx, &ss)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+			Expect(reconciler.updateStatus(ctx, cluster, b, "")).To(Succeed())
+
+			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhaseStopping))
+			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypePaused)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse), "not fully Paused until ready replicas hit 0")
+			Expect(cond.Reason).To(Equal("Stopping"))
+
+			// Ready replicas drop to 0: now it's fully Paused.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			ss.Status.ReadyReplicas = 0
+			Expect(k8sClient.Status().Update(ctx, &ss)).To(Succeed())
+
+			Expect(reconciler.updateStatus(ctx, cluster, b, "")).To(Succeed())
+			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhasePaused))
+			cond = meta.FindStatusCondition(cluster.Status.Conditions, condTypePaused)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("Paused"))
+		})
+
+		It("resumes to spec.replicas and clears the Paused condition", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Pause = true
+			})
+			reconcileAndExpectSuccess(name)
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(int32(0)), "created paused: StatefulSet starts at 0")
+
+			// Resume.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Pause = false
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(int32(3)), "resume must restore spec.replicas (the untouched default)")
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(got.Status.Phase).To(Equal(proxysqlv1alpha1.PhaseCreating), "envtest never marks pods ready")
+
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypePaused)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("NotPaused"))
+		})
+	})
 })
 
 // TestDerivePhase exercises the coarse phase projection directly (plain table
@@ -865,22 +992,30 @@ func TestDerivePhase(t *testing.T) {
 		ss      *appsv1.StatefulSet
 		missing bool
 		desired int32
+		paused  bool
 		want    string
 	}{
-		{"missing StatefulSet", &appsv1.StatefulSet{}, true, 3, proxysqlv1alpha1.PhasePending},
-		{"zero ready replicas", created(0, 0, "rev-1", "rev-1"), false, 3, proxysqlv1alpha1.PhaseCreating},
-		{"all ready, same revision", created(3, 3, "rev-1", "rev-1"), false, 3, proxysqlv1alpha1.PhaseRunning},
-		{"rolling update in progress", created(2, 1, "rev-1", "rev-2"), false, 3, proxysqlv1alpha1.PhaseUpdating},
+		{"missing StatefulSet", &appsv1.StatefulSet{}, true, 3, false, proxysqlv1alpha1.PhasePending},
+		{"zero ready replicas", created(0, 0, "rev-1", "rev-1"), false, 3, false, proxysqlv1alpha1.PhaseCreating},
+		{"all ready, same revision", created(3, 3, "rev-1", "rev-1"), false, 3, false, proxysqlv1alpha1.PhaseRunning},
+		{"rolling update in progress", created(2, 1, "rev-1", "rev-2"), false, 3, false, proxysqlv1alpha1.PhaseUpdating},
 		// All replicas still ready but a new revision just landed: the
 		// revision mismatch alone must flip the phase to Updating.
-		{"all ready, revision mismatch", created(3, 3, "rev-1", "rev-2"), false, 3, proxysqlv1alpha1.PhaseUpdating},
+		{"all ready, revision mismatch", created(3, 3, "rev-1", "rev-2"), false, 3, false, proxysqlv1alpha1.PhaseUpdating},
 		// Fresh StatefulSet whose UpdateRevision the controller hasn't
 		// populated yet counts as "no update in flight".
-		{"all ready, empty UpdateRevision", created(3, 3, "rev-1", ""), false, 3, proxysqlv1alpha1.PhaseRunning},
+		{"all ready, empty UpdateRevision", created(3, 3, "rev-1", ""), false, 3, false, proxysqlv1alpha1.PhaseRunning},
+		// spec.pause=true wins over everything else: still-ready replicas
+		// means the StatefulSet is draining down to 0 (Stopping); once none
+		// are ready it's fully Paused. Both override what would otherwise
+		// be Updating/Running for the same StatefulSet state.
+		{"paused, still draining", created(2, 2, "rev-1", "rev-1"), false, 3, true, proxysqlv1alpha1.PhaseStopping},
+		{"paused, fully scaled down", created(0, 0, "rev-1", "rev-1"), false, 3, true, proxysqlv1alpha1.PhasePaused},
+		{"paused, StatefulSet missing", &appsv1.StatefulSet{}, true, 3, true, proxysqlv1alpha1.PhasePaused},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := derivePhase(tc.ss, tc.missing, tc.desired); got != tc.want {
+			if got := derivePhase(tc.ss, tc.missing, tc.desired, tc.paused); got != tc.want {
 				t.Errorf("derivePhase() = %q, want %q", got, tc.want)
 			}
 		})

@@ -33,6 +33,18 @@ type ProxySQLClusterSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// Pause stops the ProxySQL control-plane pods without deleting the
+	// cluster: the StatefulSet is scaled to 0 while the Services, Secrets,
+	// and PVCs are retained. Useful to cut compute cost during a
+	// maintenance window or while backends are unavailable, without losing
+	// the on-disk admin database or having to recreate the cluster. Set
+	// back to false (or omit) to resume — the operator restores the
+	// StatefulSet to spec.replicas, which is never modified by pausing.
+	// Default false (per convention for default-off booleans; see
+	// PersistenceSpec.Enabled for the default-true counterpart).
+	// +optional
+	Pause bool `json:"pause,omitempty"`
+
 	// Image is the ProxySQL container image to run.
 	// +optional
 	Image ImageSpec `json:"image,omitempty"`
@@ -451,9 +463,11 @@ type ProxySQLClusterStatus struct {
 
 	// Phase is a coarse, single-word projection of the conditions for
 	// dashboards and external pollers. Conditions remain the source of truth.
-	// One of: Pending, Creating, Running, Updating, Degraded, Failed.
-	// (Failed is reserved; the operator currently reports Degraded for error
-	// states it can observe.)
+	// One of: Pending, Creating, Running, Updating, Degraded, Failed,
+	// Stopping, Paused. (Failed is reserved; the operator currently reports
+	// Degraded for error states it can observe.) Stopping and Paused only
+	// apply when spec.pause is true: Stopping while replicas are still
+	// scaling down to 0, Paused once none are ready.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -497,6 +511,13 @@ const (
 	PhaseUpdating = "Updating"
 	PhaseDegraded = "Degraded"
 	PhaseFailed   = "Failed"
+	// PhaseStopping applies only while spec.pause is true: the StatefulSet
+	// is scaling down to 0 but at least one replica is still ready.
+	PhaseStopping = "Stopping"
+	// PhasePaused applies only while spec.pause is true and no replica is
+	// ready: the StatefulSet is fully scaled to 0. Services, Secrets, and
+	// PVCs are retained.
+	PhasePaused = "Paused"
 )
 
 // +kubebuilder:object:root=true
@@ -505,6 +526,7 @@ const (
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Paused",type=boolean,JSONPath=`.spec.pause`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ProxySQLCluster is the Schema for the proxysqlclusters API.

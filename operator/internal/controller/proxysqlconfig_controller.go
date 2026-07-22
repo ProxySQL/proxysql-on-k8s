@@ -204,8 +204,15 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 	if len(addrs) == 0 {
-		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "NoReadyReplicas",
-			"no ready ProxySQL pods to push config to")
+		// A paused cluster (spec.pause) has 0 ready pods by design — its
+		// StatefulSet is intentionally scaled to 0 — so surface a reason
+		// that says so instead of the generic NoReadyReplicas, which would
+		// read as an unexpected outage.
+		reason, msg := "NoReadyReplicas", "no ready ProxySQL pods to push config to"
+		if cluster.Spec.Pause {
+			reason, msg = "ClusterPaused", "target ProxySQLCluster is paused (0 replicas); config push skipped"
+		}
+		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, reason, msg)
 		_ = r.Status().Update(ctx, &cfg)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
