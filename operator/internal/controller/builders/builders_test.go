@@ -17,6 +17,7 @@ limitations under the License.
 package builders
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -332,13 +333,18 @@ func TestBuilder_StatefulSet_SetsProxysqlCommand(t *testing.T) {
 	// The proxysql/proxysql image has no ENTRYPOINT, so command MUST be set to
 	// the binary; otherwise Kubernetes execs args[0] ("-f") and the container
 	// CrashLoops. Guard against regressing back to args-only.
+	//
+	// The args are pinned exactly: --reload is load-bearing (issue #50) — it
+	// merges the bootstrap cnf over a persisted proxysql.db on every start, so
+	// cnf changes take effect on persistence-enabled clusters after a restart.
 	b := New(newCluster(clusterName), newScheme(t), Passwords{})
 	c := b.StatefulSet("checksum").Spec.Template.Spec.Containers[0]
 	if len(c.Command) == 0 || c.Command[0] != "proxysql" {
 		t.Errorf("container command must start with \"proxysql\", got %v", c.Command)
 	}
-	if len(c.Args) == 0 || c.Args[0] != "-f" {
-		t.Errorf("container args should begin with -f, got %v", c.Args)
+	wantArgs := []string{"-f", "-c", "/etc/proxysql/proxysql.cnf", "-D", "/var/lib/proxysql", "--reload"}
+	if !reflect.DeepEqual(c.Args, wantArgs) {
+		t.Errorf("container args = %v, want %v", c.Args, wantArgs)
 	}
 }
 
