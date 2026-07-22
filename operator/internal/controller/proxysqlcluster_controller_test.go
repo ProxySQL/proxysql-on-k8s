@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -83,6 +84,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 				&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + "-headless", Namespace: ns}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + "-external", Namespace: ns}},
 				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name + "-cnf", Namespace: ns}},
@@ -939,6 +941,32 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(cond.Reason).To(Equal("Paused"))
 		})
 
+		It("keeps the external Service while the cluster is paused", func() {
+			ctx := context.Background()
+			const extName = name + "-ext-retained"
+			cluster = makeCluster(extName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Service.External = &proxysqlv1alpha1.ExternalServiceSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(extName)
+
+			var ext corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: extName + "-external", Namespace: ns}, &ext)).To(Succeed())
+
+			// Pause: Services are retained per pause semantics — the external
+			// Service included.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: extName, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Pause = true
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(extName)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: extName + "-external", Namespace: ns}, &ext)).To(Succeed(),
+				"the external Service must survive a pause (only the StatefulSet scales to 0)")
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: extName, Namespace: ns}, &got)).To(Succeed())
+			Expect(got.Status.Phase).To(Equal(proxysqlv1alpha1.PhasePaused), "sanity: the cluster did pause")
+		})
+
 		It("resumes to spec.replicas and clears the Paused condition", func() {
 			ctx := context.Background()
 			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
@@ -967,6 +995,152 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("NotPaused"))
+		})
+	})
+
+	// External exposure: spec.service.external drives a curated second
+	// Service "<cluster>-external"; spec.service.type mutates the main one.
+	When("spec.service.external is toggled", func() {
+		portNames := func(s *corev1.Service) []string {
+			out := make([]string, 0, len(s.Spec.Ports))
+			for _, p := range s.Spec.Ports {
+				out = append(out, p.Name)
+			}
+			return out
+		}
+
+		It("creates <cluster>-external with the default data-plane ports, gates admin on exposeAdmin, and deletes on disable", func() {
+			ctx := context.Background()
+			const name = "pxc-ext-lifecycle"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Service.External = &proxysqlv1alpha1.ExternalServiceSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var ext corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &ext)).To(Succeed())
+			Expect(ext.Spec.Type).To(Equal(corev1.ServiceTypeLoadBalancer), "external type defaults to LoadBalancer")
+			// Default port set: data-plane only — mysql (pgsql is disabled by
+			// default), never admin.
+			Expect(portNames(&ext)).To(ConsistOf("mysql"))
+			Expect(ext.Spec.Selector).To(HaveKeyWithValue("proxysql.com/cluster", name))
+			Expect(isOwnedBy(&ext, cluster)).To(BeTrue(), "external Service must be controller-owned for GC")
+
+			// exposeAdmin: true adds 6032 …
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.External.ExposeAdmin = true
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &ext)).To(Succeed())
+			Expect(portNames(&ext)).To(ConsistOf("mysql", "admin"))
+
+			// … and flipping it back removes it again.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.External.ExposeAdmin = false
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &ext)).To(Succeed())
+			Expect(portNames(&ext)).To(ConsistOf("mysql"), "removing exposeAdmin must drop the admin port")
+
+			// enabled: false deletes the Service (owner refs alone would keep
+			// it until cluster deletion).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.External.Enabled = false
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &ext)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "disabling must delete the external Service")
+
+			// Idempotence of the delete branch: reconciling again with the
+			// Service already gone must not error (NotFound = success).
+			reconcileAndExpectSuccess(name)
+		})
+
+		It("accepts a NodePort external Service and reports the node ports in status.endpoints.external", func() {
+			ctx := context.Background()
+			const name = "pxc-ext-nodeport"
+			// Empirically validates the LB-only field gating: the CRD defaults
+			// allocateLoadBalancerNodePorts=true, which the apiserver rejects
+			// on a NodePort Service unless the builder drops it.
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Service.External = &proxysqlv1alpha1.ExternalServiceSpec{
+					Enabled: true,
+					Type:    corev1.ServiceTypeNodePort,
+				}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var ext corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &ext)).To(Succeed())
+			Expect(ext.Spec.Type).To(Equal(corev1.ServiceTypeNodePort))
+			Expect(ext.Spec.Ports).To(HaveLen(1))
+			nodePort := ext.Spec.Ports[0].NodePort
+			Expect(nodePort).To(BeNumerically(">", 0), "apiserver must have allocated a node port")
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(got.Status.Endpoints).NotTo(BeNil())
+			Expect(got.Status.Endpoints.External).To(Equal(fmt.Sprintf("%d", nodePort)),
+				"NodePort endpoint is the host-less allocated node-port list")
+
+			// A second reconcile must keep the allocated node port stable.
+			reconcileAndExpectSuccess(name)
+			var again corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &again)).To(Succeed())
+			Expect(again.Spec.Ports[0].NodePort).To(Equal(nodePort), "reconcile must not churn the allocated node port")
+		})
+
+		It("reports the LoadBalancer ingress endpoint once provisioned, empty until then", func() {
+			ctx := context.Background()
+			const name = "pxc-ext-lb-endpoint"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Service.External = &proxysqlv1alpha1.ExternalServiceSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(got.Status.Endpoints).NotTo(BeNil())
+			Expect(got.Status.Endpoints.External).To(BeEmpty(),
+				"no cloud controller in envtest: the LB endpoint must stay empty until provisioned")
+
+			// Fake the cloud provider provisioning the LB.
+			var ext corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &ext)).To(Succeed())
+			ext.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: "203.0.113.7"}}
+			Expect(k8sClient.Status().Update(ctx, &ext)).To(Succeed())
+
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(got.Status.Endpoints.External).To(Equal("203.0.113.7:6033"),
+				"LB endpoint is ingress-IP:first-data-port once provisioned")
+		})
+	})
+
+	When("spec.service.type is changed", func() {
+		const name = "pxc-svc-type"
+
+		It("flips the main Service type in place — same UID, ClusterIP retained", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			var svc corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &svc)).To(Succeed())
+			Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeClusterIP))
+			uidBefore := svc.UID
+			ipBefore := svc.Spec.ClusterIP
+			Expect(ipBefore).NotTo(BeEmpty())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.Type = corev1.ServiceTypeNodePort
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &svc)).To(Succeed())
+			Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeNodePort))
+			Expect(svc.UID).To(Equal(uidBefore), "type change must mutate the Service in place, not recreate it")
+			Expect(svc.Spec.ClusterIP).To(Equal(ipBefore), "ClusterIP must be retained across the type flip")
 		})
 	})
 })

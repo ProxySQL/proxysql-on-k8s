@@ -83,6 +83,16 @@ func mainServiceType(spec proxysqlv1alpha1.ProxySQLClusterSpec) corev1.ServiceTy
 	return spec.Service.Type
 }
 
+// Port names shared by every Service and the pod template's container
+// ports. Constants so the goconst linter can hold the line on the literals.
+const (
+	portNameMySQL   = "mysql"
+	portNamePgSQL   = "pgsql"
+	portNameAdmin   = "admin"
+	portNameWeb     = "web"
+	portNameMetrics = "metrics"
+)
+
 // servicePort constructs a single named ServicePort. The single source of
 // truth for the name/port/targetPort literals shared by the regular,
 // headless, and external Services — a port change here changes all of them.
@@ -97,23 +107,23 @@ func servicePort(name string, port int32) corev1.ServicePort {
 
 // Per-listener ServicePort constructors, keyed off the defaulted spec.
 func (b *Builder) mysqlServicePort() corev1.ServicePort {
-	return servicePort("mysql", b.Spec.Protocols.MySQL.Port)
+	return servicePort(portNameMySQL, b.Spec.Protocols.MySQL.Port)
 }
 
 func (b *Builder) pgsqlServicePort() corev1.ServicePort {
-	return servicePort("pgsql", b.Spec.Protocols.PostgreSQL.Port)
+	return servicePort(portNamePgSQL, b.Spec.Protocols.PostgreSQL.Port)
 }
 
 func (b *Builder) adminServicePort() corev1.ServicePort {
-	return servicePort("admin", b.Spec.Protocols.Admin.Port)
+	return servicePort(portNameAdmin, b.Spec.Protocols.Admin.Port)
 }
 
 func (b *Builder) metricsServicePort() corev1.ServicePort {
-	return servicePort("metrics", b.Spec.Metrics.Port)
+	return servicePort(portNameMetrics, b.Spec.Metrics.Port)
 }
 
 func (b *Builder) webServicePort() corev1.ServicePort {
-	return servicePort("web", b.Spec.Protocols.Web.Port)
+	return servicePort(portNameWeb, b.Spec.Protocols.Web.Port)
 }
 
 // servicePorts returns the port list for either the regular or headless

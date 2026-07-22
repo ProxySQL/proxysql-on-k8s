@@ -113,17 +113,17 @@ func (b *Builder) externalServicePorts(ext *proxysqlv1alpha1.ExternalServiceSpec
 		ports = append(ports, p)
 	}
 
-	if selected("mysql", b.Spec.Protocols.MySQL.IsEnabled(), true) {
-		add("mysql", b.mysqlServicePort())
+	if selected(portNameMySQL, b.Spec.Protocols.MySQL.IsEnabled(), true) {
+		add(portNameMySQL, b.mysqlServicePort())
 	}
-	if selected("pgsql", b.Spec.Protocols.PostgreSQL.IsEnabled(), true) {
-		add("pgsql", b.pgsqlServicePort())
+	if selected(portNamePgSQL, b.Spec.Protocols.PostgreSQL.IsEnabled(), true) {
+		add(portNamePgSQL, b.pgsqlServicePort())
 	}
-	if selected("web", b.Spec.Protocols.Web.IsEnabled(), false) {
-		add("web", b.webServicePort())
+	if selected(portNameWeb, b.Spec.Protocols.Web.IsEnabled(), false) {
+		add(portNameWeb, b.webServicePort())
 	}
-	if selected("metrics", isTrue(b.Spec.Metrics.Enabled), false) {
-		add("metrics", b.metricsServicePort())
+	if selected(portNameMetrics, isTrue(b.Spec.Metrics.Enabled), false) {
+		add(portNameMetrics, b.metricsServicePort())
 	}
 	// Admin: gated exclusively by the ExposeAdmin boolean — a Ports entry is
 	// deliberately never consulted (see the method comment).

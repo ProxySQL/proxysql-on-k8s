@@ -623,8 +623,9 @@ type ProxySQLClusterStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// ClusterEndpoints lists in-cluster DNS endpoints (host:port) per surface.
-// A field is empty when that surface is disabled.
+// ClusterEndpoints lists in-cluster DNS endpoints (host:port) per surface,
+// plus the out-of-cluster External entry point. A field is empty when that
+// surface is disabled.
 type ClusterEndpoints struct {
 	// +optional
 	MySQL string `json:"mysql,omitempty"`
@@ -636,6 +637,16 @@ type ClusterEndpoints struct {
 	Web string `json:"web,omitempty"`
 	// +optional
 	Metrics string `json:"metrics,omitempty"`
+
+	// External is the out-of-cluster entry point of the "<cluster>-external"
+	// Service; empty unless spec.service.external is enabled. For type
+	// LoadBalancer it is "host:port" — the first ingress IP (or hostname)
+	// plus the Service's first port — and stays empty until the cloud
+	// provider provisions the load balancer. For type NodePort it is the
+	// comma-separated list of allocated node ports in the Service's port
+	// order (host-less: every node IP serves them).
+	// +optional
+	External string `json:"external,omitempty"`
 }
 
 // Phase values for ProxySQLClusterStatus.Phase.

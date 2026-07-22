@@ -144,6 +144,12 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.ensureService(ctx, &cluster, b.HeadlessService()); err != nil {
 		return ctrl.Result{}, err
 	}
+	// The curated external Service (nil when spec.service.external is absent
+	// or disabled — then any previously created one is deleted). Deliberately
+	// NOT gated on spec.pause: pause semantics retain Services.
+	if err := r.ensureExternalService(ctx, &cluster, b.ExternalService()); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Capture the StatefulSet's current annotations BEFORE ensureStatefulSet
 	// overwrites them: resolveRestartChecksum needs the pod-template
@@ -397,6 +403,76 @@ func (r *ProxySQLClusterReconciler) ensureService(ctx context.Context, owner *pr
 	return err
 }
 
+// ensureExternalService creates or updates the curated "<cluster>-external"
+// Service, or — when desired is nil (spec.service.external absent or
+// disabled) — deletes a previously created one (NotFound is success; only an
+// operator-owned Service is touched). The apply path mirrors ensureService,
+// including its annotation preserve-foreign-keys merge, and additionally
+// preserves apiserver-allocated values the builder leaves unset (node ports,
+// healthCheckNodePort) so reconciles don't churn allocations.
+func (r *ProxySQLClusterReconciler) ensureExternalService(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *corev1.Service) error {
+	if desired == nil {
+		name := builders.New(owner, r.Scheme, builders.Passwords{}).ExternalName()
+		existing := &corev1.Service{}
+		err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: owner.Namespace}, existing)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !metav1.IsControlledBy(existing, owner) {
+			return nil
+		}
+		return client.IgnoreNotFound(r.Delete(ctx, existing))
+	}
+
+	existing := &corev1.Service{}
+	existing.Name = desired.Name
+	existing.Namespace = desired.Namespace
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		existing.Labels = desired.Labels
+		// Annotations MERGE, same semantics as ensureService: spec keys win,
+		// annotations written by cloud LB controllers are preserved, and a
+		// key removed from the spec lingers until removed by hand.
+		if len(desired.Annotations) > 0 && existing.Annotations == nil {
+			existing.Annotations = map[string]string{}
+		}
+		maps.Copy(existing.Annotations, desired.Annotations)
+		// Preserve immutable/allocated fields: ClusterIP(s) (immutable), the
+		// node port per port name and the healthCheckNodePort (allocated by
+		// the apiserver; re-sending 0 every reconcile would churn them).
+		clusterIP := existing.Spec.ClusterIP
+		clusterIPs := existing.Spec.ClusterIPs
+		allocatedNodePort := make(map[string]int32, len(existing.Spec.Ports))
+		for _, p := range existing.Spec.Ports {
+			allocatedNodePort[p.Name] = p.NodePort
+		}
+		hcNodePort := existing.Spec.HealthCheckNodePort
+		existing.Spec = desired.Spec
+		if clusterIP != "" && existing.Spec.ClusterIP == "" {
+			existing.Spec.ClusterIP = clusterIP
+		}
+		if len(clusterIPs) > 0 && len(existing.Spec.ClusterIPs) == 0 {
+			existing.Spec.ClusterIPs = clusterIPs
+		}
+		for i := range existing.Spec.Ports {
+			if existing.Spec.Ports[i].NodePort == 0 {
+				existing.Spec.Ports[i].NodePort = allocatedNodePort[existing.Spec.Ports[i].Name]
+			}
+		}
+		// Only meaningful (and only allocated) for LoadBalancer +
+		// externalTrafficPolicy Local; anywhere else the builder's 0 stands.
+		if existing.Spec.Type == corev1.ServiceTypeLoadBalancer &&
+			existing.Spec.ExternalTrafficPolicy == corev1.ServiceExternalTrafficPolicyLocal &&
+			existing.Spec.HealthCheckNodePort == 0 {
+			existing.Spec.HealthCheckNodePort = hcNodePort
+		}
+		return controllerutil.SetControllerReference(owner, existing, r.Scheme)
+	})
+	return err
+}
+
 // handleRuntimeApplyError recovers from a resolveRestartChecksum failure
 // (runtime SQL push to a replica failed) without wedging StatefulSet
 // updates: the StatefulSet is still ensured, carrying the PRE-reconcile
@@ -573,6 +649,11 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	cluster.Status.UpdatedReplicas = ss.Status.UpdatedReplicas
 	cluster.Status.AdminSecretName = b.SecretName()
 	cluster.Status.Endpoints = b.Endpoints()
+	ext, err := r.externalEndpoint(ctx, b)
+	if err != nil {
+		return err
+	}
+	cluster.Status.Endpoints.External = ext
 	cluster.Status.Phase = derivePhase(&ss, notFound, desired, b.Spec.Pause)
 
 	if b.Spec.Pause {
@@ -617,6 +698,55 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
 
 	return r.Status().Update(ctx, cluster)
+}
+
+// externalEndpoint projects the LIVE "<cluster>-external" Service onto the
+// status.endpoints.external string (unlike the rest of ClusterEndpoints,
+// which is a pure spec projection, the external entry depends on
+// apiserver/cloud-provider allocations). Formats — documented on the API
+// field:
+//   - LoadBalancer: "host:port" from the first ingress IP (or hostname) and
+//     the Service's first port; "" until the LB is provisioned.
+//   - NodePort: comma-separated allocated node ports in port order.
+//
+// Empty when the external Service is disabled or not created yet.
+func (r *ProxySQLClusterReconciler) externalEndpoint(ctx context.Context, b *builders.Builder) (string, error) {
+	ext := b.Spec.Service.External
+	if ext == nil || !ext.Enabled {
+		return "", nil
+	}
+	var svc corev1.Service
+	err := r.Get(ctx, types.NamespacedName{Name: b.ExternalName(), Namespace: b.Namespace()}, &svc)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get external service: %w", err)
+	}
+
+	switch svc.Spec.Type {
+	case corev1.ServiceTypeLoadBalancer:
+		if len(svc.Status.LoadBalancer.Ingress) == 0 || len(svc.Spec.Ports) == 0 {
+			return "", nil // not provisioned yet
+		}
+		host := svc.Status.LoadBalancer.Ingress[0].IP
+		if host == "" {
+			host = svc.Status.LoadBalancer.Ingress[0].Hostname
+		}
+		if host == "" {
+			return "", nil
+		}
+		return fmt.Sprintf("%s:%d", host, svc.Spec.Ports[0].Port), nil
+	case corev1.ServiceTypeNodePort:
+		parts := make([]string, 0, len(svc.Spec.Ports))
+		for _, p := range svc.Spec.Ports {
+			if p.NodePort != 0 {
+				parts = append(parts, fmt.Sprintf("%d", p.NodePort))
+			}
+		}
+		return strings.Join(parts, ","), nil
+	}
+	return "", nil
 }
 
 // updatePausedStatus is updateStatus's branch for spec.pause=true: it skips
