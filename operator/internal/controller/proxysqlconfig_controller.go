@@ -398,19 +398,43 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 	}
 	if len(cfg.Spec.ProxySQLServers) == 0 {
 		// Auto-populate the peer table (documented CRD behavior, #39).
-		// ProxySQLServerDNS returns the same stable per-pod DNS names the
-		// bootstrap cnf seeds, and returns nil when the defaulted replica
-		// count is <= 1 — there an empty peer table (DELETE) is correct.
-		for _, host := range b.ProxySQLServerDNS() {
-			d.ProxySQLServers = append(d.ProxySQLServers, proxysqlclient.ProxySQLServer{
-				Hostname: host,
-				Port:     b.Spec.Protocols.Admin.Port,
-				Weight:   0,
-				Comment:  autoPopulatedPeerComment,
-			})
-		}
+		d.ProxySQLServers = autoPopulatedProxySQLServers(b)
 	}
 	return d, nil
+}
+
+// autoPopulatedProxySQLServers derives the proxysql_servers peer rows the
+// operator manages on the target cluster's behalf: the stable per-pod DNS
+// names for the StatefulSet (the same names the bootstrap cnf seeds), or nil
+// when the defaulted replica count is <= 1 (Builder.ProxySQLServerDNS).
+// Shared by buildDesired (normal sync path) and cleanupDesired (deletion
+// finalizer, #42) so the derivation isn't duplicated.
+func autoPopulatedProxySQLServers(b *builders.Builder) []proxysqlclient.ProxySQLServer {
+	var out []proxysqlclient.ProxySQLServer
+	for _, host := range b.ProxySQLServerDNS() {
+		out = append(out, proxysqlclient.ProxySQLServer{
+			Hostname: host,
+			Port:     b.Spec.Protocols.Admin.Port,
+			Weight:   0,
+			Comment:  autoPopulatedPeerComment,
+		})
+	}
+	return out
+}
+
+// cleanupDesired returns the Desired pushed when a ProxySQLConfig is deleted.
+// Every managed table is cleared (DELETE via LOAD/SAVE) except
+// proxysql_servers, which keeps the operator's auto-populated peer list
+// (same derivation as buildDesired's auto-populate branch) when the
+// still-existing target cluster runs more than one replica.
+//
+// Without this, deleting a ProxySQLConfig pushed a fully empty Desired,
+// which DELETEd proxysql_servers even though the referenced cluster (and its
+// need to peer via ProxySQL Cluster) still exists — the peer list only came
+// back after a pod restart re-read the cnf, or via a peer's cluster-sync
+// (#42).
+func cleanupDesired(b *builders.Builder) *proxysqlclient.Desired {
+	return &proxysqlclient.Desired{ProxySQLServers: autoPopulatedProxySQLServers(b)}
 }
 
 // resolveSecretKey reads ns/sel.Name and returns the value at sel.Key, or
@@ -540,10 +564,13 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
 
-	// An empty Desired DELETEs every managed table and LOAD/SAVEs each
-	// section. Variables are left as-is: ProxySQL has no "unset", and
-	// resetting values blind would be worse than leaving them.
-	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword, &proxysqlclient.Desired{})
+	// cleanupDesired DELETEs every managed table and LOAD/SAVEs each section,
+	// except it preserves proxysql_servers' auto-populated peer list when the
+	// cluster still has more than one replica (#42) — the cluster still
+	// exists and still needs its peers to sync. Variables are left as-is:
+	// ProxySQL has no "unset", and resetting values blind would be worse than
+	// leaving them.
+	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword, cleanupDesired(b))
 	if cleaned != len(addrs) {
 		log.Info("cleanup incomplete; retrying", "cleaned", cleaned, "total", len(addrs), "errors", joinErrs(errs))
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
