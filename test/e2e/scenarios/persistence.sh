@@ -139,7 +139,10 @@ YAML
     sleep 2
   done
   [[ "$phase" == "Paused" ]] || { fail "cluster did not reach phase=Paused (last seen '$phase')"; dump_ns "$ns"; return 1; }
-  kubectl -n "$ns" get pod pxc-0 >/dev/null 2>&1 && { fail "pod pxc-0 still exists after pause"; dump_ns "$ns"; return 1; }
+  # phase=Paused fires on readyReplicas==0, which can precede the pod object's
+  # deletion (Terminating grace) — wait for deletion instead of asserting
+  # instant absence.
+  kubectl -n "$ns" wait --for=delete pod/pxc-0 --timeout=60s >/dev/null 2>&1 || { fail "pod pxc-0 not deleted after pause"; dump_ns "$ns"; return 1; }
   kubectl -n "$ns" get pvc data-pxc-0 >/dev/null 2>&1 || { fail "PVC data-pxc-0 was deleted by pause (must be retained)"; dump_ns "$ns"; return 1; }
   log "persistence: pause scaled to 0 (phase=Paused), PVC data-pxc-0 retained"
 
