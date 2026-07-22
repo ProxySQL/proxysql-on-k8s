@@ -2433,6 +2433,110 @@ spec:
                       A key removed from this map lingers on the Service until removed by
                       hand (the operator cannot tell a removed spec key from a foreign one).
                     type: object
+                  external:
+                    description: |-
+                      External creates a second, curated Service "<cluster>-external" for
+                      out-of-cluster clients. Disabled (or absent) removes it.
+                    properties:
+                      allocateLoadBalancerNodePorts:
+                        default: true
+                        description: |-
+                          AllocateLoadBalancerNodePorts defaults to true; *bool so explicit
+                          false survives marshalling (repo convention).
+                        type: boolean
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      enabled:
+                        type: boolean
+                      exposeAdmin:
+                        description: |-
+                          ExposeAdmin adds the admin port (6032). The ProxySQL admin interface
+                          on a network edge is a serious risk; keep this false unless you have
+                          source-range and NetworkPolicy controls in place.
+                        type: boolean
+                      externalTrafficPolicy:
+                        description: |-
+                          ServiceExternalTrafficPolicy describes how nodes distribute service traffic they
+                          receive on one of the Service's "externally-facing" addresses (NodePorts, ExternalIPs,
+                          and LoadBalancer IPs.
+                        enum:
+                        - Cluster
+                        - Local
+                        type: string
+                      healthCheckNodePort:
+                        description: |-
+                          HealthCheckNodePort is only meaningful with externalTrafficPolicy:
+                          Local. 0 lets the API server allocate.
+                        format: int32
+                        maximum: 32767
+                        minimum: 0
+                        type: integer
+                      internalTrafficPolicy:
+                        description: |-
+                          InternalTrafficPolicy controls routing of traffic arriving via the
+                          Service's cluster-internal IP (ClusterIP/node-local vs cluster-wide
+                          endpoints). Independent of ExternalTrafficPolicy, which governs
+                          traffic arriving via the external (NodePort/LoadBalancer) address.
+                        enum:
+                        - Cluster
+                        - Local
+                        type: string
+                      ipFamilies:
+                        items:
+                          description: |-
+                            IPFamily represents the IP Family (IPv4 or IPv6). This type is used
+                            to express the family of an IP expressed by a type (e.g. service.spec.ipFamilies).
+                          type: string
+                        type: array
+                      ipFamilyPolicy:
+                        description: IPFamilyPolicy represents the dual-stack-ness
+                          requested or required by a Service
+                        enum:
+                        - SingleStack
+                        - PreferDualStack
+                        - RequireDualStack
+                        type: string
+                      loadBalancerClass:
+                        type: string
+                      loadBalancerSourceRanges:
+                        items:
+                          type: string
+                        type: array
+                      ports:
+                        additionalProperties:
+                          description: ExternalPortSpec tunes a single port riding
+                            the external Service.
+                          properties:
+                            nodePort:
+                              description: NodePort pins the node port (30000-32767);
+                                0 = auto-allocate.
+                              format: int32
+                              maximum: 32767
+                              type: integer
+                              x-kubernetes-validations:
+                              - message: nodePort must be 0 (auto) or in 30000-32767
+                                rule: self == 0 || self >= 30000
+                          type: object
+                        description: |-
+                          Ports selects which listeners ride the external Service. Empty map =
+                          default set: mysql + pgsql (each only if its protocol is enabled).
+                          Valid keys: mysql, pgsql, web, metrics. Admin is deliberately NOT a
+                          valid key — see ExposeAdmin.
+                        type: object
+                        x-kubernetes-validations:
+                        - message: 'valid port keys: mysql, pgsql, web, metrics'
+                          rule: self.all(k, k in ['mysql','pgsql','web','metrics'])
+                      type:
+                        default: LoadBalancer
+                        description: Service Type string describes ingress methods
+                          for a service
+                        enum:
+                        - NodePort
+                        - LoadBalancer
+                        type: string
+                    type: object
                   sessionAffinityTimeoutSeconds:
                     description: |-
                       SessionAffinityTimeoutSeconds enables ClientIP session affinity with
@@ -2441,6 +2545,17 @@ spec:
                     maximum: 86400
                     minimum: 1
                     type: integer
+                  type:
+                    default: ClusterIP
+                    description: |-
+                      Type sets the client-facing Service's type. All enabled ports ride
+                      this Service, including admin — for a curated external entry point
+                      use External instead.
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
                 type: object
               tolerations:
                 description: Tolerations for pod scheduling.
