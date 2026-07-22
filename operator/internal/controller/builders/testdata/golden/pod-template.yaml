@@ -1,0 +1,77 @@
+metadata:
+  annotations:
+    proxysql.com/cnf-checksum: f00c5de3328e2fe56e56728c4960916f4a400d3a6b447ada309be600fb8f1103
+  labels:
+    app.kubernetes.io/instance: golden
+    app.kubernetes.io/name: proxysql
+    proxysql.com/cluster: golden
+spec:
+  containers:
+  - args:
+    - -f
+    - -c
+    - /etc/proxysql/proxysql.cnf
+    - -D
+    - /var/lib/proxysql
+    - --reload
+    command:
+    - proxysql
+    image: proxysql/proxysql:3.0
+    imagePullPolicy: IfNotPresent
+    livenessProbe:
+      failureThreshold: 3
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      tcpSocket:
+        port: admin
+    name: proxysql
+    ports:
+    - containerPort: 6032
+      name: admin
+      protocol: TCP
+    - containerPort: 6033
+      name: mysql
+      protocol: TCP
+    - containerPort: 6133
+      name: pgsql
+      protocol: TCP
+    - containerPort: 6070
+      name: metrics
+      protocol: TCP
+    - containerPort: 6080
+      name: web
+      protocol: TCP
+    readinessProbe:
+      failureThreshold: 3
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      tcpSocket:
+        port: admin
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+    volumeMounts:
+    - mountPath: /etc/proxysql
+      name: config
+      readOnly: true
+    - mountPath: /var/lib/proxysql
+      name: data
+  securityContext:
+    fsGroup: 999
+    runAsGroup: 999
+    runAsNonRoot: true
+    runAsUser: 999
+    seccompProfile:
+      type: RuntimeDefault
+  terminationGracePeriodSeconds: 30
+  volumes:
+  - name: config
+    secret:
+      items:
+      - key: proxysql.cnf
+        path: proxysql.cnf
+      secretName: golden-cnf

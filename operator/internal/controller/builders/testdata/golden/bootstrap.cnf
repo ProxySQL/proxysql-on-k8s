@@ -1,0 +1,50 @@
+# Operator-managed bootstrap config for ProxySQLCluster golden.
+# Backends, users, query rules, and runtime tuning are pushed via ProxySQLConfig.
+datadir="/var/lib/proxysql"
+
+admin_variables=
+{
+  admin_credentials="admin:golden-admin-pw;radmin:golden-radmin-pw"
+  mysql_ifaces="0.0.0.0:6032"
+  cluster_username="radmin"
+  cluster_password="golden-radmin-pw"
+  cluster_check_interval_ms="300"
+  cluster_check_status_frequency="100"
+  cluster_mysql_query_rules_diffs_before_sync="3"
+  cluster_mysql_query_rules_save_to_disk="true"
+  cluster_mysql_servers_diffs_before_sync="3"
+  cluster_mysql_servers_save_to_disk="true"
+  cluster_mysql_users_diffs_before_sync="3"
+  cluster_mysql_users_save_to_disk="true"
+  cluster_proxysql_servers_diffs_before_sync="3"
+  cluster_proxysql_servers_save_to_disk="true"
+  restapi_enabled="true"
+  restapi_port="6070"
+  web_enabled="true"
+  web_port="6080"
+}
+
+mysql_variables=
+{
+  interfaces="0.0.0.0:6033"
+  monitor_username="monitor"
+  monitor_password="golden-monitor-pw"
+  max_connections="1000"
+  threads="4"
+}
+
+pgsql_variables=
+{
+  interfaces="0.0.0.0:6133"
+  monitor_username="monitor"
+  monitor_password="golden-monitor-pw"
+  max_connections="500"
+  threads="4"
+}
+
+proxysql_servers=
+(
+  { hostname="golden-0.golden-headless.golden-ns.svc", port=6032, weight=0, comment="" },
+  { hostname="golden-1.golden-headless.golden-ns.svc", port=6032, weight=0, comment="" },
+  { hostname="golden-2.golden-headless.golden-ns.svc", port=6032, weight=0, comment="" }
+)

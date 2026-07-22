@@ -115,6 +115,11 @@ operator upgrade — the operator is a control plane, not a data path.
 Pods only roll if a new operator version changes the generated pod
 template or bootstrap config (the cnf checksum annotation triggers the
 rolling restart; see [Managing clusters](./clusters.md#rolling-updates)).
+Any such change for an otherwise-unchanged `ProxySQLCluster` spec is
+covered by the project's upgrade-stability policy and is called out in
+that release's notes: an intentional pod-template change ships with an
+explicit note naming the one-time restart, and anything unannounced is a
+bug worth reporting.
 
 ### Upgrading to v0.5.0+: one rolling restart, `--reload` boot semantics
 
