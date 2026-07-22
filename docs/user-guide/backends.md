@@ -166,8 +166,11 @@ not drifted. What *is* drift: a listed server missing from every
 hostgroup of its pair, or an unknown server appearing in one — both
 trigger a re-push. Hostgroups not covered by any pair keep exact
 placement enforcement (without a pair, nothing may legitimately move a
-server), and `pgsqlServers` are always exact — there is no PostgreSQL
-replication-hostgroup concept here.
+server), and `pgsqlServers` are always exact — this operator exposes no
+PostgreSQL replication-hostgroup field. If you configure pgsql
+replication hostgroups out-of-band via `sqlStatements`, pgsql drift
+detection will fight the monitor's placement moves exactly as described
+in [#34](https://github.com/ProxySQL/proxysql-on-k8s/issues/34) — don't.
 
 One transient to know about: when a re-push *does* happen on a config
 with replication hostgroups — a spec change, or healing real drift — the
