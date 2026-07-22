@@ -2,8 +2,8 @@ apiVersion: v2
 name: proxysql-operator
 description: Operator that reconciles ProxySQLCluster and ProxySQLConfig CRDs (proxysql.com/v1alpha1)
 type: application
-version: 0.3.0
-appVersion: "0.3.0"
+version: 0.4.0
+appVersion: "0.4.0"
 kubeVersion: ">=1.29.0-0"
 keywords:
   - proxysql
