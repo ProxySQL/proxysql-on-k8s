@@ -204,6 +204,15 @@ variable.
   updated cnf over it via `--reload` (removed keys excepted — see the
   persistence note above). If in doubt once replicas are Ready, verify on
   the admin port or re-touch the value under `spec.variables`.
+- **An in-place container restart racing Secret propagation.** Kubelet
+  syncs Secret volumes with a small lag (typically under a minute). If the
+  proxysql container crashes and restarts in place inside that window —
+  after a runtime apply succeeded but before the updated cnf reached the
+  pod's mount — `--reload` re-applies the *old* cnf value over the newer
+  one saved in `proxysql.db`, and the operator's markers consider the
+  change applied. The divergence is silent until the next `spec.variables`
+  change or restart. If a value looks stale after a crash that closely
+  followed an edit, re-touch it under `spec.variables`.
 - **A Not-Ready replica at push time.** The runtime push only dials
   **Ready** pods. A replica that's transiently Not-Ready (not restarting,
   just failing readiness) at the moment of the push can miss that

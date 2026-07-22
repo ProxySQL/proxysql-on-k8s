@@ -118,4 +118,24 @@ YAML
     "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_connections'")"
   [[ "$out" == "601" ]] || { fail "after added-key rollout mysql-max_connections='$out', want 601"; dump_ns "$ns"; return 1; }
   log "persistence: new cnf key merged over existing proxysql.db (33554432), existing value intact (601)"
+
+  # --- removal caveat: a key removed from the cnf keeps its db value ---
+  # --reload never deletes db-only entries (INSERT OR REPLACE, no DELETE),
+  # so removing a spec.variables key rolls the pod (structural: line gone)
+  # but the runtime value survives from proxysql.db. Pin that documented
+  # caveat so an upstream behavior change is caught here.
+  annot0="$annot_now"
+  kubectl -n "$ns" patch proxysqlcluster pxc --type=json \
+    -p='[{"op":"remove","path":"/spec/variables/mysql/mysql-max_allowed_packet"}]' >/dev/null
+  for _ in $(seq 1 30); do
+    annot_now="$(kubectl -n "$ns" get pod pxc-0 -o jsonpath='{.metadata.annotations.proxysql\.com/cnf-checksum}' 2>/dev/null)"
+    [[ -n "$annot_now" && "$annot_now" != "$annot0" ]] && break
+    sleep 2
+  done
+  [[ "$annot_now" != "$annot0" ]] || { fail "removed key did not roll the pod"; dump_ns "$ns"; return 1; }
+  _persistence_wait_pod_ready "$ns" pxc-0 || { dump_ns "$ns"; return 1; }
+  out="$(admin_query "$ns" pxc "$radmin" \
+    "SELECT variable_value FROM runtime_global_variables WHERE variable_name='mysql-max_allowed_packet'")"
+  [[ "$out" == "33554432" ]] || { fail "removed key expected to KEEP db value 33554432 (documented caveat), got '$out'"; dump_ns "$ns"; return 1; }
+  log "persistence: removed key kept its proxysql.db value (documented removal caveat pinned)"
 }
