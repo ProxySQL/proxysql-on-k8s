@@ -83,50 +83,58 @@ func mainServiceType(spec proxysqlv1alpha1.ProxySQLClusterSpec) corev1.ServiceTy
 	return spec.Service.Type
 }
 
+// servicePort constructs a single named ServicePort. The single source of
+// truth for the name/port/targetPort literals shared by the regular,
+// headless, and external Services — a port change here changes all of them.
+func servicePort(name string, port int32) corev1.ServicePort {
+	return corev1.ServicePort{
+		Name:       name,
+		Port:       port,
+		TargetPort: intstr.FromString(name),
+		Protocol:   corev1.ProtocolTCP,
+	}
+}
+
+// Per-listener ServicePort constructors, keyed off the defaulted spec.
+func (b *Builder) mysqlServicePort() corev1.ServicePort {
+	return servicePort("mysql", b.Spec.Protocols.MySQL.Port)
+}
+
+func (b *Builder) pgsqlServicePort() corev1.ServicePort {
+	return servicePort("pgsql", b.Spec.Protocols.PostgreSQL.Port)
+}
+
+func (b *Builder) adminServicePort() corev1.ServicePort {
+	return servicePort("admin", b.Spec.Protocols.Admin.Port)
+}
+
+func (b *Builder) metricsServicePort() corev1.ServicePort {
+	return servicePort("metrics", b.Spec.Metrics.Port)
+}
+
+func (b *Builder) webServicePort() corev1.ServicePort {
+	return servicePort("web", b.Spec.Protocols.Web.Port)
+}
+
 // servicePorts returns the port list for either the regular or headless
 // Service. Headless never exposes metrics or web.
 func (b *Builder) servicePorts(headless bool) []corev1.ServicePort {
 	var ports []corev1.ServicePort
 
 	if b.Spec.Protocols.MySQL.IsEnabled() {
-		ports = append(ports, corev1.ServicePort{
-			Name:       "mysql",
-			Port:       b.Spec.Protocols.MySQL.Port,
-			TargetPort: intstr.FromString("mysql"),
-			Protocol:   corev1.ProtocolTCP,
-		})
+		ports = append(ports, b.mysqlServicePort())
 	}
 	if b.Spec.Protocols.PostgreSQL.IsEnabled() {
-		ports = append(ports, corev1.ServicePort{
-			Name:       "pgsql",
-			Port:       b.Spec.Protocols.PostgreSQL.Port,
-			TargetPort: intstr.FromString("pgsql"),
-			Protocol:   corev1.ProtocolTCP,
-		})
+		ports = append(ports, b.pgsqlServicePort())
 	}
 	// Admin is always exposed (cluster-internal); the operator and ProxySQLConfig
 	// reconciler need it.
-	ports = append(ports, corev1.ServicePort{
-		Name:       "admin",
-		Port:       b.Spec.Protocols.Admin.Port,
-		TargetPort: intstr.FromString("admin"),
-		Protocol:   corev1.ProtocolTCP,
-	})
+	ports = append(ports, b.adminServicePort())
 	if !headless && isTrue(b.Spec.Metrics.Enabled) {
-		ports = append(ports, corev1.ServicePort{
-			Name:       "metrics",
-			Port:       b.Spec.Metrics.Port,
-			TargetPort: intstr.FromString("metrics"),
-			Protocol:   corev1.ProtocolTCP,
-		})
+		ports = append(ports, b.metricsServicePort())
 	}
 	if !headless && b.Spec.Protocols.Web.IsEnabled() {
-		ports = append(ports, corev1.ServicePort{
-			Name:       "web",
-			Port:       b.Spec.Protocols.Web.Port,
-			TargetPort: intstr.FromString("web"),
-			Protocol:   corev1.ProtocolTCP,
-		})
+		ports = append(ports, b.webServicePort())
 	}
 	return ports
 }
