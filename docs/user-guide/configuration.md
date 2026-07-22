@@ -156,13 +156,13 @@ writes fail, *correctly*: no proxy layer should invent a primary. The
 full reasoning is in the
 [external-failover design](../superpowers/specs/2026-06-10-external-failover-design.md).
 
-Known caveat: the drift check currently keys servers by
-`hostgroup:hostname:port`, so after a monitor-driven move the runtime
-placement differs from your spec and the periodic resync re-pushes the
-spec's static placement; the monitor re-corrects it within ~1.5s. Hold
-this in mind when reading `status.driftedReplicas` on clusters using
-replication hostgroups. This also requires the **monitor user** to exist
-on the backends — see [Backends](./backends.md#the-monitor-user).
+The drift check respects those moves: within a replication-hostgroup
+pair it enforces membership only, so a monitor-driven writer/reader move
+never registers as drift and the resync leaves the runtime placement
+alone — details in
+[Backends](./backends.md#drift-detection-and-replication-hostgroups).
+This mechanism requires the **monitor user** to exist on the backends —
+see [Backends](./backends.md#the-monitor-user).
 
 ## Hostgroup attributes and variables
 
