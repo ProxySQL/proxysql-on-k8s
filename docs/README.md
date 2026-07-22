@@ -53,7 +53,7 @@ guide tells you *how*, the reference tells you *exactly what*.
 | [Clusters](user-guide/clusters.md) | Sizing, auth Secrets, persistence trade-offs, protocols, exposure, rolling updates. |
 | [Configuration](user-guide/configuration.md) | The write-to-all sync model, servers/users/rules, variables, drift, deletion semantics. |
 | [Security](user-guide/security.md) | Credential flow, auth schemas, RBAC, PSA `restricted`, network exposure surface. |
-| [Operations](user-guide/operations.md) | Reading status, troubleshooting table, logs, metrics, manual admin-port access. |
+| [Operations](user-guide/operations.md) | Reading status, troubleshooting table, logs, metrics, monitor-credential rotation runbook, manual admin-port access. |
 | [Backends](user-guide/backends.md) | Cookbooks per database operator, external backends, the monitor user, failover stance. |
 
 ## Reference
