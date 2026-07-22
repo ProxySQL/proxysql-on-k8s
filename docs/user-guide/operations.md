@@ -237,7 +237,7 @@ backends while leaving the other on the old password.
 
 ### MySQL: dual-password rotation
 
-MySQL 8.0.16+ lets the `monitor` account hold two valid passwords at once,
+MySQL 8.0.14+ lets the `monitor` account hold two valid passwords at once,
 so ProxySQL keeps authenticating with the old one for as long as it takes
 the new one to reach every replica — no window where the monitor is locked
 out.
