@@ -86,11 +86,28 @@ mode is not implemented. The ClusterRole grants:
 | core: configmaps | get, list, watch, **delete** only — garbage-collection of the legacy pre-v0.3.0 bootstrap-cnf ConfigMap; the operator no longer creates or updates ConfigMaps |
 | core: events | create, patch |
 
-Note: the chart grants the manager no `tokenreviews`/`subjectaccessreviews`
-permissions. With `metrics.secureServing` (which enables controller-runtime's
-authn/authz filter on the metrics endpoint), supply that RBAC separately if
-you intend to scrape the secured endpoint; scraping clients additionally need
-RBAC that passes the filter's authorization check.
+When `metrics.enabled` and `metrics.secureServing` are both true (the
+default), controller-runtime's `WithAuthenticationAndAuthorization` filter
+guards the metrics endpoint, and the chart renders the RBAC that requires:
+
+- The manager ClusterRole additionally gets `create` on
+  `tokenreviews` (`authentication.k8s.io`) and `subjectaccessreviews`
+  (`authorization.k8s.io`) — the manager needs these to validate the
+  bearer token and permissions of each scrape request.
+- A separate `<fullname>-metrics-reader` ClusterRole is rendered, granting
+  `get` on the `/metrics` nonResourceURL. The chart does **not** bind it to
+  anything, since it doesn't know which ServiceAccount does the scraping;
+  bind it yourself to the scraper's ServiceAccount, e.g.:
+
+  ```
+  kubectl create clusterrolebinding <release>-metrics-reader \
+    --clusterrole=<release>-proxysql-operator-metrics-reader \
+    --serviceaccount=<scraper-namespace>:<scraper-serviceaccount>
+  ```
+
+Neither is rendered when `metrics.enabled: false` or
+`metrics.secureServing: false` (nothing to authenticate/authorize against an
+HTTP-only or disabled endpoint).
 
 ## Flags rendered into the manager command
 
