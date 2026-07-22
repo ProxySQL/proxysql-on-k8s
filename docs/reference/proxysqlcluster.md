@@ -410,6 +410,10 @@ backends that are perfectly healthy. Prefer probing ProxySQL itself (the
 default behavior) and let ProxySQL's own backend health checks and query
 routing absorb backend failures instead of the kubelet.
 
+Changing `spec.probes` changes the pod template, so it triggers a normal
+StatefulSet rolling update — independent of the cnf runtime-vs-restart
+pipeline described below.
+
 ## Configuration changes: runtime vs restart
 
 Every change to `spec` that affects the bootstrap cnf goes through the same
