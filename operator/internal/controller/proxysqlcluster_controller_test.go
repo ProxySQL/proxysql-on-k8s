@@ -740,7 +740,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
 			summary := "RestartRequired: structural cnf change (fluent-bit.conf)"
-			Expect(reconciler.updateStatus(ctx, cluster, b, summary)).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, summary, nil)).To(Succeed())
 
 			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypeProgressing)
 			Expect(cond).NotTo(BeNil())
@@ -920,7 +920,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
-			Expect(reconciler.updateStatus(ctx, cluster, b, "")).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil)).To(Succeed())
 
 			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhaseStopping))
 			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypePaused)
@@ -933,7 +933,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			ss.Status.ReadyReplicas = 0
 			Expect(k8sClient.Status().Update(ctx, &ss)).To(Succeed())
 
-			Expect(reconciler.updateStatus(ctx, cluster, b, "")).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil)).To(Succeed())
 			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhasePaused))
 			cond = meta.FindStatusCondition(cluster.Status.Conditions, condTypePaused)
 			Expect(cond).NotTo(BeNil())
@@ -1088,6 +1088,58 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			var again corev1.Service
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &again)).To(Succeed())
 			Expect(again.Spec.Ports[0].NodePort).To(Equal(nodePort), "reconcile must not churn the allocated node port")
+		})
+
+		It("degrades with ExternalServiceError on a persistent apiserver rejection without wedging the StatefulSet, and clears once fixed", func() {
+			ctx := context.Background()
+			const name = "pxc-ext-degraded"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Service.External = &proxysqlv1alpha1.ExternalServiceSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var ext corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-external", Namespace: ns}, &ext)).To(Succeed())
+			Expect(ext.Spec.IPFamilies).To(ConsistOf(corev1.IPv4Protocol), "test premise: envtest apiserver is single-stack IPv4")
+
+			// Break the external Service persistently: mutating ipFamilies of
+			// an existing Service is rejected by the apiserver (the design
+			// spec's documented example). Ride a replicas change along in the
+			// SAME reconcile: it must not be wedged by the rejection.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.External.IPFamilies = []corev1.IPFamily{corev1.IPv6Protocol}
+			five := int32(5)
+			cluster.Spec.Replicas = &five
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+			req = reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).To(HaveOccurred(), "the apiserver rejection must still requeue the reconcile")
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(five),
+				"a replicas change must survive the external Service rejection (no wedged StatefulSet)")
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil(), "the rejection must surface as a Degraded condition")
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("ExternalServiceError"))
+			Expect(cond.Message).To(ContainSubstring("ipFamil"), "the message must carry the apiserver error")
+
+			// Clear path: fixing the spec must remove the condition on the
+			// next clean reconcile (the same updateStatus clearing that
+			// RuntimeApplyError relies on).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Service.External.IPFamilies = nil
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil(),
+				"the Degraded condition must clear once the external Service applies again")
 		})
 
 		It("reports the LoadBalancer ingress endpoint once provisioned, empty until then", func() {
