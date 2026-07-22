@@ -22,6 +22,7 @@ time they were written.
 | `Progressing` | `False` | `RuntimeApplied` | A `spec.variables` change was pushed to every ready replica over the admin port and read back successfully — restart-free. Message: `RuntimeApplied: <sorted variable names>`. Takes priority over `Steady` for the reconcile in which it fires; nothing is rolling out, but it's worth surfacing what just changed. See [ProxySQLCluster reference](proxysqlcluster.md#configuration-changes-runtime-vs-restart). |
 | `Degraded` | `True` | `AuthSecretError` | Auth-Secret resolution failed: external Secret missing, partial operator schema, schema mismatch, or invalid credential characters. The reconcile aborts (no resources are touched) and `phase` is set to `Degraded`. |
 | `Degraded` | `True` | `RuntimeApplyError` | The restart-free runtime variable push failed on some replica (dial/SQL/read-back error; the message names the failing replica address). The StatefulSet is still ensured with its previous annotations — pending template/replica changes are NOT blocked and no rollout is triggered — and the push is retried on requeue. Cleared by the next clean reconcile. |
+| `Degraded` | `True` | `ExternalServiceError` | The curated external Service (`<cluster>-external`, `spec.service.external`) failed to apply — a persistent apiserver rejection such as a pinned `nodePort` colliding with another Service, or mutating `ipFamilies` on an already-created Service (immutable — see [ProxySQLCluster reference](proxysqlcluster.md#external-service)). Message is the apiserver error. Does **not** wedge the rest of the reconcile: the StatefulSet, PodDisruptionBudget, and ServiceMonitor still apply the same pass, and the failure is retried on requeue. Set/cleared this way whether or not `spec.pause` is true — the external Service is retained and still reconciled while paused. |
 | `Paused` | `True` | `Paused` | `spec.pause: true` and `readyReplicas == 0` — the StatefulSet has fully scaled to 0. `Available`/`Progressing` are also set to `False/Paused` in this state instead of their usual "waiting for replicas" reasons. |
 | `Paused` | `False` | `Stopping` | `spec.pause: true` but `readyReplicas > 0` — still draining down to 0. `Available` goes `False`/`Stopping`; `Progressing` goes `True`/`Stopping`. |
 | `Paused` | `False` | `NotPaused` | `spec.pause: false` (or unset) — always set in this case so pollers can rely on the condition being present. |
@@ -33,7 +34,9 @@ Removal rules:
 
 - `Degraded` is **removed** on every successful status update (i.e. whenever
   auth resolution and resource ensure-steps succeed) — including while
-  paused: a paused cluster isn't in an error state.
+  paused: a paused cluster isn't in an error state. This also governs
+  `ExternalServiceError`: it is set or cleared fresh on every reconcile from
+  that reconcile's external-Service apply outcome alone, paused or not.
 - `ServiceMonitorReady` is **removed entirely** when the ServiceMonitor is
   not desired (`metrics.enabled: false` or
   `metrics.serviceMonitor.enabled: false`); any previously created,
