@@ -77,6 +77,26 @@ The operator pushes `ProxySQLConfig` SQL to every ready replica directly. ProxyS
 
 Every pod the operator/charts produce runs as: `runAsNonRoot=true`, uid/gid 999, `readOnlyRootFilesystem=true`, drop all caps, RuntimeDefault seccomp. If a change requires loosening any of these, find another way.
 
+### Trivy gates CI on new CVEs — bump, don't suppress
+
+The `operator / image build + trivy` job fails on any HIGH/CRITICAL fixable
+CVE in the built image, and its vulnerability DB updates continuously — so a
+freshly published advisory can turn CI red on a commit that changed nothing
+(it has: `golang.org/x/net` 2026-07-21, `grpc-go` 2026-07-22). The response
+is always a dependency bump, never a `.trivyignore`:
+
+```
+cd operator && GOTOOLCHAIN=go1.25.10 go get <module>@<fixed-version> && go mod tidy
+GOTOOLCHAIN=go1.25.10 go build ./... && GOTOOLCHAIN=go1.25.10 go test ./...
+```
+
+Land it on `main` via a minimal PR even when feature branches carry the same
+bump — identical `go.mod` changes merge cleanly, and an unpatched `main`
+fails Trivy on its next push. The runtime risk is usually nil (the operator
+runs no gRPC/HTTP servers beyond metrics + the admin-port MySQL client), but
+the gate is deliberate: keeping the image scanner-clean is part of the
+contract for people deploying it.
+
 ## Branch policy
 
 Default branch is `main`. The legacy v1 demo charts live in the separate repo [`ProxySQL/kubernetes`](https://github.com/ProxySQL/kubernetes); fixes back-ported there don't apply here.
