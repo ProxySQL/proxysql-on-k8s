@@ -59,13 +59,15 @@ YAML
   # the moved placement survives the resync and driftedReplicas stays 0.
   log "drift: moving 10.9.9.9 hg0->hg1 (simulated monitor demotion)"
   local t0 t1
-  t0="$(kubectl -n "$ns" get proxysqlconfig pxcfg -o jsonpath='{.status.lastRuntimeCheckTime}')"
   kubectl -n "$ns" run e2e-move --rm -i --restart=Never --image="$MYSQL_IMAGE" --command -- \
     mysql -h pxc -P6032 -uradmin -p"$radmin" \
     -e "UPDATE mysql_servers SET hostgroup_id=1 WHERE hostname='10.9.9.9'; LOAD MYSQL SERVERS TO RUNTIME;" >/dev/null 2>&1 || true
   out="$(admin_query "$ns" pxc "$radmin" "SELECT hostgroup_id FROM runtime_mysql_servers WHERE hostname='10.9.9.9'")"
   [[ "$out" == "1" ]] || { fail "simulated monitor move did not apply (hostgroup='$out')"; dump_ns "$ns"; return 1; }
-  # Wait for an informed resync to actually run (lastRuntimeCheckTime moves).
+  # Baseline AFTER the move is live in runtime, then wait for the NEXT
+  # informed resync (lastRuntimeCheckTime advance) — a resync that
+  # snapshotted pre-move state must not satisfy the assertions vacuously.
+  t0="$(kubectl -n "$ns" get proxysqlconfig pxcfg -o jsonpath='{.status.lastRuntimeCheckTime}')"
   for i in $(seq 1 20); do
     t1="$(kubectl -n "$ns" get proxysqlconfig pxcfg -o jsonpath='{.status.lastRuntimeCheckTime}')"
     [[ -n "$t1" && "$t1" != "$t0" ]] && break
@@ -74,8 +76,9 @@ YAML
   [[ -n "$t1" && "$t1" != "$t0" ]] || { fail "no informed resync ran after the simulated monitor move"; dump_ns "$ns"; return 1; }
   out="$(admin_query "$ns" pxc "$radmin" "SELECT hostgroup_id FROM runtime_mysql_servers WHERE hostname='10.9.9.9'")"
   [[ "$out" == "1" ]] || { fail "resync re-pushed spec placement over the monitor move (hostgroup='$out')"; dump_ns "$ns"; return 1; }
+  # driftedReplicas has omitempty and no CRD default: 0 serializes as "".
   out="$(kubectl -n "$ns" get proxysqlconfig pxcfg -o jsonpath='{.status.driftedReplicas}')"
-  [[ "$out" == "0" ]] || { fail "monitor move flagged as drift (driftedReplicas='$out')"; dump_ns "$ns"; return 1; }
+  [[ -z "$out" || "$out" == "0" ]] || { fail "monitor move flagged as drift (driftedReplicas='$out')"; dump_ns "$ns"; return 1; }
   log "drift: monitor-style move within the pair survived the resync (no drift)"
 
   # --- out-of-band drift heal ---

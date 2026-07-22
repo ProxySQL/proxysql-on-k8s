@@ -143,6 +143,31 @@ func TestDrift_MonitorMoveWithinPairIsNotDrift(t *testing.T) {
 	}
 }
 
+// The issue's headline failover: the spec's writer S demoted to the reader
+// hostgroup while replica T is promoted into the writer hostgroup — a full
+// placement swap within the pair. Membership is identical, so no drift; the
+// operator must not demote the just-promoted writer.
+func TestDrift_FailoverSwapWithinPairIsNotDrift(t *testing.T) {
+	d := &Desired{
+		MySQLServers: []MySQLServer{
+			{Hostgroup: 10, Hostname: "s", Port: 3306}, // spec: S is the writer
+			{Hostgroup: 20, Hostname: "t", Port: 3306}, // spec: T is a reader
+		},
+		MySQLReplicationHostgroups: []MySQLReplicationHostgroup{
+			{WriterHostgroup: 10, ReaderHostgroup: 20, CheckType: "read_only"},
+		},
+	}
+	rs := &RuntimeState{
+		MySQLServers: map[string]string{
+			"20:s:3306": "ONLINE", // S demoted by read_only=1
+			"10:t:3306": "ONLINE", // T promoted by read_only=0
+		},
+	}
+	if diffs := d.Drift(rs); len(diffs) != 0 {
+		t.Errorf("Drift = %v, want none (failover swapped placement within the pair)", diffs)
+	}
+}
+
 // writer_is_also_reader keeps the writer in BOTH hostgroups of the pair at
 // runtime. Two rows for one member must not read as an extra server.
 func TestDrift_WriterAlsoReaderIsNotDrift(t *testing.T) {
