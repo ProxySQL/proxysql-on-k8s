@@ -260,6 +260,47 @@ Variable semantics:
   cleanup leaves variables untouched).
 - Keys are applied in sorted order (deterministic logs/retries).
 
+### sqlStatements
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `sqlStatements` | `[]string` | none (omitted) | each entry min length 1 | Raw admin SQL, executed verbatim in list order. Each entry must be exactly one SQL statement — the admin connection does not enable multi-statements, so an entry like `"stmt1; stmt2"` fails at execution. |
+
+An escape hatch for anything the structured fields above don't model
+(cache flushes, admin commands, settings not yet exposed as CRD fields).
+Statements run on every ready replica **after** all structured config in
+this spec (servers, users, query rules, hostgroup attributes, variables,
+`proxysqlServers`) has been pushed for that sync pass.
+
+- **Verbatim, no implicit LOAD/SAVE.** The operator does not parse,
+  rewrite, or append anything — if a statement's effect needs
+  `LOAD ... TO RUNTIME` / `SAVE ... TO DISK` / `PROXYSQL FLUSH ...`,
+  include those statements explicitly.
+- **Desired-state, not one-shot.** Statements are re-executed on **every**
+  sync pass — full pushes, new/restarted replicas, and drift-triggered
+  resyncs — not just once when added. Write them so re-execution is a
+  no-op (see the
+  [user guide](../user-guide/configuration.md#raw-sql-statements-escape-hatch)).
+- **First failure aborts the remainder.** If a statement errors, the
+  replica's sync pass stops there; later statements in the list are not
+  run on that replica. This surfaces through the existing `PartialSync`
+  (`Ready=False`) / `Degraded=True/SyncErrors` conditions, same as any
+  other sync failure — no new status fields.
+- **Runs regardless of earlier section outcomes.** Each sync section is
+  independent, so `sqlStatements` is still attempted on a replica even if
+  an earlier structured section (servers, users, query rules, variables,
+  ...) failed on that same replica in the same pass. A statement must not
+  assume every structured section applied successfully in the same pass.
+- **Hash participation.** Statement text is part of `status.lastAppliedHash`
+  (via `spec.sqlStatements`), so editing the list re-triggers a sync like
+  any other field.
+- **Not drift-tracked.** Runtime read-back only covers the structured
+  tables; statement effects are invisible to `status.driftedReplicas` and
+  the informed-resync drift check.
+- **Not reversed on deletion.** The `proxysql.com/config-cleanup`
+  finalizer clears the structured tables it manages; it does not attempt
+  to undo `sqlStatements` effects, since they're opaque to the operator.
+
 ## Status
 
 | Field | Type | Description |
