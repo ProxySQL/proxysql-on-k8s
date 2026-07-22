@@ -1147,3 +1147,127 @@ func TestStatefulSet_CnfChecksumAnnotationIsReserved(t *testing.T) {
 		t.Fatalf("custom pod annotation = %q, want %q", got, "kept")
 	}
 }
+
+// defaultLivenessProbe and defaultReadinessProbe mirror the operator's
+// hardcoded probes in statefulset.go's container(). Tests compare against
+// these instead of duplicating the literals inline, but the values
+// themselves are pinned exactly to protect upgrade stability (issue #58) —
+// changing them here without also updating the TestGolden fixtures is a
+// deliberate, reviewed change, not a refactor.
+func defaultLivenessProbe() *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
+		},
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       10,
+		FailureThreshold:    3,
+	}
+}
+
+func defaultReadinessProbe() *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
+		},
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       5,
+		FailureThreshold:    3,
+	}
+}
+
+// TestBuilder_StatefulSet_Probes_DefaultUnchanged pins that an unset
+// spec.probes leaves the container's probes exactly as they were before
+// spec.probes existed: no startup probe, and the hardcoded TCP-on-admin
+// liveness/readiness probes. This is the upgrade-stability guarantee from
+// issue #55 — TestGolden also covers this for the full pod template.
+func TestBuilder_StatefulSet_Probes_DefaultUnchanged(t *testing.T) {
+	b := New(newCluster(clusterName), newScheme(t), Passwords{})
+	c := b.StatefulSet("checksum").Spec.Template.Spec.Containers[0]
+
+	if c.StartupProbe != nil {
+		t.Errorf("startupProbe should be nil by default, got %+v", c.StartupProbe)
+	}
+	if !reflect.DeepEqual(c.LivenessProbe, defaultLivenessProbe()) {
+		t.Errorf("livenessProbe = %+v, want %+v", c.LivenessProbe, defaultLivenessProbe())
+	}
+	if !reflect.DeepEqual(c.ReadinessProbe, defaultReadinessProbe()) {
+		t.Errorf("readinessProbe = %+v, want %+v", c.ReadinessProbe, defaultReadinessProbe())
+	}
+}
+
+// TestBuilder_StatefulSet_Probes_OverrideReplaces verifies that setting all
+// three spec.probes fields fully replaces the operator's default probes —
+// no per-field merging, the override wins verbatim.
+func TestBuilder_StatefulSet_Probes_OverrideReplaces(t *testing.T) {
+	startup := &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}},
+		PeriodSeconds:    2,
+		FailureThreshold: 30,
+	}
+	readiness := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(6070)},
+		},
+		InitialDelaySeconds: 1,
+		PeriodSeconds:       2,
+		FailureThreshold:    1,
+	}
+	liveness := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("mysql")},
+		},
+		InitialDelaySeconds: 42,
+		PeriodSeconds:       7,
+		FailureThreshold:    9,
+	}
+
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Probes.Startup = startup
+		c.Spec.Probes.Readiness = readiness
+		c.Spec.Probes.Liveness = liveness
+	})
+	b := New(c, newScheme(t), Passwords{})
+	container := b.StatefulSet("checksum").Spec.Template.Spec.Containers[0]
+
+	if !reflect.DeepEqual(container.StartupProbe, startup) {
+		t.Errorf("startupProbe = %+v, want %+v", container.StartupProbe, startup)
+	}
+	if !reflect.DeepEqual(container.ReadinessProbe, readiness) {
+		t.Errorf("readinessProbe = %+v, want %+v", container.ReadinessProbe, readiness)
+	}
+	if !reflect.DeepEqual(container.LivenessProbe, liveness) {
+		t.Errorf("livenessProbe = %+v, want %+v", container.LivenessProbe, liveness)
+	}
+}
+
+// TestBuilder_StatefulSet_Probes_PartialOverride_OnlyNamedProbeReplaced
+// verifies that overriding a single probe (readiness) leaves the other two
+// (startup, liveness) at their operator defaults — overrides apply per
+// probe field, not all-or-nothing across spec.probes.
+func TestBuilder_StatefulSet_Probes_PartialOverride_OnlyNamedProbeReplaced(t *testing.T) {
+	readiness := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
+		},
+		InitialDelaySeconds: 20,
+		PeriodSeconds:       15,
+		FailureThreshold:    5,
+	}
+
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Probes.Readiness = readiness
+	})
+	b := New(c, newScheme(t), Passwords{})
+	container := b.StatefulSet("checksum").Spec.Template.Spec.Containers[0]
+
+	if !reflect.DeepEqual(container.ReadinessProbe, readiness) {
+		t.Errorf("readinessProbe = %+v, want %+v", container.ReadinessProbe, readiness)
+	}
+	if container.StartupProbe != nil {
+		t.Errorf("startupProbe should stay at default (nil) when only readiness is overridden, got %+v", container.StartupProbe)
+	}
+	if !reflect.DeepEqual(container.LivenessProbe, defaultLivenessProbe()) {
+		t.Errorf("livenessProbe should stay at default when only readiness is overridden, got %+v", container.LivenessProbe)
+	}
+}
