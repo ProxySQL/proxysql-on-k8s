@@ -49,7 +49,7 @@ rules:
     verbs: [update]
   {{- if and .Values.metrics.enabled .Values.metrics.secureServing }}
   # controller-runtime's WithAuthenticationAndAuthorization filter (wired in
-  # cmd/main.go whenever --metrics-secure is set) authenticates and
+  # cmd/main.go whenever --metrics-secure=true) authenticates and
   # authorizes every request to the metrics endpoint by having the manager
   # itself create TokenReviews/SubjectAccessReviews against the API server.
   # Without this, the manager can't validate scraper credentials and every

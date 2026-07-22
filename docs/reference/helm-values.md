@@ -52,7 +52,7 @@ spec.metrics`).
 | Value | Default | Description |
 |---|---|---|
 | `metrics.enabled` | `true` | When false, drops the `--metrics-bind-address` flag (metrics fully disabled), the `metrics` container port, and the metrics Service. |
-| `metrics.secureServing` | `true` | Adds `--metrics-secure`: HTTPS with controller-runtime's authn/authz filter (self-signed cert unless one is provided via extraArgs `--metrics-cert-path`). |
+| `metrics.secureServing` | `true` | Rendered as the always-explicit `--metrics-secure=<true|false>` (the binary defaults to true, so the chart pins the value either way). `true`: HTTPS with controller-runtime's authn/authz filter (self-signed cert unless one is provided via extraArgs `--metrics-cert-path`). `false`: plain HTTP, no authn/authz filter. |
 | `metrics.port` | `8443` | Container port, wired into `--metrics-bind-address=:<port>`. |
 | `metrics.service.type` | `ClusterIP` | Type of the `<fullname>-metrics` Service. |
 | `metrics.service.port` | `8443` | Service port (targets the `metrics` container port). |
@@ -106,8 +106,9 @@ guards the metrics endpoint, and the chart renders the RBAC that requires:
   ```
 
 Neither is rendered when `metrics.enabled: false` or
-`metrics.secureServing: false` (nothing to authenticate/authorize against an
-HTTP-only or disabled endpoint).
+`metrics.secureServing: false` — in those cases the chart also passes
+`--metrics-secure=false` (or no metrics flags at all), so the manager runs
+without the authn/authz filter and no such RBAC is needed.
 
 ## Flags rendered into the manager command
 
@@ -118,7 +119,7 @@ For mapping values to behavior (`command: [/manager]`):
 --health-probe-bind-address=<health.bindAddress>
 --config-resync-interval=<configResyncInterval> # only when non-empty
 --metrics-bind-address=:<metrics.port>          # if metrics.enabled
---metrics-secure                                # if metrics.secureServing
+--metrics-secure=<metrics.secureServing>        # if metrics.enabled; always explicit
 <extraArgs...>
 ```
 

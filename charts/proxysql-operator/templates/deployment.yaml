@@ -46,9 +46,10 @@ spec:
             {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
-            {{- if .Values.metrics.secureServing }}
-            - --metrics-secure
-            {{- end }}
+            {{- /* Always explicit: the manager binary defaults --metrics-secure
+                 to true, so omitting the flag would leave the authn/authz
+                 filter on even with secureServing: false. */}}
+            - --metrics-secure={{ .Values.metrics.secureServing }}
             {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
