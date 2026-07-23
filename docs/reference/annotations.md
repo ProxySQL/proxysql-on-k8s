@@ -110,10 +110,12 @@ the window expires into the restart fallback. Not user-configurable.
 
 Like `cnf-checksum`, this key is **reserved**: the operator writes it after
 merging `spec.podAnnotations`, so a user-supplied entry with the same key
-is always overwritten. Absent whenever a rotation has completed
-restart-free (the common case) — its presence in `kubectl get sts <cluster>
--o yaml` is itself a signal that the last rotation needed the fallback
-path. See [TLS user guide — rotation](../user-guide/tls.md#rotation).
+is always overwritten. Absent until a rotation first needs the fallback
+(the common case) — and sticky after that: once written, the operator
+carries it forward through later restart-free rotations, because removing
+it would itself change the pod template and trigger a rollout. Its
+presence in `kubectl get sts <cluster> -o yaml` therefore means some past
+rotation needed the fallback path, not necessarily the most recent one. See [TLS user guide — rotation](../user-guide/tls.md#rotation).
 
 ## Standard label set
 

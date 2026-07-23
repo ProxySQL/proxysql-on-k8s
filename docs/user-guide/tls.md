@@ -293,8 +293,8 @@ or your own `secretName` on tier 1) — e.g.
 Note TLS here is **available, not mandatory**: `spec.tls` gives ProxySQL a
 certificate to present, but a plaintext connection still succeeds unless
 you separately require TLS per user (`mysqlUsers[].useSSL: true` on the
-`ProxySQLConfig`) or tighten `mysql-have_ssl`/`pgsql-have_ssl` via
-`spec.variables`.
+`ProxySQLConfig`) — that per-user flag is the only require-TLS enforcement
+the operator exposes.
 
 ## Non-goals (v1)
 

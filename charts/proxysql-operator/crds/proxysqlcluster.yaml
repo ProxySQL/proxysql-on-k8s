@@ -2647,7 +2647,7 @@ spec:
                   secretName:
                     description: |-
                       SecretName is a user-provided kubernetes.io/tls Secret (tls.crt,
-                      tls.key, optionally ca.crt) used as the frontend/admin serving
+                      tls.key, and ca.crt — all three required) used as the frontend/admin serving
                       certificate. Tier 1: wins over IssuerRef and the operator's
                       self-signed fallback whenever set. The operator never rotates or
                       re-issues a Secret referenced this way — that's the caller's job.
