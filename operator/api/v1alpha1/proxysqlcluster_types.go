@@ -379,8 +379,8 @@ type ExternalServiceSpec struct {
 	// HealthCheckNodePort is only meaningful with externalTrafficPolicy:
 	// Local. 0 lets the API server allocate.
 	// +optional
-	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=32767
+	// +kubebuilder:validation:XValidation:rule="self == 0 || self >= 30000",message="healthCheckNodePort must be 0 (auto) or in 30000-32767"
 	HealthCheckNodePort int32 `json:"healthCheckNodePort,omitempty"`
 
 	// +optional
@@ -388,6 +388,7 @@ type ExternalServiceSpec struct {
 	IPFamilyPolicy *corev1.IPFamilyPolicy `json:"ipFamilyPolicy,omitempty"`
 
 	// +optional
+	// +kubebuilder:validation:items:Enum=IPv4;IPv6
 	IPFamilies []corev1.IPFamily `json:"ipFamilies,omitempty"`
 
 	// Ports selects which listeners ride the external Service. Empty map =

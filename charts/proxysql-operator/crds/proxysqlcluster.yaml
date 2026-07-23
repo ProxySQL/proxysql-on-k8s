@@ -2471,8 +2471,10 @@ spec:
                           Local. 0 lets the API server allocate.
                         format: int32
                         maximum: 32767
-                        minimum: 0
                         type: integer
+                        x-kubernetes-validations:
+                        - message: healthCheckNodePort must be 0 (auto) or in 30000-32767
+                          rule: self == 0 || self >= 30000
                       internalTrafficPolicy:
                         description: |-
                           InternalTrafficPolicy controls routing of traffic arriving via the
@@ -2488,6 +2490,9 @@ spec:
                           description: |-
                             IPFamily represents the IP Family (IPv4 or IPv6). This type is used
                             to express the family of an IP expressed by a type (e.g. service.spec.ipFamilies).
+                          enum:
+                          - IPv4
+                          - IPv6
                           type: string
                         type: array
                       ipFamilyPolicy:
