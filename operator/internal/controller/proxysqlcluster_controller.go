@@ -18,10 +18,12 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -49,6 +51,20 @@ import (
 type ProxySQLClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// TLSRotationWindow bounds how long the TLS rotation engine retries
+	// RELOAD-and-verify across reconciles (absorbing kubelet Secret-mount
+	// propagation lag) before falling back to a rolling restart. Zero
+	// means the default (defaultTLSRotationWindow).
+	TLSRotationWindow time.Duration
+
+	// tlsVerifyRetryDelay spaces the quick in-pass verification retries
+	// after a RELOAD TLS (zero = defaultTLSVerifyRetryDelay); tlsProbe and
+	// tlsReload override the real handshake probe / RELOAD dial (nil = the
+	// real implementations). Test seams for the rotation engine.
+	tlsVerifyRetryDelay time.Duration
+	tlsProbe            func(ctx context.Context, addr, user, pass string, cfg *tls.Config) (string, error)
+	tlsReload           func(ctx context.Context, addr, user, pass string, cfg *tls.Config) error
 }
 
 // +kubebuilder:rbac:groups=proxysql.com,resources=proxysqlclusters,verbs=get;list;watch;create;update;patch;delete
@@ -57,9 +73,9 @@ type ProxySQLClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
-// pods: get;list;watch only — needed by resolveRestartChecksum's
-// discoverPodAddresses call to find ready replicas to push runtime variable
-// changes to.
+// pods: get;list;watch only — needed by resolveRestartChecksum's and
+// resolveTLSRotation's discoverPodEndpoints calls to find ready replicas to
+// push runtime variable changes / PROXYSQL RELOAD TLS to.
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // configmaps: get + delete only — needed to garbage-collect the legacy
 // bootstrap-cnf ConfigMap left behind by operator versions < v0.3.0. The
@@ -189,31 +205,63 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	extSvcErr := r.ensureExternalService(ctx, &cluster, b.ExternalService())
 
 	// Capture the StatefulSet's current annotations BEFORE ensureStatefulSet
-	// overwrites them: resolveRestartChecksum needs the pod-template
-	// proxysql.com/cnf-checksum (prev) plus the object-level
-	// proxysql.com/vars-applied-hash and proxysql.com/structural-applied-hash
-	// markers as they stood before this reconcile.
-	prev, appliedVars, structuralApplied, err := r.currentStatefulSetAnnotations(ctx, b)
+	// overwrites them: resolveRestartChecksum and resolveTLSRotation need
+	// every marker as it stood before this reconcile.
+	cur, err := r.currentStatefulSetAnnotations(ctx, b)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// TLS disable transition (probe-4): a persistent datadir keeps the cert
+	// symlinks after the Secret mount is gone, and proxysql exits at boot on
+	// the dangling names — keep rendering the cleanup init container for
+	// previously-wired clusters.
+	if err := r.resolveTLSCleanup(ctx, b); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// TLS rotation BEFORE the vars runtime push: rotation changes Secret
+	// content, not cnf text, so it is invisible to the checksum machinery by
+	// design — and until RELOAD TLS lands, pods may serve a certificate the
+	// routine dials below can't verify (tier-1 full-bundle swaps). Running
+	// the rotation engine first heals that before anything else dials. Its
+	// error is deferred (non-wedging, like extSvcErr/tlsErr): the outcome's
+	// marker values are committed either way, so an open rotation window
+	// survives operator restarts.
+	rot, rotErr := r.resolveTLSRotation(ctx, &cluster, b, tlsReady, cur, pw.Radmin)
+	b.TLSRestartValue = rot.restart
 
 	// Checksum over every cnf Secret key (proxysql.cnf + fluent-bit.conf when
 	// logging is enabled) so any config change rolls the pods.
 	newHash := builders.CnfChecksum(cnfSecret.Data)
 	annotation, appliedVarsHash, structuralAppliedHash, summary, err := r.resolveRestartChecksum(
-		ctx, &cluster, oldCnfData, cnfSecret.Data, prev, newHash, appliedVars, structuralApplied, pw.Radmin)
+		ctx, &cluster, oldCnfData, cnfSecret.Data, cur.cnfChecksum, newHash, cur.varsApplied, cur.structuralApplied, pw.Radmin)
 	if err != nil {
 		// Runtime SQL push failed partway through. Requeue without advancing
-		// either marker annotation (so the retry re-pushes the same
+		// the vars/structural markers (so the retry re-pushes the same
 		// variables), but do NOT skip the StatefulSet: it is re-ensured with
-		// the PRE-reconcile annotations so pending template/replica changes
-		// still apply, and a Degraded condition surfaces the failure.
-		return ctrl.Result{}, r.handleRuntimeApplyError(ctx, &cluster, b, prev, appliedVars, structuralApplied, err)
+		// the PRE-reconcile checksum annotations — plus THIS reconcile's TLS
+		// rotation outcome, which already committed its own dials — and a
+		// Degraded condition surfaces the failure. A concurrent rotation
+		// error rides along in the returned (requeueing) error.
+		markers := stsMarkers{
+			varsApplied:       cur.varsApplied,
+			structuralApplied: cur.structuralApplied,
+			tlsApplied:        rot.applied,
+			tlsRotationState:  rot.state,
+		}
+		return ctrl.Result{}, errors.Join(r.handleRuntimeApplyError(ctx, &cluster, b, cur.cnfChecksum, markers, err), rotErr)
 	}
-	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(annotation), appliedVarsHash, structuralAppliedHash); err != nil {
+	markers := stsMarkers{
+		varsApplied:       appliedVarsHash,
+		structuralApplied: structuralAppliedHash,
+		tlsApplied:        rot.applied,
+		tlsRotationState:  rot.state,
+	}
+	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(annotation), markers); err != nil {
 		return ctrl.Result{}, err
 	}
+	summary = mergeSummaries(summary, rot.summary)
 
 	if err := r.ensurePDB(ctx, &cluster, b.PodDisruptionBudget()); err != nil {
 		return ctrl.Result{}, err
@@ -225,12 +273,13 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	r.ensureServiceMonitor(ctx, &cluster, b.ServiceMonitor())
 
 	// 3) Status.
-	if err := r.updateStatus(ctx, &cluster, b, summary, extSvcErr, tlsErr); err != nil {
+	if err := r.updateStatus(ctx, &cluster, b, summary, extSvcErr, tlsErr, rotErr); err != nil {
 		return ctrl.Result{}, err
 	}
 	// Deferred external-Service/TLS failures requeue only after everything
-	// else applied and the Degraded condition landed in status.
-	return ctrl.Result{}, errors.Join(extSvcErr, tlsErr)
+	// else applied and the Degraded condition landed in status. rotErr's
+	// backoff paces the RELOAD-and-verify retries inside the rotation window.
+	return ctrl.Result{}, errors.Join(extSvcErr, tlsErr, rotErr)
 }
 
 // currentCnfData reads the cnf Secret's full data map as it stood before
@@ -249,23 +298,48 @@ func (r *ProxySQLClusterReconciler) currentCnfData(ctx context.Context, b *build
 	return sec.Data, nil
 }
 
-// currentStatefulSetAnnotations reads the StatefulSet's pod-template
-// proxysql.com/cnf-checksum (prev) and object-level
-// proxysql.com/vars-applied-hash (appliedVars) plus
-// proxysql.com/structural-applied-hash (structuralApplied) as they stood
-// before this reconcile. All are "" if the StatefulSet doesn't exist yet.
-func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Context, b *builders.Builder) (prev, appliedVars, structuralApplied string, err error) {
+// stsAnnotations is the StatefulSet's marker-annotation snapshot as it
+// stood BEFORE this reconcile: the pod-template cnf checksum and TLS
+// restart bump, plus the object-level applied-hash markers. Everything is
+// "" if the StatefulSet doesn't exist yet.
+type stsAnnotations struct {
+	cnfChecksum       string // pod-template proxysql.com/cnf-checksum
+	varsApplied       string // object proxysql.com/vars-applied-hash
+	structuralApplied string // object proxysql.com/structural-applied-hash
+	tlsApplied        string // object proxysql.com/tls-applied-hash
+	tlsRotationState  string // object proxysql.com/tls-rotation-state
+	tlsRestart        string // pod-template builders.TLSRestartAnnotation
+}
+
+// stsMarkers is what this reconcile decided the OBJECT-level marker
+// annotations should be; ensureStatefulSet commits them in the same write
+// as the template (the crash-safety commit point for every engine).
+type stsMarkers struct {
+	varsApplied       string
+	structuralApplied string
+	tlsApplied        string // "" removes the annotation (TLS off)
+	tlsRotationState  string // "" removes the annotation (no open window)
+}
+
+// currentStatefulSetAnnotations reads the marker annotations as they stood
+// before this reconcile.
+func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Context, b *builders.Builder) (stsAnnotations, error) {
 	var ss appsv1.StatefulSet
 	getErr := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
 	if apierrors.IsNotFound(getErr) {
-		return "", "", "", nil
+		return stsAnnotations{}, nil
 	}
 	if getErr != nil {
-		return "", "", "", fmt.Errorf("get statefulset: %w", getErr)
+		return stsAnnotations{}, fmt.Errorf("get statefulset: %w", getErr)
 	}
-	return ss.Spec.Template.Annotations[annotationCnfChecksum],
-		ss.Annotations[annotationVarsAppliedHash],
-		ss.Annotations[annotationStructuralAppliedHash], nil
+	return stsAnnotations{
+		cnfChecksum:       ss.Spec.Template.Annotations[annotationCnfChecksum],
+		varsApplied:       ss.Annotations[annotationVarsAppliedHash],
+		structuralApplied: ss.Annotations[annotationStructuralAppliedHash],
+		tlsApplied:        ss.Annotations[annotationTLSAppliedHash],
+		tlsRotationState:  ss.Annotations[annotationTLSRotationState],
+		tlsRestart:        ss.Spec.Template.Annotations[builders.TLSRestartAnnotation],
+	}, nil
 }
 
 // resolvePasswords reads the admin/radmin/monitor passwords from the auth Secret.
@@ -518,18 +592,21 @@ func (r *ProxySQLClusterReconciler) ensureExternalService(ctx context.Context, o
 // handleRuntimeApplyError recovers from a resolveRestartChecksum failure
 // (runtime SQL push to a replica failed) without wedging StatefulSet
 // updates: the StatefulSet is still ensured, carrying the PRE-reconcile
-// pod-template checksum and object-level marker values — identical
+// pod-template checksum and vars/structural marker values — identical
 // annotations trigger no rollout, but every other pending template or
 // replica change still applies — and a Degraded condition (reason
 // RuntimeApplyError, message naming the failing replica) surfaces the
 // failure. The push error is returned so the caller requeues; with both
 // markers unchanged the retry re-pushes the same variables
-// (resolveRestartChecksum's crash-safety contract).
+// (resolveRestartChecksum's crash-safety contract). markers carries the
+// pre-reconcile vars/structural values alongside this reconcile's TLS
+// rotation outcome (whose dials already happened and must commit).
 func (r *ProxySQLClusterReconciler) handleRuntimeApplyError(
 	ctx context.Context,
 	cluster *proxysqlv1alpha1.ProxySQLCluster,
 	b *builders.Builder,
-	prev, appliedVars, structuralApplied string,
+	prev string,
+	markers stsMarkers,
 	pushErr error,
 ) error {
 	// prev can only be empty when no StatefulSet exists yet, and fresh
@@ -537,7 +614,7 @@ func (r *ProxySQLClusterReconciler) handleRuntimeApplyError(
 	// so no path can ever create a StatefulSet with an empty checksum
 	// annotation.
 	if prev != "" {
-		if err := r.ensureStatefulSet(ctx, cluster, b.StatefulSet(prev), appliedVars, structuralApplied); err != nil {
+		if err := r.ensureStatefulSet(ctx, cluster, b.StatefulSet(prev), markers); err != nil {
 			return fmt.Errorf("ensure statefulset after runtime-apply failure: %w (runtime apply: %v)", err, pushErr)
 		}
 	}
@@ -550,12 +627,12 @@ func (r *ProxySQLClusterReconciler) handleRuntimeApplyError(
 	return pushErr
 }
 
-// ensureStatefulSet creates or updates the StatefulSet. varsAppliedHash and
-// structuralAppliedHash are written as OBJECT-level annotations
-// (proxysql.com/vars-applied-hash, proxysql.com/structural-applied-hash) —
-// never on the pod template — so recording them never triggers a rollout;
-// see resolveRestartChecksum for what they track.
-func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *appsv1.StatefulSet, varsAppliedHash, structuralAppliedHash string) error {
+// ensureStatefulSet creates or updates the StatefulSet. The markers are
+// written as OBJECT-level annotations — never on the pod template — so
+// recording them never triggers a rollout; see resolveRestartChecksum and
+// resolveTLSRotation for what they track. The TLS markers are removed when
+// empty (TLS off / no open rotation window).
+func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *appsv1.StatefulSet, m stsMarkers) error {
 	existing := &appsv1.StatefulSet{}
 	existing.Name = desired.Name
 	existing.Namespace = desired.Namespace
@@ -564,8 +641,18 @@ func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner
 		if existing.Annotations == nil {
 			existing.Annotations = map[string]string{}
 		}
-		existing.Annotations[annotationVarsAppliedHash] = varsAppliedHash
-		existing.Annotations[annotationStructuralAppliedHash] = structuralAppliedHash
+		existing.Annotations[annotationVarsAppliedHash] = m.varsApplied
+		existing.Annotations[annotationStructuralAppliedHash] = m.structuralApplied
+		for k, v := range map[string]string{
+			annotationTLSAppliedHash:   m.tlsApplied,
+			annotationTLSRotationState: m.tlsRotationState,
+		} {
+			if v == "" {
+				delete(existing.Annotations, k)
+			} else {
+				existing.Annotations[k] = v
+			}
+		}
 		// Selector is immutable; only set on create.
 		if existing.CreationTimestamp.IsZero() {
 			existing.Spec.Selector = desired.Spec.Selector
@@ -674,12 +761,13 @@ func (r *ProxySQLClusterReconciler) ensureServiceMonitor(ctx context.Context, ow
 // the message of the existing Rolling condition, which the StatefulSet
 // template diff drives as before.
 //
-// extSvcErr is this reconcile's ensureExternalService outcome and tlsErr
-// its ensureTLSSecrets outcome: either being non-nil sets Degraded=True
-// (reason ExternalServiceError / TLSSecretError, message = the error);
-// both nil clears Degraded — the same end-of-updateStatus clearing that
-// removes a stale RuntimeApplyError once a reconcile completes cleanly.
-func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, summary string, extSvcErr, tlsErr error) error {
+// extSvcErr is this reconcile's ensureExternalService outcome, tlsErr its
+// ensureTLSSecrets outcome and rotErr its resolveTLSRotation outcome: any
+// being non-nil sets Degraded=True (reason ExternalServiceError /
+// TLSSecretError / TLSRotationError, message = the error); all nil clears
+// Degraded — the same end-of-updateStatus clearing that removes a stale
+// RuntimeApplyError once a reconcile completes cleanly.
+func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, summary string, extSvcErr, tlsErr, rotErr error) error {
 	var ss appsv1.StatefulSet
 	err := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
 	notFound := apierrors.IsNotFound(err)
@@ -705,7 +793,7 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	cluster.Status.Phase = derivePhase(&ss, notFound, desired, b.Spec.Pause)
 
 	if b.Spec.Pause {
-		return r.updatePausedStatus(ctx, cluster, &ss, extSvcErr, tlsErr)
+		return r.updatePausedStatus(ctx, cluster, &ss, extSvcErr, tlsErr, rotErr)
 	}
 	r.setCondition(cluster, condTypePaused, metav1.ConditionFalse, "NotPaused", "cluster is not paused")
 
@@ -743,7 +831,7 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 		}
 		r.setCondition(cluster, condTypeProgressing, metav1.ConditionTrue, "Rolling", msg)
 	}
-	r.setDegradedFromDeferredErrors(cluster, extSvcErr, tlsErr)
+	r.setDegradedFromDeferredErrors(cluster, extSvcErr, tlsErr, rotErr)
 
 	return r.Status().Update(ctx, cluster)
 }
@@ -753,14 +841,18 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 // rejection of the external Service (colliding pinned nodePort, ipFamilies
 // mutation, …) surfaces as reason ExternalServiceError; a TLS Secret
 // resolution failure (missing Secret/key, cert-manager CRD absent) as
-// reason TLSSecretError. A clean pass removes Degraded — which is also
-// what clears a stale RuntimeApplyError, preserving that contract.
-func (r *ProxySQLClusterReconciler) setDegradedFromDeferredErrors(cluster *proxysqlv1alpha1.ProxySQLCluster, extSvcErr, tlsErr error) {
+// reason TLSSecretError; an open TLS rotation window (some replica not yet
+// verified serving the rotated certificate) as reason TLSRotationError. A
+// clean pass removes Degraded — which is also what clears a stale
+// RuntimeApplyError, preserving that contract.
+func (r *ProxySQLClusterReconciler) setDegradedFromDeferredErrors(cluster *proxysqlv1alpha1.ProxySQLCluster, extSvcErr, tlsErr, rotErr error) {
 	switch {
 	case extSvcErr != nil:
 		r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, "ExternalServiceError", extSvcErr.Error())
 	case tlsErr != nil:
 		r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, reasonTLSSecretError, tlsErr.Error())
+	case rotErr != nil:
+		r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, reasonTLSRotationError, rotErr.Error())
 	default:
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
 	}
@@ -826,7 +918,7 @@ func (r *ProxySQLClusterReconciler) externalEndpoint(ctx context.Context, b *bui
 // external Service (retained during pause) or the TLS Secret resolution
 // failed this reconcile (extSvcErr/tlsErr), which degrade exactly as they
 // do unpaused.
-func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, ss *appsv1.StatefulSet, extSvcErr, tlsErr error) error {
+func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, ss *appsv1.StatefulSet, extSvcErr, tlsErr, rotErr error) error {
 	if ss.Status.ReadyReplicas > 0 {
 		msg := fmt.Sprintf("scaling down to 0 replicas (%d still ready)", ss.Status.ReadyReplicas)
 		r.setCondition(cluster, condTypePaused, metav1.ConditionFalse, "Stopping", msg)
@@ -838,7 +930,7 @@ func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, clus
 		r.setCondition(cluster, condTypeAvailable, metav1.ConditionFalse, "Paused", msg)
 		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "Paused", "no rollout in progress; cluster is paused")
 	}
-	r.setDegradedFromDeferredErrors(cluster, extSvcErr, tlsErr)
+	r.setDegradedFromDeferredErrors(cluster, extSvcErr, tlsErr, rotErr)
 	return r.Status().Update(ctx, cluster)
 }
 

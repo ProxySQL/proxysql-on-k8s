@@ -34,7 +34,7 @@ func TestVerifyReplicasUnreachableIsDrifted(t *testing.T) {
 	// test environment.
 	addrs := []string{"127.0.0.1:1", "127.0.0.1:2"}
 
-	drifted, shunned := r.verifyReplicas(context.Background(), addrs, "pw", &proxysqlclient.Desired{})
+	drifted, shunned := r.verifyReplicas(context.Background(), addrs, "pw", &proxysqlclient.Desired{}, nil)
 
 	if len(drifted) != len(addrs) {
 		t.Fatalf("drifted=%v, want all of %v", drifted, addrs)

@@ -1657,3 +1657,119 @@ func TestBuilder_TLS_BackendMount(t *testing.T) {
 		t.Fatalf("backend-tls volume missing")
 	})
 }
+
+// ---- TLS rotation support (Task 5): pod-template restart annotation +
+// disable-transition symlink cleanup (probe-4 evidence in
+// .superpowers/sdd/task-5-report.md) ----
+
+func TestBuilder_TLS_RestartAnnotation(t *testing.T) {
+	t.Run("unset renders no annotation", func(t *testing.T) {
+		b := New(tlsCluster(), newScheme(t), Passwords{})
+		ann := b.StatefulSet("x").Spec.Template.Annotations
+		if _, ok := ann[TLSRestartAnnotation]; ok {
+			t.Errorf("template carries %s without the reconciler setting it", TLSRestartAnnotation)
+		}
+	})
+
+	t.Run("set and enabled renders the bump value", func(t *testing.T) {
+		b := New(tlsCluster(), newScheme(t), Passwords{})
+		b.TLSRestartValue = "content-hash-1"
+		ann := b.StatefulSet("x").Spec.Template.Annotations
+		if ann[TLSRestartAnnotation] != "content-hash-1" {
+			t.Errorf("annotation = %q, want content-hash-1", ann[TLSRestartAnnotation])
+		}
+	})
+
+	t.Run("tls disabled never renders it", func(t *testing.T) {
+		b := New(newCluster(clusterName), newScheme(t), Passwords{})
+		b.TLSRestartValue = "content-hash-1"
+		ann := b.StatefulSet("x").Spec.Template.Annotations
+		if _, ok := ann[TLSRestartAnnotation]; ok {
+			t.Errorf("TLS-less template must not carry %s", TLSRestartAnnotation)
+		}
+	})
+
+	t.Run("user podAnnotations cannot clobber it", func(t *testing.T) {
+		b := New(tlsCluster(func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			c.Spec.PodAnnotations = map[string]string{TLSRestartAnnotation: "user-value"}
+		}), newScheme(t), Passwords{})
+		b.TLSRestartValue = "content-hash-1"
+		ann := b.StatefulSet("x").Spec.Template.Annotations
+		if ann[TLSRestartAnnotation] != "content-hash-1" {
+			t.Errorf("annotation = %q, want reconciler value to win", ann[TLSRestartAnnotation])
+		}
+	})
+}
+
+// findInit returns the named init container, or nil.
+func findInit(pod corev1.PodSpec, name string) *corev1.Container {
+	for i := range pod.InitContainers {
+		if pod.InitContainers[i].Name == name {
+			return &pod.InitContainers[i]
+		}
+	}
+	return nil
+}
+
+func TestBuilder_TLS_CleanupInitContainer(t *testing.T) {
+	persistent := func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		tr := true
+		c.Spec.Persistence.Enabled = &tr
+	}
+
+	t.Run("default TLS-less render has no cleanup init (golden safety)", func(t *testing.T) {
+		pod := New(newCluster(clusterName, persistent), newScheme(t), Passwords{}).StatefulSet("x").Spec.Template.Spec
+		if findInit(pod, TLSCleanupInitContainerName) != nil {
+			t.Errorf("fresh TLS-less cluster must render without %s", TLSCleanupInitContainerName)
+		}
+	})
+
+	t.Run("disable transition on persistent datadir renders it", func(t *testing.T) {
+		b := New(newCluster(clusterName, persistent), newScheme(t), Passwords{})
+		b.TLSCleanup = true
+		pod := b.StatefulSet("x").Spec.Template.Spec
+		init := findInit(pod, TLSCleanupInitContainerName)
+		if init == nil {
+			t.Fatalf("cleanup init container missing")
+		}
+		// Probe-4 pinned failure mode: proxysql:3.0 EXITS at boot when the
+		// datadir pem names are dangling symlinks (autogen fails with
+		// BIO_new_file). The cleanup must remove SYMLINKS ONLY — real pem
+		// files (ProxySQL's own autogen on a never-TLS datadir) stay.
+		script := strings.Join(init.Args, " ")
+		for _, want := range []string{"-L", "proxysql-ca.pem", "proxysql-cert.pem", "proxysql-key.pem", "rm"} {
+			if !strings.Contains(script, want) {
+				t.Errorf("cleanup script %q missing %q", script, want)
+			}
+		}
+		if init.Image != New(newCluster(clusterName), newScheme(t), Passwords{}).Image() {
+			t.Errorf("cleanup image = %q, want the cluster's own proxysql image", init.Image)
+		}
+		if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != "data" {
+			t.Errorf("mounts = %+v, want the data volume only", init.VolumeMounts)
+		}
+	})
+
+	t.Run("ephemeral datadir never needs it", func(t *testing.T) {
+		b := New(newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			f := false
+			c.Spec.Persistence.Enabled = &f
+		}), newScheme(t), Passwords{})
+		b.TLSCleanup = true
+		if findInit(b.StatefulSet("x").Spec.Template.Spec, TLSCleanupInitContainerName) != nil {
+			t.Errorf("emptyDir datadir is fresh every boot; no cleanup init expected")
+		}
+	})
+
+	t.Run("tls enabled renders tls-init, never cleanup", func(t *testing.T) {
+		b := New(tlsCluster(persistent), newScheme(t), Passwords{})
+		b.TLSCleanup = true
+		pod := b.StatefulSet("x").Spec.Template.Spec
+		if findInit(pod, TLSCleanupInitContainerName) != nil {
+			t.Errorf("enabled TLS must not render the cleanup init")
+		}
+		if findInit(pod, TLSInitContainerName) == nil {
+			t.Errorf("enabled TLS must render %s", TLSInitContainerName)
+		}
+	})
+}

@@ -38,12 +38,16 @@ func (b *Builder) StatefulSet(cnfChecksum string) *appsv1.StatefulSet {
 	maps.Copy(podLabels, selector)
 	maps.Copy(podLabels, b.Spec.PodLabels)
 
-	// User annotations first, reserved key last: proxysql.com/cnf-checksum is
-	// the rollout trigger, so a user-supplied podAnnotations entry with the
-	// same key must never clobber it.
-	podAnnotations := make(map[string]string, len(b.Spec.PodAnnotations)+1)
+	// User annotations first, reserved keys last: proxysql.com/cnf-checksum
+	// (and the TLS rotation-fallback bump) are rollout triggers, so a
+	// user-supplied podAnnotations entry with the same key must never
+	// clobber them.
+	podAnnotations := make(map[string]string, len(b.Spec.PodAnnotations)+2)
 	maps.Copy(podAnnotations, b.Spec.PodAnnotations)
 	podAnnotations["proxysql.com/cnf-checksum"] = cnfChecksum
+	if b.Spec.TLSEnabled() && b.TLSRestartValue != "" {
+		podAnnotations[TLSRestartAnnotation] = b.TLSRestartValue
+	}
 
 	ss := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -158,6 +162,11 @@ func (b *Builder) podSpec() corev1.PodSpec {
 		if b.backendTLSEnabled() {
 			spec.Volumes = append(spec.Volumes, b.backendTLSVolume())
 		}
+	} else if b.TLSCleanup && isTrue(b.Spec.Persistence.Enabled) {
+		// TLS was disabled on a previously-wired cluster with a persistent
+		// datadir: remove the (now dangling) cert symlinks before proxysql
+		// starts, or it exits at boot — see TLSCleanup's field comment.
+		spec.InitContainers = append(spec.InitContainers, b.tlsCleanupInitContainer())
 	}
 
 	return spec
@@ -187,6 +196,16 @@ const (
 	BackendTLSVolumeName = backendTLSVolumeName
 	// TLSInitContainerName is the name of the datadir-symlink init container.
 	TLSInitContainerName = "tls-init"
+	// TLSCleanupInitContainerName is the name of the disable-transition
+	// init container that removes the datadir cert symlinks (see
+	// Builder.TLSCleanup).
+	TLSCleanupInitContainerName = "tls-cleanup"
+	// TLSRestartAnnotation is the pod-template annotation the TLS rotation
+	// engine bumps (to the tls Secret's content hash) when a replica fails
+	// handshake verification after PROXYSQL RELOAD TLS: rotation changes
+	// Secret CONTENT, never cnf text, so the cnf checksum cannot carry
+	// this rollout (see Builder.TLSRestartValue).
+	TLSRestartAnnotation = "proxysql.com/tls-restart"
 )
 
 // tlsInitContainer seeds the datadir cert symlinks before proxysql starts.
@@ -220,6 +239,35 @@ func (b *Builder) tlsInitContainer() corev1.Container {
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: tlsVolumeName, MountPath: tlsMountPath, ReadOnly: true},
+			{Name: "data", MountPath: "/var/lib/proxysql"},
+		},
+	}
+}
+
+// tlsCleanupInitContainer removes the datadir cert symlinks after TLS is
+// disabled on a previously-wired cluster with a persistent datadir.
+//
+// Probe-verified on proxysql/proxysql:3.0 (image 77bfbfc3d21c; evidence in
+// .superpowers/sdd/task-5-report.md): with the tls Secret mount gone, the
+// retained proxysql-{ca,cert,key}.pem symlinks dangle; ProxySQL reads them
+// as "no SSL keys/certificates found", tries to auto-generate THROUGH the
+// dangling symlink, fails on BIO_new_file (the target directory no longer
+// exists) and the process EXITS — the pod would crash-loop forever. The
+// `[ -L ... ] && rm` guard removes symlinks ONLY: real pem files (ProxySQL's
+// own autogen on a datadir that never had TLS) are untouched, so running
+// this container is idempotent and safe on every boot.
+func (b *Builder) tlsCleanupInitContainer() corev1.Container {
+	return corev1.Container{
+		Name:            TLSCleanupInitContainerName,
+		Image:           b.Image(),
+		ImagePullPolicy: b.Spec.Image.PullPolicy,
+		SecurityContext: b.Spec.ContainerSecurityContext,
+		Command:         []string{"sh", "-c"},
+		Args: []string{
+			`for f in proxysql-ca.pem proxysql-cert.pem proxysql-key.pem; do` +
+				` [ -L "/var/lib/proxysql/$f" ] && rm -f "/var/lib/proxysql/$f"; done; true`,
+		},
+		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: "/var/lib/proxysql"},
 		},
 	}

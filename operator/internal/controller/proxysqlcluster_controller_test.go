@@ -690,7 +690,8 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
 			pushErr := errors.New("apply variables on 10.1.2.3:6032: dial tcp: i/o timeout")
-			err := reconciler.handleRuntimeApplyError(ctx, cluster, b, prev, appliedVars, structuralApplied, pushErr)
+			err := reconciler.handleRuntimeApplyError(ctx, cluster, b, prev,
+				stsMarkers{varsApplied: appliedVars, structuralApplied: structuralApplied}, pushErr)
 			Expect(err).To(MatchError(pushErr), "the push error must be returned for requeue")
 
 			var after appsv1.StatefulSet
@@ -756,7 +757,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
 			summary := "RestartRequired: structural cnf change (fluent-bit.conf)"
-			Expect(reconciler.updateStatus(ctx, cluster, b, summary, nil, nil)).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, summary, nil, nil, nil)).To(Succeed())
 
 			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypeProgressing)
 			Expect(cond).NotTo(BeNil())
@@ -936,7 +937,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
-			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil, nil)).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil, nil, nil)).To(Succeed())
 
 			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhaseStopping))
 			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypePaused)
@@ -949,7 +950,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			ss.Status.ReadyReplicas = 0
 			Expect(k8sClient.Status().Update(ctx, &ss)).To(Succeed())
 
-			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil, nil)).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil, nil, nil)).To(Succeed())
 			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhasePaused))
 			cond = meta.FindStatusCondition(cluster.Status.Conditions, condTypePaused)
 			Expect(cond).NotTo(BeNil())
@@ -1618,6 +1619,214 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(string(cnf.Data["proxysql.cnf"])).To(ContainSubstring("ssl_p2s_ca"))
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
 			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+		})
+	})
+
+	When("the tls Secret content rotates (restart-free rotation engine)", func() {
+		// makeTLSCluster reconciles a tier-3 cluster to a wired steady
+		// state and returns the initial tls-applied marker.
+		makeTLSCluster := func(name string) string {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(name)
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			var srv corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			Expect(ss.Annotations[annotationTLSAppliedHash]).To(Equal(tlsContentHash(srv.Data)),
+				"the first reconcile must adopt the minted content (empty marker rule)")
+			return ss.Annotations[annotationTLSAppliedHash]
+		}
+
+		// rotateServingSecret re-issues the tier-3 serving cert from the
+		// SAME stored CA (what a renewal does) and overwrites the Secret,
+		// returning the new content hash. The new cert satisfies
+		// servingReissueNeeded=false, so the resolution keeps it verbatim
+		// and only the rotation engine reacts.
+		rotateServingSecret := func(name string) string {
+			ctx := context.Background()
+			var ca, srv corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls-ca", Namespace: ns}, &ca)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			crt, key, err := tlsutil.IssueServing(ca.Data["tls.crt"], ca.Data["tls.key"],
+				tlsutil.SANsFor(name, ns, nil), 90*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			srv.Data["tls.crt"] = crt
+			srv.Data["tls.key"] = key
+			Expect(k8sClient.Update(ctx, &srv)).To(Succeed())
+			newHash := tlsContentHash(srv.Data)
+			Expect(newHash).NotTo(Equal(tlsContentHash(map[string][]byte{})), "sanity")
+			return newHash
+		}
+
+		makeReadyPod := func(clusterName, podName string) {
+			ctx := context.Background()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      podName,
+					Namespace: ns,
+					Labels:    map[string]string{"proxysql.com/cluster": clusterName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "proxysql", Image: "proxysql/proxysql"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0)) })
+			// Loopback IP: dials go to 127.0.0.1:6032 where nothing listens,
+			// so every RELOAD/handshake attempt fails fast — exactly the
+			// "attempt made, cannot verify" shape envtest can prove (a real
+			// handshake needs a live proxysql; that is e2e's job).
+			pod.Status.PodIP = "127.0.0.1"
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+
+		It("adopts the marker on operator upgrade without dialing or restarting", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-rot-adopt"
+			makeTLSCluster(name)
+
+			// Simulate a StatefulSet written by an operator version predating
+			// the rotation engine: the marker annotation does not exist.
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			delete(ss.Annotations, annotationTLSAppliedHash)
+			Expect(k8sClient.Update(ctx, &ss)).To(Succeed())
+
+			reconcileAndExpectSuccess(name)
+
+			var srv corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			Expect(after.Annotations[annotationTLSAppliedHash]).To(Equal(tlsContentHash(srv.Data)),
+				"an empty marker must be adopted, not rotated (operator upgrades must not churn every cluster)")
+			Expect(after.Spec.Template.Annotations).NotTo(HaveKey(builders.TLSRestartAnnotation),
+				"adoption must not bump the restart annotation")
+			Expect(after.Annotations).NotTo(HaveKey(annotationTLSRotationState))
+		})
+
+		It("keeps the marker unadvanced while zero pods are ready", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-rot-zero"
+			oldMarker := makeTLSCluster(name)
+
+			newHash := rotateServingSecret(name)
+			Expect(newHash).NotTo(Equal(oldMarker))
+
+			// envtest has no kubelet: no pod is ever Ready, so the engine
+			// must leave the marker alone (a NotReady pod may still serve
+			// the old cert once it recovers) — and report no error.
+			reconcileAndExpectSuccess(name)
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Annotations[annotationTLSAppliedHash]).To(Equal(oldMarker),
+				"zero ready pods must keep the marker unadvanced")
+			Expect(ss.Annotations).NotTo(HaveKey(annotationTLSRotationState))
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+		})
+
+		It("attempts RELOAD+verify on ready replicas, degrades inside the window, then falls back to a rolling restart", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-rot-fallback"
+			oldMarker := makeTLSCluster(name)
+			makeReadyPod(name, name+"-0")
+			reconciler.tlsVerifyRetryDelay = time.Millisecond // keep in-pass retries fast
+
+			newHash := rotateServingSecret(name)
+
+			// Inside the window: the dial to 127.0.0.1:6032 fails, the
+			// reconcile returns the rotation error (requeue/backoff), the
+			// marker stays put, the window start is persisted, and Degraded
+			// says why. envtest cannot complete a real handshake — the full
+			// verified path (fingerprint flip with restartCount unchanged)
+			// is e2e's to prove.
+			req = reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).To(HaveOccurred(), "an open rotation window must requeue")
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Annotations[annotationTLSAppliedHash]).To(Equal(oldMarker),
+				"an unverified rotation must not advance the marker")
+			Expect(ss.Annotations[annotationTLSRotationState]).To(HavePrefix(newHash+"@"),
+				"the window start must be persisted (crash-safe clock)")
+			Expect(ss.Spec.Template.Annotations).NotTo(HaveKey(builders.TLSRestartAnnotation),
+				"no restart bump before the window expires")
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			degraded := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(degraded).NotTo(BeNil())
+			Expect(degraded.Reason).To(Equal(reasonTLSRotationError))
+			Expect(degraded.Message).To(ContainSubstring("127.0.0.1:6032"))
+
+			// Window expired: the engine commits the rolling-restart
+			// fallback — pod-template bump to the content hash, marker
+			// advanced (the rollout delivers the material), state cleared,
+			// Degraded gone, Progressing explains the restart.
+			reconciler.TLSRotationWindow = time.Nanosecond
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred(), "the fallback is a decision, not an error")
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Spec.Template.Annotations[builders.TLSRestartAnnotation]).To(Equal(newHash),
+				"the fallback must bump the dedicated pod-template annotation to the content hash")
+			Expect(ss.Annotations[annotationTLSAppliedHash]).To(Equal(newHash))
+			Expect(ss.Annotations).NotTo(HaveKey(annotationTLSRotationState))
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+			progressing := meta.FindStatusCondition(got.Status.Conditions, condTypeProgressing)
+			Expect(progressing).NotTo(BeNil())
+			Expect(progressing.Message).To(ContainSubstring("TLS rotation fallback"))
+
+			// The bump is idempotent: another reconcile with unchanged
+			// content moves nothing (no restart churn).
+			reconcileAndExpectSuccess(name)
+			var again appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &again)).To(Succeed())
+			Expect(again.Spec.Template.Annotations[builders.TLSRestartAnnotation]).To(Equal(newHash))
+			Expect(again.Annotations[annotationTLSAppliedHash]).To(Equal(newHash))
+		})
+
+		It("disabling TLS removes the markers and renders the symlink-cleanup init container (probe-4)", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-rot-disable"
+			makeTLSCluster(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.TLS.Enabled = false
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Annotations).NotTo(HaveKey(annotationTLSAppliedHash))
+			Expect(ss.Annotations).NotTo(HaveKey(annotationTLSRotationState))
+			names := make([]string, 0, len(ss.Spec.Template.Spec.InitContainers))
+			for _, c := range ss.Spec.Template.Spec.InitContainers {
+				names = append(names, c.Name)
+			}
+			Expect(names).To(ContainElement(builders.TLSCleanupInitContainerName),
+				"a previously-wired persistent cluster must shed its datadir symlinks: probe-4 showed proxysql EXITS at boot on dangling pem symlinks")
+			Expect(names).NotTo(ContainElement(builders.TLSInitContainerName))
+
+			// And it STAYS rendered (idempotent guard, no template churn).
+			reconcileAndExpectSuccess(name)
+			var again appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &again)).To(Succeed())
+			found := false
+			for _, c := range again.Spec.Template.Spec.InitContainers {
+				if c.Name == builders.TLSCleanupInitContainerName {
+					found = true
+				}
+			}
+			Expect(found).To(BeTrue())
 		})
 	})
 

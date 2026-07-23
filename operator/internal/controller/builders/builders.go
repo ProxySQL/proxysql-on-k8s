@@ -189,6 +189,28 @@ type Builder struct {
 	// TLSSecretName(), so builders stay usable without the resolution
 	// step (unit tests, dry rendering).
 	TLSMountSecret string
+
+	// TLSRestartValue is the TLS rotation engine's rolling-restart
+	// fallback bump: when set (and spec.tls is enabled) it renders as the
+	// pod-template annotation TLSRestartAnnotation, so changing it rolls
+	// the pods. The reconciler sets it to the tls Secret's CONTENT hash —
+	// rotation never changes the cnf text, so the cnf checksum cannot
+	// carry this restart, and using the content hash makes the bump
+	// idempotent (one restart per rotated content, crash-safe). Empty
+	// (the default) renders no annotation.
+	TLSRestartValue string
+
+	// TLSCleanup asks for the tls-cleanup init container on a cluster
+	// whose spec.tls is now ABSENT/disabled: the reconciler sets it when
+	// the live StatefulSet shows TLS was previously wired. Probe-verified
+	// (task-5 report): proxysql:3.0 EXITS at boot when the fixed datadir
+	// pem names are dangling symlinks (the Secret mount is gone but the
+	// symlinks persist on a persistent datadir) — cert autogen fails on
+	// BIO_new_file. The cleanup container removes the operator's symlinks
+	// (symlinks ONLY — never real pem files) so the pods boot plaintext
+	// again. Rendered only with persistence enabled; an emptyDir datadir
+	// is fresh every boot and never dangles.
+	TLSCleanup bool
 }
 
 // New returns a Builder with .Spec already defaulted. Pass the resolved
