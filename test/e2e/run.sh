@@ -34,7 +34,7 @@ build_and_load_image
 install_operator
 
 # Scenario functions are named scenario_<name>; list in intended run order.
-SCENARIOS=(scenario_mysql scenario_postgres scenario_multireplica scenario_drift scenario_sqlstatements scenario_runtimereconfig scenario_persistence scenario_external scenario_psa scenario_delete scenario_rotate scenario_platform scenario_logging)
+SCENARIOS=(scenario_mysql scenario_postgres scenario_multireplica scenario_drift scenario_sqlstatements scenario_runtimereconfig scenario_persistence scenario_external scenario_tls scenario_psa scenario_delete scenario_rotate scenario_platform scenario_logging)
 
 declare -a PASSED=() FAILED=()
 for fn in "${SCENARIOS[@]}"; do
