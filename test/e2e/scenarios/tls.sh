@@ -18,7 +18,7 @@
 #     applies it via `PROXYSQL RELOAD TLS` + handshake verification —
 #     restart-free. This is proven by polling the served leaf's SHA-256
 #     fingerprint (captured on 6033) until it changes, then asserting the
-#     StatefulSet's proxysql.com/tls-applied-hash marker advanced AND every
+#     StatefulSet's proxysql.com/tls-applied-hash marker advanced AND the
 #     pod's restartCount is unchanged.
 #
 # Client note: the proxysql/proxysql:3.0 image ships the MariaDB client,
@@ -119,9 +119,9 @@ YAML
   # three required keys populated ---
   local key out
   for key in tls.crt tls.key ca.crt; do
-    out="$(kubectl -n "$ns" get secret pxc-tls-ca -o jsonpath="{.data.$key}" 2>/dev/null || true)"
+    out="$(kubectl -n "$ns" get secret pxc-tls-ca -o jsonpath="{.data.${key//./\\.}}" 2>/dev/null || true)"
     [[ -n "$out" ]] || { fail "tls: Secret pxc-tls-ca missing/empty key $key"; dump_ns "$ns"; return 1; }
-    out="$(kubectl -n "$ns" get secret pxc-tls -o jsonpath="{.data.$key}" 2>/dev/null || true)"
+    out="$(kubectl -n "$ns" get secret pxc-tls -o jsonpath="{.data.${key//./\\.}}" 2>/dev/null || true)"
     [[ -n "$out" ]] || { fail "tls: Secret pxc-tls missing/empty key $key"; dump_ns "$ns"; return 1; }
   done
   log "tls: tier-3 self-signed CA (pxc-tls-ca) and serving cert (pxc-tls) both populated"
@@ -225,7 +225,11 @@ YAML
 
   # --- the StatefulSet's tls-applied-hash marker must have advanced ---
   local hash_now
-  hash_now="$(kubectl -n "$ns" get statefulset pxc -o jsonpath='{.metadata.annotations.proxysql\.com/tls-applied-hash}')"
+  for _ in $(seq 1 3); do
+    hash_now="$(kubectl -n "$ns" get statefulset pxc -o jsonpath='{.metadata.annotations.proxysql\.com/tls-applied-hash}')"
+    [[ -n "$hash_now" && "$hash_now" != "$hash0" ]] && break
+    sleep 2
+  done
   [[ -n "$hash_now" && "$hash_now" != "$hash0" ]] || { fail "tls: STS tls-applied-hash did not advance (was '$hash0', now '$hash_now')"; dump_ns "$ns"; return 1; }
   log "tls: STS proxysql.com/tls-applied-hash advanced ($hash0 -> $hash_now)"
 
