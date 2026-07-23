@@ -37,8 +37,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
@@ -1517,6 +1519,173 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(hasInit).To(BeTrue())
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
 			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+		})
+
+		It("keeps the tier-2 Certificate until a tier-1 switch actually validates (no GC before validation)", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-gc"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{
+					Enabled:   true,
+					IssuerRef: &proxysqlv1alpha1.TLSIssuerRef{Name: "test-issuer"},
+				}
+			})
+			reconcileExpectError(name) // Certificate created; Secret not issued yet
+			makeSecret(name+"-tls", newServingSecretData(name))
+			reconcileAndExpectSuccess(name) // tier 2 wired
+			secretName, _ := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name+"-tls"), "premise: tier 2 wired the cert-manager Secret")
+
+			// Switch to a tier-1 Secret that does NOT exist. The held
+			// material is the cert-manager-issued Secret — deleting the
+			// Certificate now would cut off its renewal source.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.TLS.SecretName = "user-switch-missing"
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileExpectError(name)
+
+			cert := &unstructured.Unstructured{}
+			cert.SetGroupVersionKind(certGVK)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, cert)).To(Succeed(),
+				"the Certificate must survive until the tier-1 switch validates — it renews the held material")
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name + "-tls"))
+			Expect(hasInit).To(BeTrue())
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("TLSSecretError"))
+
+			// Once the user Secret validates, tier 1 takes over AND the
+			// Certificate is garbage-collected.
+			makeSecret("user-switch-missing", newServingSecretData(name))
+			reconcileAndExpectSuccess(name)
+			secretName, _ = stsTLSWiring(name)
+			Expect(secretName).To(Equal("user-switch-missing"))
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, cert)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"the Certificate must be GC'd once tier 1 validates")
+		})
+
+		It("degrades on a missing backend CA Secret and renders without backend TLS until it validates", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-backend"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{
+					Enabled: true,
+					Backend: &proxysqlv1alpha1.TLSBackendSpec{CASecretName: "backend-ca"},
+				}
+			})
+			reconcileExpectError(name)
+
+			// Serving (tier 3) resolved fine; the backend wiring must be
+			// withheld — never let the kubelet validate the missing Secret.
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name+"-tls"), "tier-3 serving cert must still resolve")
+			Expect(hasInit).To(BeTrue())
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			for _, v := range ss.Spec.Template.Spec.Volumes {
+				Expect(v.Name).NotTo(Equal("backend-tls"),
+					"no backend-tls volume may reference a Secret that failed validation")
+			}
+			var cnf corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnf)).To(Succeed())
+			Expect(string(cnf.Data["proxysql.cnf"])).NotTo(ContainSubstring("ssl_p2s_ca"),
+				"backend TLS variables must not render while the backend CA Secret is unresolved")
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil(), "the missing backend CA must surface as a Degraded condition")
+			Expect(cond.Reason).To(Equal("TLSSecretError"))
+			Expect(cond.Message).To(ContainSubstring("backend-ca"), "the message must name the missing Secret")
+
+			// Recovery: create the CA Secret → backend wiring + variables
+			// render, Degraded clears.
+			makeSecret("backend-ca", map[string][]byte{"ca.crt": newServingSecretData(name)["ca.crt"]})
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			foundBackend := false
+			for _, v := range ss.Spec.Template.Spec.Volumes {
+				if v.Name == "backend-tls" {
+					foundBackend = true
+				}
+			}
+			Expect(foundBackend).To(BeTrue())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnf)).To(Succeed())
+			Expect(string(cnf.Data["proxysql.cnf"])).To(ContainSubstring("ssl_p2s_ca"))
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+		})
+	})
+
+	When("a referenced TLS Secret changes out from under a running manager", func() {
+		It("re-reconciles promptly on a tier-1 user Secret content change (name-based watch, no resync wait)", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-watch"
+			const userSecret = "watched-user-tls"
+
+			// A real manager wired via SetupWithManager: this spec exercises
+			// the watch topology itself, which direct Reconcile calls can't.
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme:  k8sClient.Scheme(),
+				Metrics: metricsserver.Options{BindAddress: "0"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect((&ProxySQLClusterReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr)).To(Succeed())
+			mgrCtx, mgrCancel := context.WithCancel(context.Background())
+			DeferCleanup(mgrCancel)
+			go func() {
+				defer GinkgoRecover()
+				Expect(mgr.Start(mgrCtx)).To(Succeed())
+			}()
+
+			caCrt, caKey, err := tlsutil.NewCA("watch-ca", 5*365*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			crt, key, err := tlsutil.IssueServing(caCrt, caKey, tlsutil.SANsFor(name, ns, nil), 90*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			sec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: userSecret, Namespace: ns},
+				Data:       map[string][]byte{"tls.crt": crt, "tls.key": key, "ca.crt": caCrt},
+			}
+			Expect(k8sClient.Create(ctx, sec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, sec) })
+
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true, SecretName: userSecret}
+			})
+
+			// The manager reconciles the new cluster on its own (For watch).
+			Eventually(func(g Gomega) {
+				var ss appsv1.StatefulSet
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+				found := ""
+				for _, v := range ss.Spec.Template.Spec.Volumes {
+					if v.Name == "tls" && v.Secret != nil {
+						found = v.Secret.SecretName
+					}
+				}
+				g.Expect(found).To(Equal(userSecret))
+			}, "10s", "100ms").Should(Succeed(), "premise: the manager wires tier-1 TLS on its own")
+
+			// Break the referenced Secret's CONTENT. The cluster object does
+			// not change, so only a Secret→cluster watch can trigger the
+			// reconcile that notices (informer resync is hours away).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: userSecret, Namespace: ns}, sec)).To(Succeed())
+			delete(sec.Data, "ca.crt")
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				var got proxysqlv1alpha1.ProxySQLCluster
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Reason).To(Equal("TLSSecretError"))
+				g.Expect(cond.Message).To(ContainSubstring("ca.crt"))
+			}, "10s", "100ms").Should(Succeed(),
+				"a content change to the referenced Secret must reach the cluster without waiting for resync")
 		})
 	})
 })

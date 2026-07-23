@@ -183,6 +183,8 @@ const (
 const (
 	// TLSVolumeName is the name of the serving-cert Secret volume.
 	TLSVolumeName = tlsVolumeName
+	// BackendTLSVolumeName is the name of the backend trust projected volume.
+	BackendTLSVolumeName = backendTLSVolumeName
 	// TLSInitContainerName is the name of the datadir-symlink init container.
 	TLSInitContainerName = "tls-init"
 )

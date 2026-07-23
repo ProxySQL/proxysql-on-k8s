@@ -98,10 +98,14 @@ func (r *ProxySQLClusterReconciler) ensureTLSSecrets(ctx context.Context, cluste
 	tls := b.Spec.TLS
 	switch {
 	case tls.SecretName != "": // tier 1
-		r.cleanupTLSCertificate(ctx, cluster, b.TLSSecretName())
 		if err := r.validateTLSSecret(ctx, tls.SecretName, b.Namespace()); err != nil {
+			// Deliberately NO Certificate GC before validation: if a tier-1
+			// switch doesn't validate, the held last-good material may be
+			// the cert-manager-issued Secret — deleting the Certificate now
+			// would cut off that material's renewal source while degraded.
 			return false, err
 		}
+		r.cleanupTLSCertificate(ctx, cluster, b.TLSSecretName())
 		b.TLSMountSecret = tls.SecretName
 		return true, nil
 
@@ -116,20 +120,51 @@ func (r *ProxySQLClusterReconciler) ensureTLSSecrets(ctx context.Context, cluste
 		return true, nil
 
 	default: // tier 3
-		r.cleanupTLSCertificate(ctx, cluster, b.TLSSecretName())
 		if err := r.ensureSelfSignedTLS(ctx, cluster, b); err != nil {
 			return false, err
 		}
+		// GC only on the ready path (see tier 1 for why).
+		r.cleanupTLSCertificate(ctx, cluster, b.TLSSecretName())
 		b.TLSMountSecret = b.TLSSecretName()
 		return true, nil
 	}
 }
 
-// validateTLSSecret GETs the resolved Secret and requires every
-// tlsRequiredKeys entry to be present and non-empty. The returned error
-// names the Secret and, when applicable, the exact missing key — it
+// validateTLSSecret GETs the resolved serving-cert Secret and requires
+// every tlsRequiredKeys entry to be present and non-empty. The returned
+// error names the Secret and, when applicable, the exact missing key — it
 // becomes the Degraded=TLSSecretError message.
 func (r *ProxySQLClusterReconciler) validateTLSSecret(ctx context.Context, name, namespace string) error {
+	return r.requireSecretKeys(ctx, name, namespace, tlsRequiredKeys)
+}
+
+// validateBackendTLSSecrets GETs the backend (proxy-to-server) TLS Secrets
+// and requires their load-bearing keys: ca.crt on backend.caSecretName,
+// tls.crt+tls.key on backend.clientCertSecretName when referenced. Same
+// validate-and-hold contract as the serving cert — the kubelet is never
+// the validator of the backend-tls projected volume either. Nil when
+// backend TLS is not configured (including after holdTLSLastGood dropped
+// the TLS spec for this pass).
+func (r *ProxySQLClusterReconciler) validateBackendTLSSecrets(ctx context.Context, b *builders.Builder) error {
+	if !b.Spec.TLSEnabled() || b.Spec.TLS.Backend == nil || b.Spec.TLS.Backend.CASecretName == "" {
+		return nil
+	}
+	be := b.Spec.TLS.Backend
+	if err := r.requireSecretKeys(ctx, be.CASecretName, b.Namespace(), []string{"ca.crt"}); err != nil {
+		return fmt.Errorf("backend TLS: %w", err)
+	}
+	if be.ClientCertSecretName != "" {
+		if err := r.requireSecretKeys(ctx, be.ClientCertSecretName, b.Namespace(), []string{"tls.crt", "tls.key"}); err != nil {
+			return fmt.Errorf("backend TLS: %w", err)
+		}
+	}
+	return nil
+}
+
+// requireSecretKeys GETs a Secret and requires each listed key to be
+// present and non-empty, with errors naming the Secret and missing key
+// (they become Degraded=TLSSecretError messages).
+func (r *ProxySQLClusterReconciler) requireSecretKeys(ctx context.Context, name, namespace string, keys []string) error {
 	var sec corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sec); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -137,7 +172,7 @@ func (r *ProxySQLClusterReconciler) validateTLSSecret(ctx context.Context, name,
 		}
 		return fmt.Errorf("get tls secret %q: %w", name, err)
 	}
-	for _, k := range tlsRequiredKeys {
+	for _, k := range keys {
 		if len(sec.Data[k]) == 0 {
 			return fmt.Errorf("tls secret %q is missing key %q", name, k)
 		}
@@ -151,8 +186,12 @@ func (r *ProxySQLClusterReconciler) validateTLSSecret(ctx context.Context, name,
 //
 //   - Previously wired (the tls-init container and tls volume are present
 //     in the live template): keep rendering TLS with the last-good mount
-//     Secret — running pods keep serving with the kubelet-cached material,
-//     and no template the kubelet can't satisfy is ever pushed.
+//     Secret. RUNNING pods keep serving with the kubelet-cached material,
+//     but note the trade-off: if the held Secret has been deleted (not
+//     just broken), NEW pods scheduled while degraded cannot mount it and
+//     stay Pending until the reference resolves again — accepted, because
+//     the alternative (dropping TLS wiring) would roll every replica onto
+//     plaintext on a transient failure.
 //   - Never wired (no StatefulSet, or one without TLS wiring): drop the
 //     Builder's TLS spec so this pass renders WITHOUT any TLS wiring
 //     (volume, init container, backend cnf variables).
@@ -188,6 +227,61 @@ func (r *ProxySQLClusterReconciler) holdTLSLastGood(ctx context.Context, b *buil
 	return nil
 }
 
+// holdBackendTLSLastGood is holdTLSLastGood's counterpart for the backend
+// (proxy-to-server) wiring after validateBackendTLSSecrets fails: the
+// EXISTING StatefulSet's backend-tls projected volume decides. Previously
+// wired → keep rendering the last-good Secret names extracted from the
+// live projection (same new-pods-Pending trade-off as the serving hold);
+// never wired → drop the Builder's backend spec so this pass renders
+// without the backend-tls volume and ssl_p2s_* cnf variables.
+func (r *ProxySQLClusterReconciler) holdBackendTLSLastGood(ctx context.Context, b *builders.Builder) error {
+	if b.Spec.TLS == nil {
+		return nil // serving hold already dropped all TLS rendering
+	}
+
+	drop := func() { b.Spec.TLS.Backend = nil }
+
+	var ss appsv1.StatefulSet
+	err := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
+	if apierrors.IsNotFound(err) {
+		drop()
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get statefulset for backend TLS hold: %w", err)
+	}
+
+	var lastCA, lastClient string
+	for _, v := range ss.Spec.Template.Spec.Volumes {
+		if v.Name != builders.BackendTLSVolumeName || v.Projected == nil {
+			continue
+		}
+		for _, src := range v.Projected.Sources {
+			if src.Secret == nil {
+				continue
+			}
+			for _, item := range src.Secret.Items {
+				switch item.Key {
+				case "ca.crt":
+					lastCA = src.Secret.Name
+				case "tls.crt":
+					lastClient = src.Secret.Name
+				}
+			}
+		}
+	}
+
+	if lastCA == "" {
+		drop()
+		return nil
+	}
+	b.Spec.TLS.Backend = &proxysqlv1alpha1.TLSBackendSpec{
+		CASecretName:         lastCA,
+		ClientCertSecretName: lastClient,
+	}
+	return nil
+}
+
 // ensureTLSCertificate creates or updates the tier-2 cert-manager
 // Certificate. Any failure — most commonly the cert-manager CRDs not being
 // installed — comes back as an error the caller degrades on
@@ -205,7 +299,7 @@ func (r *ProxySQLClusterReconciler) ensureTLSCertificate(ctx context.Context, ow
 		return controllerutil.SetControllerReference(owner, existing, r.Scheme)
 	})
 	if err != nil {
-		return fmt.Errorf("cert-manager Certificate %q: %v (is cert-manager installed?)", desired.GetName(), err)
+		return fmt.Errorf("cert-manager Certificate %q: %w (is cert-manager installed?)", desired.GetName(), err)
 	}
 	return nil
 }

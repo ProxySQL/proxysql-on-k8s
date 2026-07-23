@@ -35,7 +35,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 	"github.com/ProxySQL/kubernetes/operator/internal/controller/builders"
@@ -133,6 +135,17 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	tlsReady, tlsErr := r.ensureTLSSecrets(ctx, &cluster, b)
 	if b.Spec.TLSEnabled() && !tlsReady {
 		if err := r.holdTLSLastGood(ctx, b); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	// Backend (proxy-to-server) TLS Secrets get the same validate-and-hold
+	// treatment: the backend-tls projected volume and ssl_p2s_* cnf
+	// variables render only against Secrets proven to carry their
+	// load-bearing keys (runs after the serving hold — if that dropped the
+	// TLS spec entirely, there is no backend rendering left to validate).
+	if backendErr := r.validateBackendTLSSecrets(ctx, b); backendErr != nil {
+		tlsErr = errors.Join(tlsErr, backendErr)
+		if err := r.holdBackendTLSLastGood(ctx, b); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -869,15 +882,109 @@ func (r *ProxySQLClusterReconciler) setCondition(cluster *proxysqlv1alpha1.Proxy
 	})
 }
 
-// SetupWithManager wires the controller into the manager with watches on the
-// owned resources.
+// Field-index keys mapping a ProxySQLCluster to the TLS Secrets it
+// REFERENCES (as opposed to owns): the tier-1 serving Secret and the two
+// backend Secrets. Registered in SetupWithManager, consumed by
+// clustersForTLSSecret.
+const (
+	tlsSecretNameIndex        = ".spec.tls.secretName"
+	tlsBackendCASecretIndex   = ".spec.tls.backend.caSecretName"
+	tlsBackendCertSecretIndex = ".spec.tls.backend.clientCertSecretName"
+)
+
+// SetupWithManager wires the controller into the manager with watches on
+// the owned resources, plus a name-based watch on ALL Secrets: tier-1 user
+// Secrets and the tier-2 cert-manager-issued Secret carry no owner
+// reference to the cluster, so Owns() alone would leave their content
+// changes (rotation!) invisible until the multi-hour informer resync.
 func (r *ProxySQLClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	indexer := mgr.GetFieldIndexer()
+	type indexed struct {
+		key     string
+		extract func(*proxysqlv1alpha1.ProxySQLCluster) string
+	}
+	for _, idx := range []indexed{
+		{tlsSecretNameIndex, func(c *proxysqlv1alpha1.ProxySQLCluster) string {
+			if c.Spec.TLS == nil {
+				return ""
+			}
+			return c.Spec.TLS.SecretName
+		}},
+		{tlsBackendCASecretIndex, func(c *proxysqlv1alpha1.ProxySQLCluster) string {
+			if c.Spec.TLS == nil || c.Spec.TLS.Backend == nil {
+				return ""
+			}
+			return c.Spec.TLS.Backend.CASecretName
+		}},
+		{tlsBackendCertSecretIndex, func(c *proxysqlv1alpha1.ProxySQLCluster) string {
+			if c.Spec.TLS == nil || c.Spec.TLS.Backend == nil {
+				return ""
+			}
+			return c.Spec.TLS.Backend.ClientCertSecretName
+		}},
+	} {
+		extract := idx.extract
+		if err := indexer.IndexField(context.Background(), &proxysqlv1alpha1.ProxySQLCluster{}, idx.key,
+			func(o client.Object) []string {
+				if name := extract(o.(*proxysqlv1alpha1.ProxySQLCluster)); name != "" {
+					return []string{name}
+				}
+				return nil
+			}); err != nil {
+			return fmt.Errorf("index %s: %w", idx.key, err)
+		}
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&proxysqlv1alpha1.ProxySQLCluster{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.clustersForTLSSecret)).
 		Named("proxysqlcluster").
 		Complete(r)
+}
+
+// clustersForTLSSecret maps a Secret event to the clusters that must
+// re-reconcile: every cluster whose spec REFERENCES the Secret by name
+// (via the three field indexes), plus — by naming convention — the
+// cluster behind an operator-managed "<name>-tls"/"<name>-tls-ca" Secret.
+// The convention covers the tier-2 Secret, which is owned by the
+// cert-manager Certificate rather than the cluster, so Owns() never fires
+// for it. Enqueueing a non-existent cluster is a cheap no-op reconcile.
+func (r *ProxySQLClusterReconciler) clustersForTLSSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	seen := map[types.NamespacedName]bool{}
+	var reqs []reconcile.Request
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		key := types.NamespacedName{Name: name, Namespace: obj.GetNamespace()}
+		if !seen[key] {
+			seen[key] = true
+			reqs = append(reqs, reconcile.Request{NamespacedName: key})
+		}
+	}
+
+	for _, index := range []string{tlsSecretNameIndex, tlsBackendCASecretIndex, tlsBackendCertSecretIndex} {
+		var list proxysqlv1alpha1.ProxySQLClusterList
+		if err := r.List(ctx, &list,
+			client.InNamespace(obj.GetNamespace()),
+			client.MatchingFields{index: obj.GetName()}); err != nil {
+			logf.FromContext(ctx).Error(err, "listing clusters for TLS secret", "index", index, "secret", obj.GetName())
+			continue
+		}
+		for i := range list.Items {
+			add(list.Items[i].Name)
+		}
+	}
+
+	if name, ok := strings.CutSuffix(obj.GetName(), "-tls"); ok {
+		add(name)
+	}
+	if name, ok := strings.CutSuffix(obj.GetName(), "-tls-ca"); ok {
+		add(name)
+	}
+	return reqs
 }
