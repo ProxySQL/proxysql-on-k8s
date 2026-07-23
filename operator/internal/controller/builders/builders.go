@@ -41,6 +41,11 @@ const (
 	DefaultProxySQLImage         = "proxysql/proxysql"
 	DefaultProxySQLTag           = "3.0"
 	DefaultPersistenceSize       = "1Gi"
+
+	// Reserved admin usernames: a username/password auth Secret whose
+	// username matches one of these is not an extra credential.
+	userAdmin  = "admin"
+	userRadmin = "radmin"
 )
 
 // Default ProxySQL secret key names. Match the AuthKeys defaults on the CRD.
@@ -151,7 +156,7 @@ func PasswordsFromSecret(data map[string][]byte, keys proxysqlv1alpha1.AuthKeys)
 			}
 			pw.Monitor = monitor
 		}
-		if user != "admin" && user != "radmin" {
+		if user != userAdmin && user != userRadmin {
 			pw.ExtraAdminUser = user
 			pw.ExtraAdminPassword = pass
 		}
