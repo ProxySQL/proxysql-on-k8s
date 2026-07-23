@@ -23,9 +23,11 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
@@ -397,6 +399,12 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 		defaultLogging(spec.Logging, c.Name)
 	}
 
+	// TLS defaults (only when the sub-spec is present; absent stays nil and
+	// renders the golden-pinned no-TLS output).
+	if spec.TLS != nil {
+		defaultTLS(spec.TLS)
+	}
+
 	// PSA-restricted-compatible default security contexts.
 	if spec.PodSecurityContext == nil {
 		nonRoot := true
@@ -423,6 +431,27 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 	}
 
 	return spec
+}
+
+// defaultTLS applies the documented defaults to a non-nil TLSSpec,
+// mirroring the CRD's kubebuilder defaults for older API servers: 90d
+// certificates renewed 30d before expiry, issuerRef kind/group per
+// cert-manager convention.
+func defaultTLS(t *proxysqlv1alpha1.TLSSpec) {
+	if t.Duration.Duration == 0 {
+		t.Duration = metav1.Duration{Duration: 2160 * time.Hour}
+	}
+	if t.RenewBefore.Duration == 0 {
+		t.RenewBefore = metav1.Duration{Duration: 720 * time.Hour}
+	}
+	if t.IssuerRef != nil {
+		if t.IssuerRef.Kind == "" {
+			t.IssuerRef.Kind = "Issuer"
+		}
+		if t.IssuerRef.Group == "" {
+			t.IssuerRef.Group = "cert-manager.io"
+		}
+	}
 }
 
 // defaultLogging applies the documented defaults to a non-nil LoggingSpec:

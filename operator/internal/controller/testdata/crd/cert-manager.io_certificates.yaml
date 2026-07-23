@@ -1,0 +1,32 @@
+# Minimal cert-manager Certificate CRD for envtest ONLY.
+#
+# The operator's tier-2 TLS path creates cert-manager.io/v1 Certificate
+# objects as unstructured (no cert-manager Go dependency, mirroring the
+# ServiceMonitor precedent). envtest needs the CRD registered for those
+# creates to succeed; the schema is deliberately permissive
+# (x-kubernetes-preserve-unknown-fields) because envtest runs no
+# cert-manager controller — tests assert what the operator WRITES, not
+# what cert-manager would do with it. Never ship this file to a cluster.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: certificates.cert-manager.io
+spec:
+  group: cert-manager.io
+  names:
+    kind: Certificate
+    listKind: CertificateList
+    plural: certificates
+    singular: certificate
+    shortNames:
+      - cert
+      - certs
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true

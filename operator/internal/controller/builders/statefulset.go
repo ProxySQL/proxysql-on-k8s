@@ -176,6 +176,17 @@ const (
 	backendTLSMountPath  = "/etc/proxysql/backend-tls"
 )
 
+// Exported TLS pod-template markers. The reconciler's validate-and-hold
+// logic (tls_secrets.go) inspects the EXISTING StatefulSet for these to
+// decide whether TLS was previously wired — and, when a re-resolution
+// fails, which Secret the last-good template mounted.
+const (
+	// TLSVolumeName is the name of the serving-cert Secret volume.
+	TLSVolumeName = tlsVolumeName
+	// TLSInitContainerName is the name of the datadir-symlink init container.
+	TLSInitContainerName = "tls-init"
+)
+
 // tlsInitContainer seeds the datadir cert symlinks before proxysql starts.
 //
 // ProxySQL 3.0 has no frontend/admin cert-path variables (probe-verified;
@@ -195,7 +206,7 @@ const (
 // container's securityContext, so PSA `restricted` compliance is identical.
 func (b *Builder) tlsInitContainer() corev1.Container {
 	return corev1.Container{
-		Name:            "tls-init",
+		Name:            TLSInitContainerName,
 		Image:           b.Image(),
 		ImagePullPolicy: b.Spec.Image.PullPolicy,
 		SecurityContext: b.Spec.ContainerSecurityContext,

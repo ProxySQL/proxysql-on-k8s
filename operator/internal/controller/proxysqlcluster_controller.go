@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -64,6 +65,10 @@ type ProxySQLClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
+// certificates: the cert-manager tier of spec.tls (issuerRef) creates and
+// maintains one cert-manager.io Certificate per cluster; delete covers the
+// garbage-collection when the tier is switched away.
+// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
 
 const (
 	condTypeAvailable   = "Available"
@@ -115,6 +120,22 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	b := builders.New(&cluster, r.Scheme, pw)
+
+	// TLS: resolve the serving-cert Secret (three-tier precedence) and flip
+	// the Builder's TLS-render inputs ONLY when validation passes — the cnf
+	// and StatefulSet rendered below key on the resolved state, and a
+	// template referencing an unsatisfiable Secret must never reach the
+	// kubelet (validate-and-hold; see ensureTLSSecrets). A resolution
+	// failure is non-wedging: holdTLSLastGood picks the render fallback,
+	// the reconcile continues, updateStatus surfaces
+	// Degraded=TLSSecretError, and tlsErr requeues at the end (the
+	// ExternalServiceError contract).
+	tlsReady, tlsErr := r.ensureTLSSecrets(ctx, &cluster, b)
+	if b.Spec.TLSEnabled() && !tlsReady {
+		if err := r.holdTLSLastGood(ctx, b); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	// Capture the cnf Secret's FULL data map BEFORE ensureCnfSecret
 	// overwrites it: resolveRestartChecksum diffs every key — proxysql.cnf
@@ -191,12 +212,12 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	r.ensureServiceMonitor(ctx, &cluster, b.ServiceMonitor())
 
 	// 3) Status.
-	if err := r.updateStatus(ctx, &cluster, b, summary, extSvcErr); err != nil {
+	if err := r.updateStatus(ctx, &cluster, b, summary, extSvcErr, tlsErr); err != nil {
 		return ctrl.Result{}, err
 	}
-	// A deferred external-Service failure requeues only after everything
+	// Deferred external-Service/TLS failures requeue only after everything
 	// else applied and the Degraded condition landed in status.
-	return ctrl.Result{}, extSvcErr
+	return ctrl.Result{}, errors.Join(extSvcErr, tlsErr)
 }
 
 // currentCnfData reads the cnf Secret's full data map as it stood before
@@ -640,11 +661,12 @@ func (r *ProxySQLClusterReconciler) ensureServiceMonitor(ctx context.Context, ow
 // the message of the existing Rolling condition, which the StatefulSet
 // template diff drives as before.
 //
-// extSvcErr is this reconcile's ensureExternalService outcome: non-nil sets
-// Degraded=True (reason ExternalServiceError, message = the apiserver
-// error); nil clears Degraded — the same end-of-updateStatus clearing that
+// extSvcErr is this reconcile's ensureExternalService outcome and tlsErr
+// its ensureTLSSecrets outcome: either being non-nil sets Degraded=True
+// (reason ExternalServiceError / TLSSecretError, message = the error);
+// both nil clears Degraded — the same end-of-updateStatus clearing that
 // removes a stale RuntimeApplyError once a reconcile completes cleanly.
-func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, summary string, extSvcErr error) error {
+func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, summary string, extSvcErr, tlsErr error) error {
 	var ss appsv1.StatefulSet
 	err := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
 	notFound := apierrors.IsNotFound(err)
@@ -670,7 +692,7 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	cluster.Status.Phase = derivePhase(&ss, notFound, desired, b.Spec.Pause)
 
 	if b.Spec.Pause {
-		return r.updatePausedStatus(ctx, cluster, &ss, extSvcErr)
+		return r.updatePausedStatus(ctx, cluster, &ss, extSvcErr, tlsErr)
 	}
 	r.setCondition(cluster, condTypePaused, metav1.ConditionFalse, "NotPaused", "cluster is not paused")
 
@@ -708,23 +730,27 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 		}
 		r.setCondition(cluster, condTypeProgressing, metav1.ConditionTrue, "Rolling", msg)
 	}
-	r.setDegradedFromExternalService(cluster, extSvcErr)
+	r.setDegradedFromDeferredErrors(cluster, extSvcErr, tlsErr)
 
 	return r.Status().Update(ctx, cluster)
 }
 
-// setDegradedFromExternalService projects this reconcile's
-// ensureExternalService outcome onto the Degraded condition: a persistent
-// apiserver rejection of the external Service (colliding pinned nodePort,
-// ipFamilies mutation, …) surfaces as reason ExternalServiceError; a clean
-// pass removes Degraded — which is also what clears a stale
-// RuntimeApplyError, preserving that contract.
-func (r *ProxySQLClusterReconciler) setDegradedFromExternalService(cluster *proxysqlv1alpha1.ProxySQLCluster, extSvcErr error) {
-	if extSvcErr != nil {
+// setDegradedFromDeferredErrors projects this reconcile's deferred,
+// non-wedging failures onto the Degraded condition: a persistent apiserver
+// rejection of the external Service (colliding pinned nodePort, ipFamilies
+// mutation, …) surfaces as reason ExternalServiceError; a TLS Secret
+// resolution failure (missing Secret/key, cert-manager CRD absent) as
+// reason TLSSecretError. A clean pass removes Degraded — which is also
+// what clears a stale RuntimeApplyError, preserving that contract.
+func (r *ProxySQLClusterReconciler) setDegradedFromDeferredErrors(cluster *proxysqlv1alpha1.ProxySQLCluster, extSvcErr, tlsErr error) {
+	switch {
+	case extSvcErr != nil:
 		r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, "ExternalServiceError", extSvcErr.Error())
-		return
+	case tlsErr != nil:
+		r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, reasonTLSSecretError, tlsErr.Error())
+	default:
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
 	}
-	meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
 }
 
 // externalEndpoint projects the LIVE "<cluster>-external" Service onto the
@@ -784,9 +810,10 @@ func (r *ProxySQLClusterReconciler) externalEndpoint(ctx context.Context, b *bui
 // Paused (ready == 0: fully scaled down) — the Percona pattern referenced
 // in #56. condTypePaused is only ConditionTrue once fully paused; Degraded
 // is cleared since a paused cluster isn't in an error state — unless the
-// external Service (retained during pause) failed to apply this reconcile
-// (extSvcErr), which degrades exactly as it does unpaused.
-func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, ss *appsv1.StatefulSet, extSvcErr error) error {
+// external Service (retained during pause) or the TLS Secret resolution
+// failed this reconcile (extSvcErr/tlsErr), which degrade exactly as they
+// do unpaused.
+func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, ss *appsv1.StatefulSet, extSvcErr, tlsErr error) error {
 	if ss.Status.ReadyReplicas > 0 {
 		msg := fmt.Sprintf("scaling down to 0 replicas (%d still ready)", ss.Status.ReadyReplicas)
 		r.setCondition(cluster, condTypePaused, metav1.ConditionFalse, "Stopping", msg)
@@ -798,7 +825,7 @@ func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, clus
 		r.setCondition(cluster, condTypeAvailable, metav1.ConditionFalse, "Paused", msg)
 		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "Paused", "no rollout in progress; cluster is paused")
 	}
-	r.setDegradedFromExternalService(cluster, extSvcErr)
+	r.setDegradedFromDeferredErrors(cluster, extSvcErr, tlsErr)
 	return r.Status().Update(ctx, cluster)
 }
 
