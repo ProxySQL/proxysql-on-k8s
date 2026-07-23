@@ -127,6 +127,43 @@ func TestSync_PostgreSQLServers_DefaultsTo5432(t *testing.T) {
 	}
 }
 
+func TestSync_PostgreSQLServers_RendersUseSSL(t *testing.T) {
+	rec := &recorder{}
+	ssl := true
+	d := &Desired{
+		PostgreSQLServers: []PostgreSQLServer{
+			{Hostgroup: 0, Hostname: "pg-tls", UseSSL: &ssl, Comment: "tls"},
+			{Hostgroup: 1, Hostname: "pg-plain"}, // UseSSL unset → column default 0
+		},
+	}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	var insert string
+	for _, q := range rec.queries {
+		if strings.HasPrefix(q, "INSERT INTO pgsql_servers") {
+			insert = q
+			break
+		}
+	}
+	if insert == "" {
+		t.Fatalf("no INSERT into pgsql_servers issued; queries=%v", rec.queries)
+	}
+	if !strings.Contains(insert, "use_ssl") {
+		t.Errorf("INSERT column list missing use_ssl\nfull: %s", insert)
+	}
+	for _, want := range []string{
+		// UseSSL=true renders 1 (column order: hostgroup_id,hostname,port,weight,max_connections,use_ssl,comment).
+		"(0,'pg-tls',5432,1,1000,1,'tls')",
+		// Unset UseSSL must render pgsql_servers.use_ssl's NOT NULL DEFAULT 0, not NULL.
+		"(1,'pg-plain',5432,1,1000,0,'')",
+	} {
+		if !strings.Contains(insert, want) {
+			t.Errorf("INSERT missing %q\nfull: %s", want, insert)
+		}
+	}
+}
+
 func TestSync_Variables_AppliedWhenSet(t *testing.T) {
 	rec := &recorder{}
 	d := &Desired{

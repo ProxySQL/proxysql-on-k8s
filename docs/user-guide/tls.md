@@ -123,12 +123,10 @@ spec:
     - {hostgroup: 0, hostname: mysql-primary, port: 3306, useSSL: true}
 ```
 
-**Known gap:** the equivalent `pgsqlServers[].useSSL` field exists in the
-API and is accepted by the CRD, but is not currently wired into the SQL
-sync — setting it has no effect on `pgsql_servers.use_ssl` today. See the
-[ProxySQLConfig reference](../reference/proxysqlconfig.md#pgsqlservers).
-`mysqlServers[].useSSL` and `mysqlUsers[].useSSL` are unaffected and work
-as documented.
+The equivalent `pgsqlServers[].useSSL` field works the same way for
+PostgreSQL backends: it sets `pgsql_servers.use_ssl` on the matching row.
+See the [ProxySQLConfig
+reference](../reference/proxysqlconfig.md#pgsqlservers).
 
 ## Admin (6032) serves TLS too
 

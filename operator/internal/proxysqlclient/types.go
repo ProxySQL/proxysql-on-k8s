@@ -124,6 +124,7 @@ type PostgreSQLServer struct {
 	Port           int32
 	Weight         *int32
 	MaxConnections *int32
+	UseSSL         *bool
 	Comment        string
 }
 

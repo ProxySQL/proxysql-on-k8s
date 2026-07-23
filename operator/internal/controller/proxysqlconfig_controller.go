@@ -363,7 +363,8 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 	for _, s := range cfg.Spec.PostgreSQLServers {
 		d.PostgreSQLServers = append(d.PostgreSQLServers, proxysqlclient.PostgreSQLServer{
 			Hostgroup: s.Hostgroup, Hostname: s.Hostname, Port: s.Port,
-			Weight: s.Weight, MaxConnections: s.MaxConnections, Comment: s.Comment,
+			Weight: s.Weight, MaxConnections: s.MaxConnections,
+			UseSSL: s.UseSSL, Comment: s.Comment,
 		})
 	}
 	for _, u := range cfg.Spec.PostgreSQLUsers {

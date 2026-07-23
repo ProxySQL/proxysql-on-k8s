@@ -277,17 +277,18 @@ func syncPostgreSQLServers(ctx context.Context, c Executor, d *Desired) error {
 		return nil
 	}
 	var b strings.Builder
-	b.WriteString("INSERT INTO pgsql_servers (hostgroup_id,hostname,port,weight,max_connections,comment) VALUES ")
+	b.WriteString("INSERT INTO pgsql_servers (hostgroup_id,hostname,port,weight,max_connections,use_ssl,comment) VALUES ")
 	for i, s := range d.PostgreSQLServers {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, "(%d,%s,%d,%s,%s,%s)",
+		fmt.Fprintf(&b, "(%d,%s,%d,%s,%s,%s,%s)",
 			s.Hostgroup,
 			quote(s.Hostname),
 			defaultInt32(s.Port, 5432),
 			defInt32(s.Weight, 1),            // pgsql_servers.weight NOT NULL DEFAULT 1
 			defInt32(s.MaxConnections, 1000), // NOT NULL DEFAULT 1000
+			defBoolAsInt(s.UseSSL, false),    // NOT NULL DEFAULT 0
 			quote(s.Comment),
 		)
 	}

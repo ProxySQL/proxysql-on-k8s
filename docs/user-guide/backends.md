@@ -108,8 +108,7 @@ trade-off analysis in the
   authenticates the client itself, then opens backend connections with
   the same credentials.
 - **TLS to the backend** where required: `useSSL: true` per
-  `mysqlServers` entry (MySQL protocol only — `pgsqlServers` has no
-  `useSSL` field today).
+  `mysqlServers` / `pgsqlServers` entry.
 
 ## The monitor user
 

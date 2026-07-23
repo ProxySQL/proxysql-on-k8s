@@ -155,6 +155,7 @@ column default, never NULL.
 | `port` | `port` | `5432` |
 | `weight` | `weight` | `1` |
 | `maxConnections` | `max_connections` | `1000` |
+| `useSSL` | `use_ssl` | `0` |
 | `comment` | `comment` | `''` |
 
 ### pgsql_users
