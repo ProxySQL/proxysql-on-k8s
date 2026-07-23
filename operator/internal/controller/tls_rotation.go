@@ -249,8 +249,11 @@ func (r *ProxySQLClusterReconciler) resolveTLSRotation(
 		// Keep the marker UNADVANCED: a pod that is merely NotReady right
 		// now may still serve the old cert once it recovers, and freshly
 		// booting pods trigger a new reconcile (STS status change) that
-		// verifies them here. No window state either — nothing was dialed.
-		return tlsRotationOutcome{applied: cur.tlsApplied, restart: cur.tlsRestart}, nil
+		// verifies them here. Any open window state is preserved: pods
+		// flapping Ready/NotReady mid-rotation must not reset the clock
+		// (that would defer the restart fallback indefinitely), and stale
+		// state is hash- and skew-guarded by parseTLSRotationState.
+		return tlsRotationOutcome{applied: cur.tlsApplied, state: cur.tlsRotationState, restart: cur.tlsRestart}, nil
 	}
 
 	expectedFP, err := tlsutil.LeafFingerprint(sec.Data["tls.crt"])
@@ -261,11 +264,10 @@ func (r *ProxySQLClusterReconciler) resolveTLSRotation(
 	if !pool.AppendCertsFromPEM(sec.Data["ca.crt"]) {
 		return keep, fmt.Errorf("tls secret %q: ca.crt contains no usable certificates", secretName)
 	}
-	dialCfg := pinnedTLSConfig(pool, expectedFP)
-
 	start := parseTLSRotationState(cur.tlsRotationState, secretHash, time.Now())
 	var failures []string
 	for _, ep := range endpoints {
+		dialCfg := pinnedTLSConfig(pool, expectedFP, ep.ServerName)
 		if verr := r.reloadAndVerifyTLS(ctx, ep.Addr, radminPassword, expectedFP, dialCfg); verr != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", ep.Addr, verr))
 		}
@@ -348,10 +350,17 @@ func (r *ProxySQLClusterReconciler) reloadAndVerifyTLS(ctx context.Context, addr
 	return lastErr
 }
 
-// pinnedTLSConfig returns the rotation dials' tls.Config: the peer is
-// accepted iff its leaf is EXACTLY the Secret's new tls.crt (fingerprint
-// pin) or its chain verifies against the Secret's current CA pool (the
-// not-yet-reloaded old cert in every tier that keeps the CA stable).
+// pinnedTLSConfig returns the rotation dials' tls.Config for ONE endpoint:
+// the peer is accepted iff its leaf is EXACTLY the Secret's new tls.crt
+// (fingerprint pin) or its chain verifies against the Secret's current CA
+// pool AND covers serverName — the endpoint's per-pod DNS identity (the
+// not-yet-reloaded old cert in every tier that keeps the CA stable, whose
+// wildcard SAN covers the pod). Chain trust alone is not identity: with a
+// shared corporate CA or ClusterIssuer, any cert+key from the same CA
+// would otherwise pass and receive the radmin password. The fingerprint
+// branch stays name-free: mid-rotation the pinned content IS the identity,
+// so a user cert lacking the per-pod SAN degrades to the restart fallback
+// rather than blocking the rotation.
 //
 // InsecureSkipVerify here disables only the DEFAULT verifier so that
 // VerifyPeerCertificate below is the sole authority — this is Go's
@@ -362,12 +371,13 @@ func (r *ProxySQLClusterReconciler) reloadAndVerifyTLS(ctx context.Context, addr
 // while the pod still serves the old material — therefore cannot be
 // reloaded over a verified channel; the engine's bounded window then falls
 // back to the rolling restart, where the kubelet (not the network)
-// delivers the new material. Hostname verification is intentionally
-// absent: mid-rotation the identity IS the pinned content, and the pod IP
-// comes from the apiserver, not a resolver.
-func pinnedTLSConfig(pool *x509.CertPool, expectedFP string) *tls.Config {
+// delivers the new material. ServerName is set for SNI only (the default
+// verifier is off); the chained branch's DNSName check below is what
+// enforces it.
+func pinnedTLSConfig(pool *x509.CertPool, expectedFP, serverName string) *tls.Config {
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS12,
+		ServerName:         serverName,
 		InsecureSkipVerify: true, // custom pinned verification below is the sole verifier; see doc comment
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
@@ -387,8 +397,8 @@ func pinnedTLSConfig(pool *x509.CertPool, expectedFP string) *tls.Config {
 					intermediates.AddCert(ic)
 				}
 			}
-			if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, Intermediates: intermediates}); err != nil {
-				return fmt.Errorf("peer certificate is neither the expected rotated leaf nor chained to the cluster CA: %w", err)
+			if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, Intermediates: intermediates, DNSName: serverName}); err != nil {
+				return fmt.Errorf("peer certificate is neither the expected rotated leaf nor chained to the cluster CA for %q: %w", serverName, err)
 			}
 			return nil
 		},

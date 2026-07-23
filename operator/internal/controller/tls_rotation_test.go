@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"maps"
 	"strings"
@@ -156,6 +158,65 @@ func TestMergeSummaries(t *testing.T) {
 		if got := mergeSummaries(tt.vars, tt.tls); got != tt.want {
 			t.Errorf("mergeSummaries(%q, %q) = %q, want %q", tt.vars, tt.tls, got, tt.want)
 		}
+	}
+}
+
+// certDER extracts the DER bytes of the first PEM certificate block, the
+// shape VerifyPeerCertificate receives on the wire.
+func certDER(t *testing.T, certPEM []byte) []byte {
+	t.Helper()
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatalf("no PEM block in certificate data")
+	}
+	return block.Bytes
+}
+
+func TestPinnedTLSConfig_ChainedBranchRequiresServerName(t *testing.T) {
+	const serverName = "rot-0.rot-headless.default.svc"
+
+	caCrt, caKey, err := tlsutil.NewCA("test-ca", time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCrt) {
+		t.Fatalf("AppendCertsFromPEM failed")
+	}
+
+	// The rotated leaf deliberately lacks the per-pod SAN: the fingerprint
+	// branch must stay name-free (mid-rotation the pinned content IS the
+	// identity).
+	newCrt, _, err := tlsutil.IssueServing(caCrt, caKey, []string{"unrelated.example"}, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueServing: %v", err)
+	}
+	expectedFP, err := tlsutil.LeafFingerprint(newCrt)
+	if err != nil {
+		t.Fatalf("LeafFingerprint: %v", err)
+	}
+	// The not-yet-reloaded old leaf covers the pod via the wildcard SAN.
+	oldCrt, _, err := tlsutil.IssueServing(caCrt, caKey, tlsutil.SANsFor("rot", "default", nil), time.Hour)
+	if err != nil {
+		t.Fatalf("IssueServing: %v", err)
+	}
+	// A different subject issued by the SAME CA (shared corporate CA /
+	// ClusterIssuer): chain-valid, wrong identity.
+	otherCrt, _, err := tlsutil.IssueServing(caCrt, caKey, []string{"victim.other-app.svc"}, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueServing: %v", err)
+	}
+
+	verify := pinnedTLSConfig(pool, expectedFP, serverName).VerifyPeerCertificate
+
+	if err := verify([][]byte{certDER(t, newCrt)}, nil); err != nil {
+		t.Errorf("fingerprint-pinned rotated leaf rejected: %v (the pinned content is the identity; SANs must not matter)", err)
+	}
+	if err := verify([][]byte{certDER(t, oldCrt)}, nil); err != nil {
+		t.Errorf("old leaf carrying the per-pod SAN rejected: %v (breaks the restart-free leaf-only rotation)", err)
+	}
+	if err := verify([][]byte{certDER(t, otherCrt)}, nil); err == nil {
+		t.Errorf("CA-chained peer without the %s SAN accepted; an interceptor holding any cert from the same CA would receive the radmin password", serverName)
 	}
 }
 
@@ -330,15 +391,20 @@ func TestResolveTLSRotation_NoOpClearsStaleState(t *testing.T) {
 func TestResolveTLSRotation_ZeroReadyPodsKeepsMarkerUnadvanced(t *testing.T) {
 	fx := newRotationFixture(t, 0)
 
-	out, err := fx.resolve(t, stsAnnotations{tlsApplied: "old-hash"})
+	// An open rotation window from an earlier pass: pods flapping
+	// Ready/NotReady mid-rotation must not reset the window clock, or the
+	// restart fallback is deferred indefinitely.
+	window := formatTLSRotationState(fx.hash, time.Now().Add(-time.Minute))
+
+	out, err := fx.resolve(t, stsAnnotations{tlsApplied: "old-hash", tlsRotationState: window})
 	if err != nil {
 		t.Fatalf("resolveTLSRotation: %v", err)
 	}
 	if out.applied != "old-hash" {
 		t.Errorf("applied = %q, want unadvanced old-hash (a NotReady pod may still serve the old cert)", out.applied)
 	}
-	if out.state != "" {
-		t.Errorf("state = %q, want empty (no rotation window without dials)", out.state)
+	if out.state != window {
+		t.Errorf("state = %q, want preserved window %q (zero-endpoints pass must not restart the clock)", out.state, window)
 	}
 }
 
