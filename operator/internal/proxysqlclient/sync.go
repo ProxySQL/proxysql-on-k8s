@@ -419,6 +419,15 @@ func ApplyVariables(ctx context.Context, c Executor, vars map[string]string, dom
 	return syncVariables(ctx, c, vars, domain)
 }
 
+// ReloadTLS issues PROXYSQL RELOAD TLS: ProxySQL re-reads the fixed datadir
+// certificate files (proxysql-{ca,cert,key}.pem — for operator-managed
+// clusters, symlinks into the mounted TLS Secret) and starts serving the
+// new material on every listener with zero restarts. Self-contained: no
+// LOAD/SAVE cycle applies to it.
+func ReloadTLS(ctx context.Context, c Executor) error {
+	return c.Exec(ctx, "PROXYSQL RELOAD TLS")
+}
+
 // syncSQLStatements executes user-provided raw admin SQL in listed order.
 // Unlike the table sections, the first failure aborts the remaining
 // statements: order may carry dependencies (e.g. UPDATE then LOAD).
