@@ -79,7 +79,7 @@ spec:
 One read-only mount of the RESOLVED tls Secret (tier 1: the user's
 Secret directly; tiers 2-3: `<cluster>-tls`) at `/etc/proxysql/tls`
 (`tls.crt`, `tls.key`, `ca.crt`). Rendered into the bootstrap cnf **only
-when `tls.enabled`** — all TLS variables join the reserved-key set (like
+when `tls.enabled`** — all rendered TLS variables join the reserved-key set (like
 credentials: not user-overridable via `spec.variables`, structural for
 classification):
 
