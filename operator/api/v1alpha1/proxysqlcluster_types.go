@@ -602,6 +602,16 @@ type PDBSpec struct {
 // and manages a self-signed CA and serving cert (tier 3). Duration and
 // RenewBefore apply only to tiers 2 and 3 — a user-supplied Secret (tier 1)
 // is never re-issued by the operator.
+//
+// The admission rule below mirrors defaultTLS's zero-means-default handling:
+// metav1.Duration is a struct, so omitempty never omits it — Go clients
+// sending TLSSpec{Enabled: true} serialize duration/renewBefore as "0s",
+// bypassing CRD defaulting. A renewBefore >= the effective duration would put
+// a fresh certificate permanently inside its renewal window: reissue on every
+// reconcile, each Secret write re-triggering reconcile via the name-based
+// watch, RELOADing TLS on every pod — an error-free hot loop.
+//
+// +kubebuilder:validation:XValidation:rule="(duration(self.renewBefore) == duration('0s') ? duration('720h') : duration(self.renewBefore)) < (duration(self.duration) == duration('0s') ? duration('2160h') : duration(self.duration))",message="tls.renewBefore must be shorter than tls.duration (a zero duration means its default: duration 2160h, renewBefore 720h)"
 type TLSSpec struct {
 	// Enabled turns TLS on. Default off: absent or false renders exactly
 	// what the operator renders today (golden-pinned; no upgrade restart).
@@ -630,6 +640,9 @@ type TLSSpec struct {
 
 	// RenewBefore is how long before expiry the certificate is reissued.
 	// Applies to tiers 2 (cert-manager) and 3 (operator self-signed) only.
+	// Must be shorter than Duration — enforced at admission (see the
+	// TLSSpec-level rule), otherwise a fresh certificate would always be
+	// inside its renewal window and reissue on every reconcile.
 	// +optional
 	// +kubebuilder:default="720h"
 	RenewBefore metav1.Duration `json:"renewBefore,omitempty"`

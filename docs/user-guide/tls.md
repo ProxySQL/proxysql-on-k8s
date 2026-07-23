@@ -290,6 +290,13 @@ mysql -h proxysql -P 6033 -u app -p --ssl-mode=VERIFY_CA --ssl-ca=/path/to/ca.cr
 Get `ca.crt` from the resolved TLS Secret (`<cluster>-tls` on tiers 2/3,
 or your own `secretName` on tier 1) — e.g.
 `kubectl get secret <cluster>-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt`.
+**Connecting by the cluster-domain FQDN needs `extraSANs`:** the issued
+certificate's SAN set does not include
+`<cluster>.<namespace>.svc.cluster.local` (the cluster domain isn't
+discoverable by the operator), so a client that verifies the hostname
+against that FQDN — MariaDB's `--ssl-verify-server-cert`, Oracle's
+`--ssl-mode=VERIFY_IDENTITY` — fails unless you add it via
+`spec.tls.extraSANs`.
 Note TLS here is **available, not mandatory**: `spec.tls` gives ProxySQL a
 certificate to present, but a plaintext connection still succeeds unless
 you separately require TLS per user (`mysqlUsers[].useSSL: true` on the

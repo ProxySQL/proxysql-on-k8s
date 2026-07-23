@@ -2643,6 +2643,9 @@ spec:
                     description: |-
                       RenewBefore is how long before expiry the certificate is reissued.
                       Applies to tiers 2 (cert-manager) and 3 (operator self-signed) only.
+                      Must be shorter than Duration — enforced at admission (see the
+                      TLSSpec-level rule), otherwise a fresh certificate would always be
+                      inside its renewal window and reissue on every reconcile.
                     type: string
                   secretName:
                     description: |-
@@ -2653,6 +2656,12 @@ spec:
                       re-issues a Secret referenced this way — that's the caller's job.
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: 'tls.renewBefore must be shorter than tls.duration (a zero
+                    duration means its default: duration 2160h, renewBefore 720h)'
+                  rule: '(duration(self.renewBefore) == duration(''0s'') ? duration(''720h'')
+                    : duration(self.renewBefore)) < (duration(self.duration) == duration(''0s'')
+                    ? duration(''2160h'') : duration(self.duration))'
               tolerations:
                 description: Tolerations for pod scheduling.
                 items:

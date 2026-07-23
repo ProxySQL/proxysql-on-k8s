@@ -521,8 +521,8 @@ operational caveat — see the [TLS user guide](../user-guide/tls.md).
 | `tls.enabled` | `bool` | `false` | — | Turns TLS on. Plain `bool` (default-off; matches repo convention for default-off booleans — see `service.external.enabled`). |
 | `tls.secretName` | `string` | `""` | — | Tier 1: a user-provided `kubernetes.io/tls` Secret (`tls.crt`, `tls.key`, and **`ca.crt`, required even here** — see [validation](#validate-and-hold)) used as-is for the frontend/admin serving certificate. Wins over `issuerRef` and the self-signed fallback whenever non-empty. The operator never rotates or re-issues a Secret referenced this way. |
 | `tls.issuerRef` | `*TLSIssuerRef` | `nil` | see [TLSIssuerRef](#tlsissuerref) | Tier 2: a cert-manager `Issuer`/`ClusterIssuer`. Used when `secretName` is empty and `issuerRef.name` is set. |
-| `tls.duration` | `metav1.Duration` | `2160h` (CRD + operator, i.e. 90 days) | — | Issued certificate lifetime. Applies to tiers 2 and 3 only — ignored for tier 1. |
-| `tls.renewBefore` | `metav1.Duration` | `720h` (CRD + operator, i.e. 30 days) | — | How long before expiry the certificate is reissued. Tiers 2 and 3 only. |
+| `tls.duration` | `metav1.Duration` | `2160h` (CRD + operator, i.e. 90 days) | must exceed `renewBefore` (CEL) | Issued certificate lifetime. Applies to tiers 2 and 3 only — ignored for tier 1. |
+| `tls.renewBefore` | `metav1.Duration` | `720h` (CRD + operator, i.e. 30 days) | must be shorter than `duration` (CEL; a zero value stands for that field's default) | How long before expiry the certificate is reissued. Tiers 2 and 3 only. `renewBefore >= duration` is rejected at admission — it would put a fresh certificate permanently inside its renewal window and reissue it on every reconcile. |
 | `tls.extraSANs` | `[]string` | none | — | Extra DNS names or IPs added to the issued serving certificate, on top of the operator's default set (see [SAN set](#san-set)). Useful for an external Service's LoadBalancer hostname or a custom DNS record. Ignored for tier 1 — that certificate is supplied as-is. |
 | `tls.backend` | `*TLSBackendSpec` | `nil` (backend TLS variables not rendered) | see [TLSBackendSpec](#tlsbackendspec) | ProxySQL's trust toward the **backend databases** — a different PKI from the rest of this block; see [TLSBackendSpec](#tlsbackendspec) below. |
 
@@ -716,7 +716,10 @@ The default SAN set (tiers 2 and 3; `extraSANs` appends to it) is, in
 order: the cluster name, `<cluster>.<namespace>`,
 `<cluster>.<namespace>.svc`, a **wildcard** covering every pod's headless
 DNS name (`*.<cluster>-headless.<namespace>.svc`), and
-`<cluster>-external`.
+`<cluster>-external`. The cluster-domain FQDN
+(`<cluster>.<namespace>.svc.cluster.local`) is **not** included — the
+cluster domain isn't discoverable by the operator — so clients that verify
+the hostname against that FQDN need it added via `extraSANs`.
 
 ## Configuration changes: runtime vs restart
 

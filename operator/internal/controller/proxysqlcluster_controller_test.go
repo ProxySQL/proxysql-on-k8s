@@ -1620,6 +1620,64 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
 			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
 		})
+
+		It("rejects tls.renewBefore >= duration at admission", func() {
+			ctx := context.Background()
+			bad := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "pxc-tls-renew-bad", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+					TLS: &proxysqlv1alpha1.TLSSpec{
+						Enabled:     true,
+						Duration:    metav1.Duration{Duration: time.Hour},
+						RenewBefore: metav1.Duration{Duration: 2 * time.Hour},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, bad)
+			if err == nil {
+				// Admission let it through (rule missing/broken): remove it, or
+				// the leaked always-in-renewal cluster hot-loops the shared
+				// manager started by later specs — exactly the failure mode
+				// this rule exists to prevent.
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, bad) })
+			}
+			Expect(err).To(HaveOccurred(),
+				"renewBefore >= duration puts a fresh cert permanently inside its renewal window: reissue every reconcile, RELOAD on every pod — an error-free hot loop")
+			Expect(err.Error()).To(ContainSubstring("renewBefore"),
+				"the CEL message must name renewBefore")
+		})
+
+		It("accepts default and zero tls durations at admission", func() {
+			ctx := context.Background()
+			// Zero values: metav1.Duration is a struct, so omitempty never
+			// omits it — Go clients sending TLSSpec{Enabled: true} serialize
+			// duration: "0s", renewBefore: "0s", bypassing CRD defaulting.
+			// defaultTLS treats 0 as "use the default" (2160h/720h), so the
+			// admission rule must too.
+			zero := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "pxc-tls-renew-zero", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+					TLS: &proxysqlv1alpha1.TLSSpec{Enabled: true},
+				},
+			}
+			Expect(k8sClient.Create(ctx, zero)).To(Succeed(),
+				"zero durations mean the defaults (2160h/720h) and must be accepted")
+			Expect(k8sClient.Delete(ctx, zero)).To(Succeed())
+
+			explicit := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "pxc-tls-renew-explicit", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+					TLS: &proxysqlv1alpha1.TLSSpec{
+						Enabled:     true,
+						Duration:    metav1.Duration{Duration: 2160 * time.Hour},
+						RenewBefore: metav1.Duration{Duration: 720 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, explicit)).To(Succeed(),
+				"the documented defaults given explicitly must be accepted")
+			Expect(k8sClient.Delete(ctx, explicit)).To(Succeed())
+		})
 	})
 
 	When("the tls Secret content rotates (restart-free rotation engine)", func() {
