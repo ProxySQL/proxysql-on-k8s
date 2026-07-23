@@ -76,7 +76,8 @@ spec:
 
 ## Wiring (all three surfaces)
 
-One read-only mount of `<cluster>-tls` at `/etc/proxysql/tls`
+One read-only mount of the RESOLVED tls Secret (tier 1: the user's
+Secret directly; tiers 2-3: `<cluster>-tls`) at `/etc/proxysql/tls`
 (`tls.crt`, `tls.key`, `ca.crt`). Rendered into the bootstrap cnf **only
 when `tls.enabled`** — all TLS variables join the reserved-key set (like
 credentials: not user-overridable via `spec.variables`, structural for
@@ -127,9 +128,13 @@ the cnf/structural machinery by design. Flow:
 
 ## Enabling/disabling semantics
 
-- Enabling TLS on a live cluster adds TLS variables to the cnf ⇒ one
-  documented structural rolling restart. Rotation thereafter is
-  restart-free. Disabling likewise restarts (variables leave the cnf).
+- Enabling TLS on a live cluster changes the pod template (init
+  container + Secret mount; backend refs additionally add cnf variables)
+  ⇒ one documented rolling restart driven by the StatefulSet diff.
+  Rotation thereafter is restart-free. Disabling likewise restarts;
+  on PERSISTENT datadirs the retained pem symlinks dangle after the
+  mount disappears — behavior pinned by a dedicated probe (Task 5/6)
+  and documented (cleanup caveat if the probe shows breakage).
 - With persistence enabled, `--reload` merges the TLS variables over
   `proxysql.db` on boot (already-shipped semantics), so restarts converge.
 
