@@ -18,10 +18,11 @@ runtime configuration pushed to these pods see the
 
 The operator reconciles a `ProxySQLCluster` into: a StatefulSet (named after
 the cluster), a headless Service (`<name>-headless`), a client-facing Service
-(`<name>`), a bootstrap-cnf Secret (`<name>-cnf`), an auth Secret (created as
-`<name>` unless `spec.auth.secretName` references an existing one), an
-optional PodDisruptionBudget (`<name>`), and an optional ServiceMonitor
-(`<name>`).
+(`<name>`), an optional curated external Service (`<name>-external`, see
+[External Service](#external-service)), a bootstrap-cnf Secret (`<name>-cnf`),
+an auth Secret (created as `<name>` unless `spec.auth.secretName` references
+an existing one), an optional PodDisruptionBudget (`<name>`), and an optional
+ServiceMonitor (`<name>`).
 
 ## How defaults are applied
 
@@ -172,6 +173,7 @@ Service.
 |---|---|---|---|---|
 | `service.annotations` | `map[string]string` | none | — | **Merged** onto the Service (labels are overwritten, annotations are not): spec keys win, annotations written by other controllers (cloud LB controllers etc.) are preserved. **Caveat:** a key you *remove* from this map lingers on the Service until removed by hand — the operator cannot distinguish a removed spec key from a foreign controller's key. |
 | `service.sessionAffinityTimeoutSeconds` | `*int32` | none (no affinity) | 1–86400 | When set, enables `sessionAffinity: ClientIP` with this timeout. |
+| `service.type` | `corev1.ServiceType` | `ClusterIP` (CRD + operator) | `ClusterIP`, `NodePort`, `LoadBalancer` | Sets the type of the **existing** regular Service in place — no new object is created, the ClusterIP is retained. **Every enabled port rides this Service, admin (6032) included** — there is no way to flip the type without also exposing admin on it. For a curated entry point that leaves admin off by default, use [`service.external`](#external-service) instead. |
 
 Service port layout:
 
@@ -185,6 +187,80 @@ Service port layout:
 
 The headless Service sets `publishNotReadyAddresses: true` so pods are
 DNS-resolvable during bootstrap.
+
+### External Service
+
+`service.external` (pointer; `nil` = disabled, the default) creates a
+**second, independent** Service, `<cluster>-external`, for out-of-cluster
+clients — independent of the regular Service's type and annotations. One
+Kubernetes Service carries multiple ports, so exposing several listeners
+externally never needs more than this one object (no per-port LoadBalancer).
+Disabling it (`enabled: false`, or removing the block) deletes the Service;
+an owner reference also garbage-collects it if the `ProxySQLCluster` itself
+is deleted. It is **retained while `spec.pause: true`** — pause semantics
+only retract the StatefulSet, not Services.
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `service.external.enabled` | `bool` | `false` | — | Plain `bool` (default-off, zero value is the default — repo convention differs from the `*bool` default-true fields elsewhere). |
+| `service.external.type` | `corev1.ServiceType` | `LoadBalancer` (CRD + operator) | `NodePort`, `LoadBalancer` | `ClusterIP` is not offered here — an internal-only second Service would duplicate the regular one. |
+| `service.external.annotations` | `map[string]string` | none | — | Merged the same way as `service.annotations`, but tracked **separately** — this Service's annotations do not inherit or share state with the regular Service's. |
+| `service.external.loadBalancerClass` | `*string` | none | — | LoadBalancer-only; see the drop table below. |
+| `service.external.externalTrafficPolicy` | `corev1.ServiceExternalTrafficPolicy` | apiserver default (`Cluster`) | `Cluster`, `Local` | Governs traffic arriving via the external (NodePort/LoadBalancer) address. Applies regardless of type. |
+| `service.external.internalTrafficPolicy` | `*corev1.ServiceInternalTrafficPolicy` | apiserver default (`Cluster`) | `Cluster`, `Local` | Governs traffic arriving via the Service's cluster-internal ClusterIP; independent of `externalTrafficPolicy`. Applies regardless of type. |
+| `service.external.loadBalancerSourceRanges` | `[]string` | none | — | LoadBalancer-only; see the drop table below. Recommended whenever `exposeAdmin` is set — see [Security](../user-guide/security.md#network-exposure-surface). |
+| `service.external.allocateLoadBalancerNodePorts` | `*bool` | `true` (CRD + operator) | — | LoadBalancer-only; see the drop table below. `*bool` so explicit `false` survives serialization (repo convention). |
+| `service.external.healthCheckNodePort` | `int32` | `0` (apiserver auto-allocates) | 0–32767 | LoadBalancer-only; see the drop table below. Only meaningful with `externalTrafficPolicy: Local`. |
+| `service.external.ipFamilyPolicy` | `*corev1.IPFamilyPolicy` | none | `SingleStack`, `PreferDualStack`, `RequireDualStack` | Applies regardless of type. |
+| `service.external.ipFamilies` | `[]corev1.IPFamily` | none | `IPv4`, `IPv6` | Applies regardless of type. **Immutable after the Service is created** — the apiserver rejects a mutation of `ipFamilies` on an existing Service. The operator does not special-case this: the rejection surfaces via the `Degraded`/`ExternalServiceError` condition (see [status reference](status.md)) and keeps retrying with the same rejected spec. To actually change families, toggle `enabled: false` then back to `true` (or delete/re-add the block) so the Service is recreated rather than mutated. |
+| `service.external.ports` | `map[string]ExternalPortSpec` | empty map → default set | keys restricted to `mysql`, `pgsql`, `web`, `metrics` (CEL) | Selects which listeners ride the external Service. See port policy below. |
+| `service.external.ports.<name>.nodePort` | `int32` | `0` (auto-allocate) | `0`, or `30000`–`32767` (CEL) | Pins the node port for that listener. |
+| `service.external.exposeAdmin` | `bool` | `false` | — | Adds the admin port (6032). **Read the warning below before setting this.** |
+
+**Port policy.** A listener rides the external Service only when it is
+*selected* **and** its protocol is enabled in the cluster spec:
+
+| Port | Selected when `ports` is empty (default set) | Selected when `ports` is non-empty | Also requires |
+|---|---|---|---|
+| `mysql` | yes | listed under `ports` | `protocols.mysql` enabled |
+| `pgsql` | yes | listed under `ports` | `protocols.pgsql` enabled |
+| `web` | no | listed under `ports` | `protocols.web` enabled |
+| `metrics` | no | listed under `ports` | `metrics.enabled` |
+| `admin` (6032) | no | no (`admin` is not a valid `ports` key — rejected at admission) | `exposeAdmin: true`, exclusively |
+
+So `ports: {}` (or omitted) yields mysql + pgsql, each only if its protocol
+is enabled — the external Service's default is **data-plane traffic only**.
+`web`/`metrics` must be both listed under `ports` *and* enabled to appear;
+listing a disabled protocol is a no-op, not an error.
+
+**The `exposeAdmin` warning.** Setting `exposeAdmin: true` puts the
+ProxySQL admin interface — the account that can rewrite every routing rule,
+user, and backend the proxy knows about — on a network edge. It is gated by
+this boolean alone: an `admin` entry under `ports` is never sufficient (CEL
+rejects it, and the builder ignores it defensively even so), specifically
+so a reviewer can grep this one field to find every externally admin-exposed
+cluster. Combine it with `loadBalancerSourceRanges` and a NetworkPolicy — see
+[Security](../user-guide/security.md#network-exposure-surface) for the full
+recommendation.
+
+**LoadBalancer-only fields, dropped on `NodePort`.** `loadBalancerClass`,
+`loadBalancerSourceRanges`, `allocateLoadBalancerNodePorts`, and
+`healthCheckNodePort` are only sent to the apiserver when
+`service.external.type: LoadBalancer`. On `NodePort` the builder omits them
+entirely — the apiserver otherwise rejects `allocateLoadBalancerNodePorts`
+and `loadBalancerClass` outright ("may only be used when 'type' is
+'LoadBalancer'"), and the other two carry LB-only semantics. This applies
+even when the CRD default (`allocateLoadBalancerNodePorts: true`) would
+otherwise populate the field.
+
+**Apply failures.** A persistent apiserver rejection of the external
+Service — a pinned `nodePort` colliding with another Service, the
+`ipFamilies` immutability case above, or similar — does **not** wedge the
+rest of the reconcile: the StatefulSet, PodDisruptionBudget, and
+ServiceMonitor still apply on the same pass. The failure surfaces as
+`Degraded=True`, reason `ExternalServiceError` (see [status
+reference](status.md)), and clears on the next reconcile where the external
+Service applies cleanly.
 
 ### Networking (tcpKeepalive)
 
@@ -528,9 +604,22 @@ just landed.
 | `readyReplicas` | `int32` | Ready replicas of the underlying StatefulSet. |
 | `updatedReplicas` | `int32` | Pods at the current StatefulSet revision. |
 | `phase` | `string` | Coarse single-word projection for dashboards; see table below. Conditions remain the source of truth. |
-| `endpoints` | `*ClusterEndpoints` | In-cluster DNS `host:port` per enabled surface, pointing at the regular Service: `mysql`, `pgsql`, `admin`, `web`, `metrics`. Empty field = surface disabled (`admin` is always set). Host form: `<name>.<namespace>.svc`. |
+| `endpoints` | `*ClusterEndpoints` | In-cluster DNS `host:port` per enabled surface, pointing at the regular Service: `mysql`, `pgsql`, `admin`, `web`, `metrics`, plus `external` — see below. Empty field = surface disabled (`admin` is always set). Host form: `<name>.<namespace>.svc`. |
 | `adminSecretName` | `string` | The auth Secret the operator wired in (created or referenced). |
 | `conditions` | `[]metav1.Condition` | `Available`, `Progressing`, `Degraded`, `Paused`, `ServiceMonitorReady` — full reason inventory in the [status reference](status.md). |
+
+### `endpoints.external`
+
+Unlike the rest of `endpoints` (a pure projection of the spec), `external`
+depends on apiserver/cloud-provider allocations that happen asynchronously,
+so it is read back from the **live** `<cluster>-external` Service on every
+reconcile. Empty whenever `service.external` is absent/disabled, or the
+Service was just created and hasn't been provisioned yet:
+
+| `service.external.type` | Format | Notes |
+|---|---|---|
+| `LoadBalancer` | `"host:port"` | `host` is the first `status.loadBalancer.ingress[].ip`, falling back to `.hostname` when the provider only assigns one (e.g. AWS ELB). `port` is the external Service's **first** port — regardless of how many ports it carries, since they all share one host. **Empty until the cloud provider provisions the load balancer** — poll `status.endpoints.external` (or `kubectl get svc <cluster>-external`) rather than assuming it's populated right after `enabled: true` lands. |
+| `NodePort` | comma-separated port list, e.g. `"30001,30002"` | The allocated node ports, in the external Service's port order; no host, since every cluster node's IP serves them. |
 
 ### Phase semantics
 

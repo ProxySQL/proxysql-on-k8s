@@ -126,17 +126,23 @@ need it, find another way.
 
 ## Network exposure surface
 
-All operator-managed Services are **ClusterIP** — nothing is exposed
-outside the cluster unless you do it yourself
-([how](./clusters.md#exposing-the-service)).
+By default every operator-managed Service is **ClusterIP** — nothing is
+exposed outside the cluster unless you configure it. Two opt-in knobs
+change that, both covered in detail in [Clusters — exposing the
+Service](./clusters.md#exposing-the-service): flipping
+`spec.service.type` to `NodePort`/`LoadBalancer` (puts every enabled port
+of the *regular* Service on the edge, admin included, with no way to
+carve it out), and `spec.service.external` (a second, curated Service,
+`<cluster>-external`, whose default port set excludes admin and whose
+`ports`/`exposeAdmin` fields decide exactly what rides it).
 
-| Port | Surface | On regular Service | On headless Service |
-| --- | --- | --- | --- |
-| 6033 | MySQL protocol (data) | yes (when enabled) | yes |
-| 6133 | PostgreSQL protocol (data) | yes (when enabled) | yes |
-| 6032 | **admin** (MySQL wire) | yes, always | yes, always |
-| 6070 | metrics (REST/Prometheus) | yes (when enabled) | no |
-| 6080 | stats web UI (HTTPS, self-signed) | yes (when enabled) | no |
+| Port | Surface | On regular Service | On headless Service | On external Service |
+| --- | --- | --- | --- | --- |
+| 6033 | MySQL protocol (data) | yes (when enabled) | yes | when enabled + selected (default set) |
+| 6133 | PostgreSQL protocol (data) | yes (when enabled) | yes | when enabled + selected (default set) |
+| 6032 | **admin** (MySQL wire) | yes, always | yes, always | **only with `exposeAdmin: true`** |
+| 6070 | metrics (REST/Prometheus) | yes (when enabled) | no | only when listed under `ports` + enabled |
+| 6080 | stats web UI (HTTPS, self-signed) | yes (when enabled) | no | only when listed under `ports` + enabled |
 
 Points to note:
 
@@ -150,6 +156,38 @@ Points to note:
   (the operator and any DBA tooling are the only legitimate clients).
 - Backend-side TLS for MySQL backends is per-server opt-in via
   `mysqlServers[].useSSL` in the `ProxySQLConfig`.
+
+### Exposing anything externally: source ranges and NetworkPolicy
+
+**Whenever you turn on `spec.service.external` (or flip `spec.service.type`
+away from `ClusterIP`), restrict who can reach it.** Set
+`service.external.loadBalancerSourceRanges` to the CIDR blocks that
+legitimately need access — most cloud LB implementations enforce this at
+the load balancer itself, before traffic reaches the cluster network. It
+has no effect on `NodePort`: pair a `NodePort` external Service with a
+NetworkPolicy (or an upstream firewall/security-group rule on the nodes)
+instead, since any node's kernel will accept the connection regardless of
+source. Either way, also add a NetworkPolicy scoped to the ProxySQL pods'
+selector labels (`proxysql.com/cluster=<cluster>`) as defense in depth —
+source ranges/security groups protect the edge, a NetworkPolicy protects
+the pod if that edge is ever misconfigured or bypassed.
+
+**Never expose admin (`service.external.exposeAdmin: true` or `service.type`
+with admin riding along) without both of the above in place.** The admin
+account can rewrite every routing rule, credential, and backend the proxy
+knows — treat it like you would a database superuser account reachable
+from the internet. Prefer keeping admin cluster-internal (the default
+external port set already excludes it) and reaching it through
+`kubectl port-forward`, a bastion, or an internal-only jump host instead of
+exposing it directly, even behind source ranges.
+
+**Exposing metrics externally is a softer risk, but still worth a
+second thought.** The `/metrics`/REST endpoint (6070) discloses
+operational detail — connection counts, query rates, backend topology —
+that's information disclosure rather than a control-plane risk, but it's
+still not something to hand to the open internet by default. Scope it with
+`loadBalancerSourceRanges`/NetworkPolicy the same way, to your Prometheus
+scraper's egress range rather than leaving it wide open.
 
 ## The monitor user
 

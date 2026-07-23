@@ -144,6 +144,15 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.ensureService(ctx, &cluster, b.HeadlessService()); err != nil {
 		return ctrl.Result{}, err
 	}
+	// The curated external Service (nil when spec.service.external is absent
+	// or disabled — then any previously created one is deleted). Deliberately
+	// NOT gated on spec.pause: pause semantics retain Services. A persistent
+	// apiserver rejection (colliding pinned nodePort, ipFamilies mutation, …)
+	// must NOT wedge the rest of the reconcile: carry the error to the end —
+	// StatefulSet/PDB/ServiceMonitor still apply, updateStatus surfaces a
+	// Degraded=ExternalServiceError condition, and the error is returned for
+	// requeue (mirrors handleRuntimeApplyError's non-wedging contract).
+	extSvcErr := r.ensureExternalService(ctx, &cluster, b.ExternalService())
 
 	// Capture the StatefulSet's current annotations BEFORE ensureStatefulSet
 	// overwrites them: resolveRestartChecksum needs the pod-template
@@ -182,7 +191,12 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	r.ensureServiceMonitor(ctx, &cluster, b.ServiceMonitor())
 
 	// 3) Status.
-	return ctrl.Result{}, r.updateStatus(ctx, &cluster, b, summary)
+	if err := r.updateStatus(ctx, &cluster, b, summary, extSvcErr); err != nil {
+		return ctrl.Result{}, err
+	}
+	// A deferred external-Service failure requeues only after everything
+	// else applied and the Degraded condition landed in status.
+	return ctrl.Result{}, extSvcErr
 }
 
 // currentCnfData reads the cnf Secret's full data map as it stood before
@@ -397,6 +411,76 @@ func (r *ProxySQLClusterReconciler) ensureService(ctx context.Context, owner *pr
 	return err
 }
 
+// ensureExternalService creates or updates the curated "<cluster>-external"
+// Service, or — when desired is nil (spec.service.external absent or
+// disabled) — deletes a previously created one (NotFound is success; only an
+// operator-owned Service is touched). The apply path mirrors ensureService,
+// including its annotation preserve-foreign-keys merge, and additionally
+// preserves apiserver-allocated values the builder leaves unset (node ports,
+// healthCheckNodePort) so reconciles don't churn allocations.
+func (r *ProxySQLClusterReconciler) ensureExternalService(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *corev1.Service) error {
+	if desired == nil {
+		name := builders.New(owner, r.Scheme, builders.Passwords{}).ExternalName()
+		existing := &corev1.Service{}
+		err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: owner.Namespace}, existing)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !metav1.IsControlledBy(existing, owner) {
+			return nil
+		}
+		return client.IgnoreNotFound(r.Delete(ctx, existing))
+	}
+
+	existing := &corev1.Service{}
+	existing.Name = desired.Name
+	existing.Namespace = desired.Namespace
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		existing.Labels = desired.Labels
+		// Annotations MERGE, same semantics as ensureService: spec keys win,
+		// annotations written by cloud LB controllers are preserved, and a
+		// key removed from the spec lingers until removed by hand.
+		if len(desired.Annotations) > 0 && existing.Annotations == nil {
+			existing.Annotations = map[string]string{}
+		}
+		maps.Copy(existing.Annotations, desired.Annotations)
+		// Preserve immutable/allocated fields: ClusterIP(s) (immutable), the
+		// node port per port name and the healthCheckNodePort (allocated by
+		// the apiserver; re-sending 0 every reconcile would churn them).
+		clusterIP := existing.Spec.ClusterIP
+		clusterIPs := existing.Spec.ClusterIPs
+		allocatedNodePort := make(map[string]int32, len(existing.Spec.Ports))
+		for _, p := range existing.Spec.Ports {
+			allocatedNodePort[p.Name] = p.NodePort
+		}
+		hcNodePort := existing.Spec.HealthCheckNodePort
+		existing.Spec = desired.Spec
+		if clusterIP != "" && existing.Spec.ClusterIP == "" {
+			existing.Spec.ClusterIP = clusterIP
+		}
+		if len(clusterIPs) > 0 && len(existing.Spec.ClusterIPs) == 0 {
+			existing.Spec.ClusterIPs = clusterIPs
+		}
+		for i := range existing.Spec.Ports {
+			if existing.Spec.Ports[i].NodePort == 0 {
+				existing.Spec.Ports[i].NodePort = allocatedNodePort[existing.Spec.Ports[i].Name]
+			}
+		}
+		// Only meaningful (and only allocated) for LoadBalancer +
+		// externalTrafficPolicy Local; anywhere else the builder's 0 stands.
+		if existing.Spec.Type == corev1.ServiceTypeLoadBalancer &&
+			existing.Spec.ExternalTrafficPolicy == corev1.ServiceExternalTrafficPolicyLocal &&
+			existing.Spec.HealthCheckNodePort == 0 {
+			existing.Spec.HealthCheckNodePort = hcNodePort
+		}
+		return controllerutil.SetControllerReference(owner, existing, r.Scheme)
+	})
+	return err
+}
+
 // handleRuntimeApplyError recovers from a resolveRestartChecksum failure
 // (runtime SQL push to a replica failed) without wedging StatefulSet
 // updates: the StatefulSet is still ensured, carrying the PRE-reconcile
@@ -555,7 +639,12 @@ func (r *ProxySQLClusterReconciler) ensureServiceMonitor(ctx context.Context, ow
 // "RestartRequired: ..." summary (or any other non-empty summary) becomes
 // the message of the existing Rolling condition, which the StatefulSet
 // template diff drives as before.
-func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, summary string) error {
+//
+// extSvcErr is this reconcile's ensureExternalService outcome: non-nil sets
+// Degraded=True (reason ExternalServiceError, message = the apiserver
+// error); nil clears Degraded — the same end-of-updateStatus clearing that
+// removes a stale RuntimeApplyError once a reconcile completes cleanly.
+func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, summary string, extSvcErr error) error {
 	var ss appsv1.StatefulSet
 	err := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
 	notFound := apierrors.IsNotFound(err)
@@ -573,10 +662,15 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	cluster.Status.UpdatedReplicas = ss.Status.UpdatedReplicas
 	cluster.Status.AdminSecretName = b.SecretName()
 	cluster.Status.Endpoints = b.Endpoints()
+	ext, err := r.externalEndpoint(ctx, b)
+	if err != nil {
+		return err
+	}
+	cluster.Status.Endpoints.External = ext
 	cluster.Status.Phase = derivePhase(&ss, notFound, desired, b.Spec.Pause)
 
 	if b.Spec.Pause {
-		return r.updatePausedStatus(ctx, cluster, &ss)
+		return r.updatePausedStatus(ctx, cluster, &ss, extSvcErr)
 	}
 	r.setCondition(cluster, condTypePaused, metav1.ConditionFalse, "NotPaused", "cluster is not paused")
 
@@ -614,9 +708,72 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 		}
 		r.setCondition(cluster, condTypeProgressing, metav1.ConditionTrue, "Rolling", msg)
 	}
-	meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
+	r.setDegradedFromExternalService(cluster, extSvcErr)
 
 	return r.Status().Update(ctx, cluster)
+}
+
+// setDegradedFromExternalService projects this reconcile's
+// ensureExternalService outcome onto the Degraded condition: a persistent
+// apiserver rejection of the external Service (colliding pinned nodePort,
+// ipFamilies mutation, …) surfaces as reason ExternalServiceError; a clean
+// pass removes Degraded — which is also what clears a stale
+// RuntimeApplyError, preserving that contract.
+func (r *ProxySQLClusterReconciler) setDegradedFromExternalService(cluster *proxysqlv1alpha1.ProxySQLCluster, extSvcErr error) {
+	if extSvcErr != nil {
+		r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, "ExternalServiceError", extSvcErr.Error())
+		return
+	}
+	meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
+}
+
+// externalEndpoint projects the LIVE "<cluster>-external" Service onto the
+// status.endpoints.external string (unlike the rest of ClusterEndpoints,
+// which is a pure spec projection, the external entry depends on
+// apiserver/cloud-provider allocations). Formats — documented on the API
+// field:
+//   - LoadBalancer: "host:port" from the first ingress IP (or hostname) and
+//     the Service's first port; "" until the LB is provisioned.
+//   - NodePort: comma-separated allocated node ports in port order.
+//
+// Empty when the external Service is disabled or not created yet.
+func (r *ProxySQLClusterReconciler) externalEndpoint(ctx context.Context, b *builders.Builder) (string, error) {
+	ext := b.Spec.Service.External
+	if ext == nil || !ext.Enabled {
+		return "", nil
+	}
+	var svc corev1.Service
+	err := r.Get(ctx, types.NamespacedName{Name: b.ExternalName(), Namespace: b.Namespace()}, &svc)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get external service: %w", err)
+	}
+
+	switch svc.Spec.Type {
+	case corev1.ServiceTypeLoadBalancer:
+		if len(svc.Status.LoadBalancer.Ingress) == 0 || len(svc.Spec.Ports) == 0 {
+			return "", nil // not provisioned yet
+		}
+		host := svc.Status.LoadBalancer.Ingress[0].IP
+		if host == "" {
+			host = svc.Status.LoadBalancer.Ingress[0].Hostname
+		}
+		if host == "" {
+			return "", nil
+		}
+		return fmt.Sprintf("%s:%d", host, svc.Spec.Ports[0].Port), nil
+	case corev1.ServiceTypeNodePort:
+		parts := make([]string, 0, len(svc.Spec.Ports))
+		for _, p := range svc.Spec.Ports {
+			if p.NodePort != 0 {
+				parts = append(parts, fmt.Sprintf("%d", p.NodePort))
+			}
+		}
+		return strings.Join(parts, ","), nil
+	}
+	return "", nil
 }
 
 // updatePausedStatus is updateStatus's branch for spec.pause=true: it skips
@@ -626,8 +783,10 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 // Stopping (ready > 0: the StatefulSet is still draining down to 0) from
 // Paused (ready == 0: fully scaled down) — the Percona pattern referenced
 // in #56. condTypePaused is only ConditionTrue once fully paused; Degraded
-// is cleared since a paused cluster isn't in an error state.
-func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, ss *appsv1.StatefulSet) error {
+// is cleared since a paused cluster isn't in an error state — unless the
+// external Service (retained during pause) failed to apply this reconcile
+// (extSvcErr), which degrades exactly as it does unpaused.
+func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, ss *appsv1.StatefulSet, extSvcErr error) error {
 	if ss.Status.ReadyReplicas > 0 {
 		msg := fmt.Sprintf("scaling down to 0 replicas (%d still ready)", ss.Status.ReadyReplicas)
 		r.setCondition(cluster, condTypePaused, metav1.ConditionFalse, "Stopping", msg)
@@ -639,7 +798,7 @@ func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, clus
 		r.setCondition(cluster, condTypeAvailable, metav1.ConditionFalse, "Paused", msg)
 		r.setCondition(cluster, condTypeProgressing, metav1.ConditionFalse, "Paused", "no rollout in progress; cluster is paused")
 	}
-	meta.RemoveStatusCondition(&cluster.Status.Conditions, condTypeDegraded)
+	r.setDegradedFromExternalService(cluster, extSvcErr)
 	return r.Status().Update(ctx, cluster)
 }
 

@@ -322,6 +322,97 @@ type ServiceSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=86400
 	SessionAffinityTimeoutSeconds *int32 `json:"sessionAffinityTimeoutSeconds,omitempty"`
+
+	// Type sets the client-facing Service's type. All enabled ports ride
+	// this Service, including admin — for a curated external entry point
+	// use External instead.
+	// +optional
+	// +kubebuilder:default=ClusterIP
+	// +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
+	Type corev1.ServiceType `json:"type,omitempty"`
+
+	// External creates a second, curated Service "<cluster>-external" for
+	// out-of-cluster clients. Disabled (or absent) removes it.
+	// +optional
+	External *ExternalServiceSpec `json:"external,omitempty"`
+}
+
+// ExternalServiceSpec configures a second, curated Service
+// "<cluster>-external" for out-of-cluster clients, independent of the main
+// (internal) Service's type and annotations.
+type ExternalServiceSpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// +optional
+	// +kubebuilder:default=LoadBalancer
+	// +kubebuilder:validation:Enum=NodePort;LoadBalancer
+	Type corev1.ServiceType `json:"type,omitempty"`
+
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// +optional
+	LoadBalancerClass *string `json:"loadBalancerClass,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Enum=Cluster;Local
+	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
+
+	// InternalTrafficPolicy controls routing of traffic arriving via the
+	// Service's cluster-internal IP (ClusterIP/node-local vs cluster-wide
+	// endpoints). Independent of ExternalTrafficPolicy, which governs
+	// traffic arriving via the external (NodePort/LoadBalancer) address.
+	// +optional
+	// +kubebuilder:validation:Enum=Cluster;Local
+	InternalTrafficPolicy *corev1.ServiceInternalTrafficPolicy `json:"internalTrafficPolicy,omitempty"`
+
+	// +optional
+	LoadBalancerSourceRanges []string `json:"loadBalancerSourceRanges,omitempty"`
+
+	// AllocateLoadBalancerNodePorts defaults to true; *bool so explicit
+	// false survives marshalling (repo convention).
+	// +optional
+	// +kubebuilder:default=true
+	AllocateLoadBalancerNodePorts *bool `json:"allocateLoadBalancerNodePorts,omitempty"`
+
+	// HealthCheckNodePort is only meaningful with externalTrafficPolicy:
+	// Local. 0 lets the API server allocate.
+	// +optional
+	// +kubebuilder:validation:Maximum=32767
+	// +kubebuilder:validation:XValidation:rule="self == 0 || self >= 30000",message="healthCheckNodePort must be 0 (auto) or in 30000-32767"
+	HealthCheckNodePort int32 `json:"healthCheckNodePort,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Enum=SingleStack;PreferDualStack;RequireDualStack
+	IPFamilyPolicy *corev1.IPFamilyPolicy `json:"ipFamilyPolicy,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:items:Enum=IPv4;IPv6
+	IPFamilies []corev1.IPFamily `json:"ipFamilies,omitempty"`
+
+	// Ports selects which listeners ride the external Service. Empty map =
+	// default set: mysql + pgsql (each only if its protocol is enabled).
+	// Valid keys: mysql, pgsql, web, metrics. Admin is deliberately NOT a
+	// valid key — see ExposeAdmin.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k in ['mysql','pgsql','web','metrics'])",message="valid port keys: mysql, pgsql, web, metrics"
+	Ports map[string]ExternalPortSpec `json:"ports,omitempty"`
+
+	// ExposeAdmin adds the admin port (6032). The ProxySQL admin interface
+	// on a network edge is a serious risk; keep this false unless you have
+	// source-range and NetworkPolicy controls in place.
+	// +optional
+	ExposeAdmin bool `json:"exposeAdmin,omitempty"`
+}
+
+// ExternalPortSpec tunes a single port riding the external Service.
+type ExternalPortSpec struct {
+	// NodePort pins the node port (30000-32767); 0 = auto-allocate.
+	// +optional
+	// +kubebuilder:validation:Maximum=32767
+	// +kubebuilder:validation:XValidation:rule="self == 0 || self >= 30000",message="nodePort must be 0 (auto) or in 30000-32767"
+	NodePort int32 `json:"nodePort,omitempty"`
 }
 
 // NetworkingSpec tunes pod-level networking behavior.
@@ -533,8 +624,9 @@ type ProxySQLClusterStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// ClusterEndpoints lists in-cluster DNS endpoints (host:port) per surface.
-// A field is empty when that surface is disabled.
+// ClusterEndpoints lists in-cluster DNS endpoints (host:port) per surface,
+// plus the out-of-cluster External entry point. A field is empty when that
+// surface is disabled.
 type ClusterEndpoints struct {
 	// +optional
 	MySQL string `json:"mysql,omitempty"`
@@ -546,6 +638,16 @@ type ClusterEndpoints struct {
 	Web string `json:"web,omitempty"`
 	// +optional
 	Metrics string `json:"metrics,omitempty"`
+
+	// External is the out-of-cluster entry point of the "<cluster>-external"
+	// Service; empty unless spec.service.external is enabled. For type
+	// LoadBalancer it is "host:port" — the first ingress IP (or hostname)
+	// plus the Service's first port — and stays empty until the cloud
+	// provider provisions the load balancer. For type NodePort it is the
+	// comma-separated list of allocated node ports in the Service's port
+	// order (host-less: every node IP serves them).
+	// +optional
+	External string `json:"external,omitempty"`
 }
 
 // Phase values for ProxySQLClusterStatus.Phase.

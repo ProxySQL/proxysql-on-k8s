@@ -142,19 +142,19 @@ func (b *Builder) podSpec() corev1.PodSpec {
 
 func (b *Builder) container() corev1.Container {
 	ports := []corev1.ContainerPort{
-		{Name: "admin", ContainerPort: b.Spec.Protocols.Admin.Port, Protocol: corev1.ProtocolTCP},
+		{Name: portNameAdmin, ContainerPort: b.Spec.Protocols.Admin.Port, Protocol: corev1.ProtocolTCP},
 	}
 	if b.Spec.Protocols.MySQL.IsEnabled() {
-		ports = append(ports, corev1.ContainerPort{Name: "mysql", ContainerPort: b.Spec.Protocols.MySQL.Port, Protocol: corev1.ProtocolTCP})
+		ports = append(ports, corev1.ContainerPort{Name: portNameMySQL, ContainerPort: b.Spec.Protocols.MySQL.Port, Protocol: corev1.ProtocolTCP})
 	}
 	if b.Spec.Protocols.PostgreSQL.IsEnabled() {
-		ports = append(ports, corev1.ContainerPort{Name: "pgsql", ContainerPort: b.Spec.Protocols.PostgreSQL.Port, Protocol: corev1.ProtocolTCP})
+		ports = append(ports, corev1.ContainerPort{Name: portNamePgSQL, ContainerPort: b.Spec.Protocols.PostgreSQL.Port, Protocol: corev1.ProtocolTCP})
 	}
 	if isTrue(b.Spec.Metrics.Enabled) {
-		ports = append(ports, corev1.ContainerPort{Name: "metrics", ContainerPort: b.Spec.Metrics.Port, Protocol: corev1.ProtocolTCP})
+		ports = append(ports, corev1.ContainerPort{Name: portNameMetrics, ContainerPort: b.Spec.Metrics.Port, Protocol: corev1.ProtocolTCP})
 	}
 	if b.Spec.Protocols.Web.IsEnabled() {
-		ports = append(ports, corev1.ContainerPort{Name: "web", ContainerPort: b.Spec.Protocols.Web.Port, Protocol: corev1.ProtocolTCP})
+		ports = append(ports, corev1.ContainerPort{Name: portNameWeb, ContainerPort: b.Spec.Protocols.Web.Port, Protocol: corev1.ProtocolTCP})
 	}
 
 	return corev1.Container{
@@ -209,7 +209,7 @@ func (b *Builder) livenessProbe() *corev1.Probe {
 	}
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString(portNameAdmin)},
 		},
 		InitialDelaySeconds: 15,
 		PeriodSeconds:       10,
@@ -223,7 +223,7 @@ func (b *Builder) readinessProbe() *corev1.Probe {
 	}
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("admin")},
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString(portNameAdmin)},
 		},
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       5,

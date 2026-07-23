@@ -173,17 +173,42 @@ enabled surface, so consumers never have to re-derive defaults.
 
 ## Exposing the Service
 
-The operator creates two Services: `<cluster>` (regular ClusterIP, what
-applications connect to) and `<cluster>-headless` (StatefulSet pod DNS;
-leave it alone). `spec.service` customizes the regular one only:
+The operator creates two Services by default: `<cluster>` (the regular
+Service, what in-cluster applications connect to) and `<cluster>-headless`
+(StatefulSet pod DNS; leave it alone). `spec.service` customizes the regular
+one and, optionally, adds a curated third Service for out-of-cluster
+clients. There are two paths, and they're independent — pick one, or
+combine them:
+
+- **Flip `spec.service.type`** — the simple path. Changes the type of the
+  *existing* regular Service in place; no new object, the ClusterIP is
+  retained.
+- **Turn on `spec.service.external`** — the curated path. Creates a
+  *second, independent* Service, `<cluster>-external`, that carries only
+  the ports you choose. One Kubernetes Service carries multiple ports, so
+  exposing mysql, pgsql, and metrics externally still only needs this one
+  object — there's no per-port LoadBalancer to provision.
+
+### Path 1: flip the regular Service's type
 
 ```yaml
 spec:
   service:
+    type: LoadBalancer   # ClusterIP (default) | NodePort | LoadBalancer
     annotations:
       service.beta.kubernetes.io/aws-load-balancer-internal: "true"
     sessionAffinityTimeoutSeconds: 300   # enables ClientIP affinity
 ```
+
+**The footgun:** every enabled port rides this Service — mysql, pgsql,
+web, metrics, and **admin (6032)**, always. There is no way to flip
+`service.type` to `LoadBalancer`/`NodePort` without also putting the
+admin interface on the same edge. If you want the data plane exposed but
+admin kept in-cluster, use Path 2 instead — its default port set excludes
+admin. Tuning fields like `loadBalancerSourceRanges` or
+`externalTrafficPolicy` are not available on this path (there's no
+per-Service tuning block for the regular Service, only annotations); if
+you need them, use the curated external Service.
 
 **Annotation merge semantics:** annotations are *merged*, not owned
 wholesale. Keys from the spec win; annotations written by other
@@ -192,25 +217,80 @@ preserved. The flip side: a key you *remove* from
 `spec.service.annotations` lingers on the Service until you remove it by
 hand — the operator cannot tell a removed spec key from a foreign one.
 
-**External exposure:** the operator-managed Service is always
-`ClusterIP`. To expose ProxySQL outside the cluster, create your own
-`LoadBalancer` Service or use your ingress/gateway of choice, selecting
-the pods with the stable selector labels:
+### Path 2: a curated external Service
 
 ```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: proxysql-external
 spec:
-  type: LoadBalancer
-  selector:
-    app.kubernetes.io/name: proxysql
-    app.kubernetes.io/instance: proxysql   # = cluster name
-    proxysql.com/cluster: proxysql
-  ports:
-    - {name: mysql, port: 3306, targetPort: mysql}
+  service:
+    external:
+      enabled: true
+      type: LoadBalancer            # default; NodePort is the other option
+      loadBalancerSourceRanges: ["203.0.113.0/24"]
+      externalTrafficPolicy: Local
+      # ports: {}                   # omitted = default set (see below)
+      # exposeAdmin: false          # default; see the warning below
 ```
+
+`<cluster>-external` is independent of the regular Service: its own type,
+its own annotations (not merged with `spec.service.annotations`), its own
+tuning surface (`loadBalancerClass`, `externalTrafficPolicy`,
+`internalTrafficPolicy`, `loadBalancerSourceRanges`,
+`allocateLoadBalancerNodePorts`, `healthCheckNodePort`, `ipFamilyPolicy`,
+`ipFamilies`). Full field list in the [ProxySQLCluster
+reference](../reference/proxysqlcluster.md#external-service).
+
+**Default port policy:** an empty (or omitted) `ports` map yields
+**data-plane traffic only** — `mysql` + `pgsql`, and only for whichever of
+those protocols is enabled on the cluster. `web` and `metrics` are never
+in the default set; list them explicitly under `ports` (and have the
+matching `spec.protocols`/`spec.metrics` toggle on) to add them:
+
+```yaml
+spec:
+  service:
+    external:
+      enabled: true
+      ports:
+        mysql: {}
+        metrics: {nodePort: 30070}   # pin a node port; 0/omitted = auto
+```
+
+**The `exposeAdmin` warning.** Setting `service.external.exposeAdmin: true`
+puts ProxySQL's admin interface — full control over routing, users, and
+backends — on a network edge. It is deliberately its own boolean, not a
+`ports` entry (`admin` is not even a valid `ports` key), so a reviewer can
+find every externally admin-exposed cluster by grepping this one field.
+Pair it with `loadBalancerSourceRanges` and a NetworkPolicy; see
+[Security](./security.md#network-exposure-surface) for the full
+recommendation before turning this on.
+
+**LB-pending semantics.** `status.endpoints.external` mirrors the *live*
+external Service, not the spec, because LoadBalancer provisioning is
+asynchronous:
+
+- **LoadBalancer:** `"host:port"` once the cloud provider assigns an
+  ingress IP or hostname — **empty until then**. Don't assume it's
+  populated the reconcile after `enabled: true`; poll
+  `kubectl get pxc <cluster> -o jsonpath='{.status.endpoints.external}'`
+  or `kubectl get svc <cluster>-external`.
+- **NodePort:** the comma-separated allocated node ports, in port order,
+  as soon as the apiserver allocates them (no host — every node's IP
+  serves them).
+
+**The `ipFamilies` immutability caveat.** Kubernetes rejects mutating
+`ipFamilies` on an already-created Service. If you change
+`service.external.ipFamilies` on a cluster whose external Service already
+exists, the apply fails, and the cluster goes `Degraded`/reason
+`ExternalServiceError` (the rest of the reconcile — StatefulSet, PDB,
+ServiceMonitor — still applies; nothing else is wedged). To actually
+change families, toggle `service.external.enabled` off then back on (or
+remove and re-add the block) so the Service is deleted and recreated
+rather than mutated in place.
+
+**Disabling** (`enabled: false`, or removing the `external` block) deletes
+the `<cluster>-external` Service. It's also retained across
+`spec.pause: true` — pausing only scales the StatefulSet to 0, the same
+way it retains the regular Service and both Secrets.
 
 Think before exposing the admin port (6032) beyond the cluster — see
 [Security](./security.md#network-exposure-surface).

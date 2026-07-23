@@ -1059,6 +1059,32 @@ func TestBuilder_Service_SessionAffinity(t *testing.T) {
 	}
 }
 
+func TestBuilder_Service_TypeFromSpec(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Service.Type = corev1.ServiceTypeLoadBalancer
+	})
+	b := New(c, newScheme(t), Passwords{})
+
+	if got := b.Service().Spec.Type; got != corev1.ServiceTypeLoadBalancer {
+		t.Fatalf("main Service type = %q, want LoadBalancer", got)
+	}
+
+	// Zero value (unset in unit tests, though the CRD default makes this
+	// impossible post-admission) must not panic and must default to ClusterIP.
+	b2 := New(newCluster(clusterName), newScheme(t), Passwords{})
+	if got := b2.Service().Spec.Type; got != corev1.ServiceTypeClusterIP {
+		t.Fatalf("unset Service type must default to ClusterIP, got %q", got)
+	}
+
+	// Headless Service stays ClusterIP+None regardless of spec.service.type.
+	if got := b.HeadlessService().Spec.Type; got != corev1.ServiceTypeClusterIP {
+		t.Errorf("headless Service type must stay ClusterIP, got %q", got)
+	}
+	if got := b.HeadlessService().Spec.ClusterIP; got != corev1.ClusterIPNone {
+		t.Errorf("headless Service clusterIP must stay None, got %q", got)
+	}
+}
+
 func TestBuilder_StatefulSet_NoKeepalive_NoSysctls(t *testing.T) {
 	b := New(newCluster(clusterName), newScheme(t), Passwords{})
 	ss := b.StatefulSet("sum")

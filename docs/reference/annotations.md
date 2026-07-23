@@ -140,8 +140,9 @@ cluster (so they are garbage-collected with it; delete-protection checks
 | Object | Name | Notes |
 |---|---|---|
 | StatefulSet | `<cluster-name>` | `podManagementPolicy: Parallel`; selector immutable after create. |
-| Service (client-facing) | `<cluster-name>` | ClusterIP; annotations merge, ClusterIP/ClusterIPs preserved on update. |
+| Service (client-facing) | `<cluster-name>` | Type from `spec.service.type` (default `ClusterIP`); annotations merge, ClusterIP/ClusterIPs preserved on update. |
 | Service (headless) | `<cluster-name>-headless` | `publishNotReadyAddresses: true`; StatefulSet `serviceName`. |
+| Service (external) | `<cluster-name>-external` | Only when `spec.service.external.enabled: true`; deleted (if operator-owned) when disabled. Annotations merge the same way as the client-facing Service but are tracked independently. Node ports and `healthCheckNodePort` allocated by the apiserver are preserved across reconciles the same way ClusterIP is. See [ProxySQLCluster reference](proxysqlcluster.md#external-service). |
 | Secret (auth) | `<cluster-name>` (only when `spec.auth.secretName` is empty) | Keys per `spec.auth.keys`; an externally referenced Secret is never owned or modified. |
 | Secret (bootstrap cnf) | `<cluster-name>-cnf` | Keys `proxysql.cnf` (+ `fluent-bit.conf` when logging is enabled). A Secret because the cnf embeds passwords. |
 | PodDisruptionBudget | `<cluster-name>` | Only when enabled and `replicas > 1`; deleted otherwise (if operator-owned). |
