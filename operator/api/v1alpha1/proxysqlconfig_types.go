@@ -296,6 +296,8 @@ type PostgreSQLServer struct {
 	// +optional
 	MaxConnections *int32 `json:"maxConnections,omitempty"`
 	// +optional
+	UseSSL *bool `json:"useSSL,omitempty"`
+	// +optional
 	Comment string `json:"comment,omitempty"`
 }
 

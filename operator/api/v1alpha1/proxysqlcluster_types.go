@@ -138,7 +138,20 @@ type ProxySQLClusterSpec struct {
 	// per-probe defaults and the readiness/backend-coupling warning.
 	// +optional
 	Probes ProbesSpec `json:"probes,omitempty"`
+
+	// TLS configures certificate issuance and TLS wiring across the
+	// frontend (mysql/pgsql client ports), admin/cluster-peering, and
+	// backend (ProxySQL-to-database) surfaces. Absent (or Enabled=false)
+	// renders exactly what the operator renders today — golden-pinned,
+	// no upgrade restart. See TLSSpec for the three-tier issuance
+	// precedence.
+	// +optional
+	TLS *TLSSpec `json:"tls,omitempty"`
 }
+
+// TLSEnabled reports whether TLS is configured and turned on. Safe to call
+// on a nil-TLS spec.
+func (s *ProxySQLClusterSpec) TLSEnabled() bool { return s.TLS != nil && s.TLS.Enabled }
 
 // ProbesSpec overrides the proxysql container's probes. Every field is a
 // full corev1.Probe; a set field replaces the operator's default probe
@@ -576,6 +589,107 @@ type PDBSpec struct {
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
+// TLSSpec configures certificate issuance and TLS wiring for the frontend
+// (mysql/pgsql client ports), admin interface, cluster peering, and the
+// separate backend (ProxySQL-to-database) surface.
+//
+// Tier resolution for the frontend/admin serving cert follows a strict
+// precedence, evaluated in order: SecretName (tier 1, a user-provided
+// kubernetes.io/tls Secret) wins whenever set; otherwise IssuerRef (tier 2,
+// cert-manager) is used when its Name is set; otherwise the operator mints
+// and manages a self-signed CA and serving cert (tier 3). Duration and
+// RenewBefore apply only to tiers 2 and 3 — a user-supplied Secret (tier 1)
+// is never re-issued by the operator.
+type TLSSpec struct {
+	// Enabled turns TLS on. Default off: absent or false renders exactly
+	// what the operator renders today (golden-pinned; no upgrade restart).
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// SecretName is a user-provided kubernetes.io/tls Secret (tls.crt,
+	// tls.key, optionally ca.crt) used as the frontend/admin serving
+	// certificate. Tier 1: wins over IssuerRef and the operator's
+	// self-signed fallback whenever set. The operator never rotates or
+	// re-issues a Secret referenced this way — that's the caller's job.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+
+	// IssuerRef points at a cert-manager Issuer or ClusterIssuer used to
+	// issue the frontend/admin serving certificate. Tier 2: used when
+	// SecretName is empty and Name is set.
+	// +optional
+	IssuerRef *TLSIssuerRef `json:"issuerRef,omitempty"`
+
+	// Duration is the issued certificate's lifetime. Applies to tiers 2
+	// (cert-manager) and 3 (operator self-signed) only.
+	// +optional
+	// +kubebuilder:default="2160h"
+	Duration metav1.Duration `json:"duration,omitempty"`
+
+	// RenewBefore is how long before expiry the certificate is reissued.
+	// Applies to tiers 2 (cert-manager) and 3 (operator self-signed) only.
+	// +optional
+	// +kubebuilder:default="720h"
+	RenewBefore metav1.Duration `json:"renewBefore,omitempty"`
+
+	// ExtraSANs adds DNS names or IPs to the issued serving certificate, on
+	// top of the operator's default set (cluster name, headless/regular
+	// Service DNS names, per-pod headless names). Useful for the external
+	// Service's LoadBalancer hostname or a custom DNS record. Ignored for
+	// tier 1 (SecretName) since that certificate is supplied as-is.
+	// +optional
+	ExtraSANs []string `json:"extraSANs,omitempty"`
+
+	// Backend configures ProxySQL's TLS trust toward the backend databases
+	// (mysql-ssl_p2s_ca / pgsql equivalent). This is a DIFFERENT PKI from
+	// the frontend/admin serving certificate above: it must trust whatever
+	// issued the *database's* server certificate, which is the operator's
+	// own CA only when a single PKI happens to sign both sides. Absent
+	// disables backend TLS variable rendering entirely.
+	// +optional
+	Backend *TLSBackendSpec `json:"backend,omitempty"`
+}
+
+// TLSIssuerRef references a cert-manager Issuer or ClusterIssuer used to
+// issue TLS certificates (tier 2 of TLSSpec's resolution order).
+type TLSIssuerRef struct {
+	// Name of the Issuer or ClusterIssuer.
+	Name string `json:"name"`
+
+	// Kind of the referenced resource.
+	// +optional
+	// +kubebuilder:default=Issuer
+	// +kubebuilder:validation:Enum=Issuer;ClusterIssuer
+	Kind string `json:"kind,omitempty"`
+
+	// Group of the referenced resource's API.
+	// +optional
+	// +kubebuilder:default=cert-manager.io
+	Group string `json:"group,omitempty"`
+}
+
+// TLSBackendSpec configures ProxySQL's TLS trust and optional client
+// certificate toward the backend databases. This is deliberately separate
+// from the frontend/admin serving certificate configured by the rest of
+// TLSSpec: ssl_p2s_ca must trust the *database's* issuer, which is a
+// different PKI unless the same CA happens to sign both sides. Conflating
+// the two (a naive single-secret model) would silently break backend
+// certificate verification.
+type TLSBackendSpec struct {
+	// CASecretName references a Secret whose ca.crt trusts the backend
+	// database's server certificate, rendered into mysql-ssl_p2s_ca (and
+	// the pgsql equivalent). Unset: backend TLS variables are not
+	// rendered at all.
+	// +optional
+	CASecretName string `json:"caSecretName,omitempty"`
+
+	// ClientCertSecretName references an optional kubernetes.io/tls Secret
+	// (tls.crt/tls.key) presented to the backend for mTLS, rendered into
+	// ssl_p2s_cert / ssl_p2s_key.
+	// +optional
+	ClientCertSecretName string `json:"clientCertSecretName,omitempty"`
 }
 
 // ProxySQLClusterStatus reports observed state.

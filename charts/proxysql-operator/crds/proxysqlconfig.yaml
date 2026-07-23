@@ -501,6 +501,8 @@ spec:
                       default: 5432
                       format: int32
                       type: integer
+                    useSSL:
+                      type: boolean
                     weight:
                       format: int32
                       type: integer
