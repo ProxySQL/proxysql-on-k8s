@@ -1437,15 +1437,14 @@ func TestBuilder_TLS_BackendVars(t *testing.T) {
 	})
 }
 
-// TestBuilder_TLS_ReservedKeys: every operator-owned TLS variable is
-// rejected when user-supplied via spec.variables.
+// TestBuilder_TLS_ReservedKeys: every operator-RENDERED TLS variable is
+// rejected when user-supplied via spec.variables. have_ssl is deliberately
+// NOT in this set — see TestBuilder_TLS_HaveSSLUserSettable.
 func TestBuilder_TLS_ReservedKeys(t *testing.T) {
 	for key, section := range map[string]string{
-		"mysql-have_ssl":     "mysql",
 		"mysql-ssl_p2s_ca":   "mysql",
 		"mysql-ssl_p2s_cert": "mysql",
 		"mysql-ssl_p2s_key":  "mysql",
-		"pgsql-have_ssl":     "pgsql",
 		"pgsql-ssl_p2s_ca":   "pgsql",
 		"pgsql-ssl_p2s_cert": "pgsql",
 		"pgsql-ssl_p2s_key":  "pgsql",
@@ -1462,6 +1461,33 @@ func TestBuilder_TLS_ReservedKeys(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "reserved") {
 			t.Errorf("spec.variables[%q] should be rejected as reserved, got err=%v", key, err)
 		}
+	}
+}
+
+// TestBuilder_TLS_HaveSSLUserSettable: the operator never renders the
+// have_ssl flags (they default true in 3.0), so reserving them would only
+// remove a real capability — a TLS-less cluster legitimately disables the
+// autogen-cert frontend TLS via spec.variables. The flag is also
+// runtime-settable in ProxySQL, so it must classify as runtime-appliable
+// (not structural): a have_ssl flip applies restart-free.
+func TestBuilder_TLS_HaveSSLUserSettable(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Variables.MySQL = map[string]string{"mysql-have_ssl": "false"}
+	})
+	cnf, err := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"}).BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("mysql-have_ssl via spec.variables must render, got error: %v", err)
+	}
+	if !strings.Contains(cnf, `  have_ssl="false"`) {
+		t.Fatalf("cnf missing have_ssl=\"false\" line:\n%s", cnf)
+	}
+	// Classification: runtime-appliable, so ParseCnfVariables surfaces it
+	// and NormalizeCnf masks its value.
+	if got := ParseCnfVariables(cnf)["mysql-have_ssl"]; got != "false" {
+		t.Errorf("ParseCnfVariables[mysql-have_ssl] = %q, want \"false\" (must NOT be structural)", got)
+	}
+	if !strings.Contains(NormalizeCnf(cnf), "have_ssl=<runtime>") {
+		t.Errorf("NormalizeCnf must mask have_ssl as a runtime variable:\n%s", NormalizeCnf(cnf))
 	}
 }
 

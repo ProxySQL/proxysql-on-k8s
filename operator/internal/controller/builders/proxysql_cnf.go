@@ -69,16 +69,17 @@ var reservedCnfKeys = map[string]struct{}{
 	"admin-web_enabled":       {},
 	"admin-web_port":          {},
 
-	// TLS variables (spec.tls-owned; see tlsCnfVars below). The have_ssl
-	// flags stay at ProxySQL's defaults (true in 3.0) and are never
-	// rendered, but they are reserved so the TLS surface is owned entirely
-	// by spec.tls; the ssl_p2s_* path variables are rendered by the
-	// operator (values fixed to the backend-tls mount) when
-	// spec.tls.backend is configured. The unrendered p2s tuning knobs
+	// Backend TLS path variables (spec.tls.backend-owned; see tlsCnfVars
+	// below): rendered by the operator with values fixed to the
+	// backend-tls mount when spec.tls.backend is configured. Only the
+	// RENDERED variables are reserved. The have_ssl flags are deliberately
+	// NOT reserved: the operator never renders them (they default true in
+	// 3.0), and a TLS-less cluster legitimately sets e.g.
+	// mysql-have_ssl="false" via spec.variables to disable the
+	// autogen-cert frontend TLS (runtime-settable, so the flip applies
+	// restart-free). Likewise the unrendered p2s tuning knobs
 	// (capath/cipher/crl/crlpath) stay user-settable — the operator never
 	// renders them, so there is nothing to collide with.
-	"mysql-have_ssl":     {},
-	"pgsql-have_ssl":     {},
 	"mysql-ssl_p2s_ca":   {},
 	"mysql-ssl_p2s_cert": {},
 	"mysql-ssl_p2s_key":  {},
