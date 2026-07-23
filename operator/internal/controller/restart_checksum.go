@@ -337,23 +337,31 @@ func (r *ProxySQLClusterReconciler) resolveRestartChecksum(
 
 	// verdictRuntimeTry: dial every ready pod and push `changed` at runtime.
 	adminPort := builders.DefaultedSpec(cluster).Protocols.Admin.Port
-	addrs, derr := discoverPodAddresses(ctx, r.Client, cluster, adminPort)
+	endpoints, derr := discoverPodEndpoints(ctx, r.Client, cluster, adminPort)
 	if derr != nil {
 		return "", "", "", "", derr
 	}
-	if len(addrs) == 0 {
+	if len(endpoints) == 0 {
 		// Nothing running yet; pods will bootstrap straight from the
 		// (already-updated) Secret. Keep the annotation as-is — no restart
 		// needed once pods do come up, they'll read newCnf from the volume.
 		return prev, newVarsHash, newStructuralHash, "", nil
+	}
+	// TLS-wired clusters dial the admin port over TLS (CA pool from the
+	// mounted Secret, per-pod DNS ServerName while dialing the IP); nil for
+	// everyone else — plaintext exactly as before TLS existed.
+	dialTLS, derr := adminDialTLS(ctx, r.Client, cluster, endpoints)
+	if derr != nil {
+		return "", "", "", "", derr
 	}
 
 	byDomain := groupByDomain(changed)
 	keys := sortedKeys(changed)
 	mismatched := make(map[string]struct{})
 
-	for _, addr := range addrs {
-		pxc, cerr := proxysqlclient.New(addr, "radmin", radminPassword)
+	for _, ep := range endpoints {
+		addr := ep.Addr
+		pxc, cerr := dialTLS.dial(addr, radminUser, radminPassword)
 		if cerr != nil {
 			return "", "", "", "", fmt.Errorf("dial %s: %w", addr, cerr)
 		}

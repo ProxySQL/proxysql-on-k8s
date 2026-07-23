@@ -38,6 +38,21 @@ var structuralCnfKeys = map[string]struct{}{
 	"admin-mysql_ifaces":      {},
 	"mysql-interfaces":        {},
 	"pgsql-interfaces":        {},
+
+	// Backend TLS path variables (spec.tls.backend-owned, see tlsCnfVars in
+	// proxysql_cnf.go). Their VALUES are fixed mount paths that never
+	// change while rendered — certificate rotation changes Secret CONTENT,
+	// not these lines — so excluding them from the runtime-appliable set
+	// costs nothing and guarantees rotation can never masquerade as a
+	// runtime variable change. Adding/removing the keys (enabling or
+	// disabling backend TLS) changes the normalized cnf structure and takes
+	// the documented restart path.
+	"mysql-ssl_p2s_ca":   {},
+	"mysql-ssl_p2s_cert": {},
+	"mysql-ssl_p2s_key":  {},
+	"pgsql-ssl_p2s_ca":   {},
+	"pgsql-ssl_p2s_cert": {},
+	"pgsql-ssl_p2s_key":  {},
 }
 
 // cnfSectionStart matches the opening line of a variables section, e.g.

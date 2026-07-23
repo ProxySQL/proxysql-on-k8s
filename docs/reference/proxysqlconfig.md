@@ -159,6 +159,7 @@ Maps to `pgsql_servers` (ProxySQL 3.x).
 | `port` | `int32` | `5432` (CRD; sync also falls back to 5432) | map key | Backend port. |
 | `weight` | `*int32` | unset → SQL `1` | — | Load-balancing weight. |
 | `maxConnections` | `*int32` | unset → SQL `1000` | — | Per-server connection cap. |
+| `useSSL` | `*bool` | unset → SQL `0` | — | TLS to the backend. |
 | `comment` | `string` | `''` | — | Free text. |
 
 Declaring any `pgsqlServers`/`pgsqlUsers`/`pgsqlQueryRules` against a cluster

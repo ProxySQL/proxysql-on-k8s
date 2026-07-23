@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -31,13 +34,18 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 	"github.com/ProxySQL/kubernetes/operator/internal/controller/builders"
+	"github.com/ProxySQL/kubernetes/operator/internal/tlsutil"
 )
 
 var _ = Describe("ProxySQLCluster Controller", func() {
@@ -88,10 +96,18 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name + "-cnf", Namespace: ns}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name + "-tls", Namespace: ns}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name + "-tls-ca", Namespace: ns}},
 				&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 			} {
 				_ = k8sClient.Delete(ctx, obj)
 			}
+			// Tier-2 TLS leaves an unstructured cert-manager Certificate.
+			cert := &unstructured.Unstructured{}
+			cert.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+			cert.SetName(name + "-tls")
+			cert.SetNamespace(ns)
+			_ = k8sClient.Delete(ctx, cert)
 		})
 		// Re-Get so we have the resourceVersion populated for subsequent updates.
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, c)).To(Succeed())
@@ -674,7 +690,8 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
 			pushErr := errors.New("apply variables on 10.1.2.3:6032: dial tcp: i/o timeout")
-			err := reconciler.handleRuntimeApplyError(ctx, cluster, b, prev, appliedVars, structuralApplied, pushErr)
+			err := reconciler.handleRuntimeApplyError(ctx, cluster, b, prev,
+				stsMarkers{varsApplied: appliedVars, structuralApplied: structuralApplied}, pushErr)
 			Expect(err).To(MatchError(pushErr), "the push error must be returned for requeue")
 
 			var after appsv1.StatefulSet
@@ -740,7 +757,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
 			summary := "RestartRequired: structural cnf change (fluent-bit.conf)"
-			Expect(reconciler.updateStatus(ctx, cluster, b, summary, nil)).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, summary, nil, nil, nil)).To(Succeed())
 
 			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypeProgressing)
 			Expect(cond).NotTo(BeNil())
@@ -920,7 +937,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
-			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil)).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil, nil, nil)).To(Succeed())
 
 			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhaseStopping))
 			cond := meta.FindStatusCondition(cluster.Status.Conditions, condTypePaused)
@@ -933,7 +950,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			ss.Status.ReadyReplicas = 0
 			Expect(k8sClient.Status().Update(ctx, &ss)).To(Succeed())
 
-			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil)).To(Succeed())
+			Expect(reconciler.updateStatus(ctx, cluster, b, "", nil, nil, nil)).To(Succeed())
 			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhasePaused))
 			cond = meta.FindStatusCondition(cluster.Status.Conditions, condTypePaused)
 			Expect(cond).NotTo(BeNil())
@@ -1193,6 +1210,749 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeNodePort))
 			Expect(svc.UID).To(Equal(uidBefore), "type change must mutate the Service in place, not recreate it")
 			Expect(svc.Spec.ClusterIP).To(Equal(ipBefore), "ClusterIP must be retained across the type flip")
+		})
+	})
+
+	When("spec.tls is enabled", func() {
+		// certGVK matches the unstructured cert-manager Certificate the
+		// tier-2 path manages (CRD installed into envtest from testdata/crd;
+		// no cert-manager controller runs — tests fake issuance by writing
+		// the Secret themselves).
+		certGVK := schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"}
+
+		// newServingSecretData builds a valid kubernetes.io/tls-shaped data
+		// map (tls.crt/tls.key/ca.crt) covering the operator's default SAN
+		// set for clusterName, with a comfortably-outside-renewal lifetime.
+		newServingSecretData := func(clusterName string) map[string][]byte {
+			caCrt, caKey, err := tlsutil.NewCA("envtest-ca", 5*365*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			crt, key, err := tlsutil.IssueServing(caCrt, caKey, tlsutil.SANsFor(clusterName, ns, nil), 90*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			return map[string][]byte{"tls.crt": crt, "tls.key": key, "ca.crt": caCrt}
+		}
+
+		makeSecret := func(name string, data map[string][]byte) {
+			ctx := context.Background()
+			sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Data: data}
+			Expect(k8sClient.Create(ctx, sec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, sec) })
+		}
+
+		// stsTLSWiring reports the StatefulSet's TLS wiring: the secretName
+		// the "tls" volume mounts ("" when absent) and whether the tls-init
+		// symlink container is present.
+		stsTLSWiring := func(name string) (secretName string, hasInit bool) {
+			ctx := context.Background()
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			for _, v := range ss.Spec.Template.Spec.Volumes {
+				if v.Name == "tls" && v.Secret != nil {
+					secretName = v.Secret.SecretName
+				}
+			}
+			for _, c := range ss.Spec.Template.Spec.InitContainers {
+				if c.Name == "tls-init" {
+					hasInit = true
+				}
+			}
+			return
+		}
+
+		reconcileExpectError := func(name string) {
+			ctx := context.Background()
+			req = reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).To(HaveOccurred(), "an unresolved TLS Secret must requeue the reconcile")
+		}
+
+		parseLeaf := func(certPEM []byte) *x509.Certificate {
+			block, _ := pem.Decode(certPEM)
+			Expect(block).NotTo(BeNil())
+			leaf, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			return leaf
+		}
+
+		It("tier 1: mounts the user's Secret directly and creates no Certificate even when issuerRef is also set", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-tier1"
+			const userSecret = "user-provided-tls"
+			makeSecret(userSecret, newServingSecretData(name))
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{
+					Enabled:    true,
+					SecretName: userSecret,
+					// issuerRef ALSO set: tier 1 must win the precedence.
+					IssuerRef: &proxysqlv1alpha1.TLSIssuerRef{Name: "unused-issuer"},
+				}
+			})
+			reconcileAndExpectSuccess(name)
+
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(Equal(userSecret),
+				"the tls volume must mount the USER's Secret directly — not fall back to the operator-managed name")
+			Expect(hasInit).To(BeTrue())
+
+			cert := &unstructured.Unstructured{}
+			cert.SetGroupVersionKind(certGVK)
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, cert)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "tier 1 must not create a cert-manager Certificate")
+
+			var opSec corev1.Secret
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &opSec)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "tier 1 must not mint an operator-managed serving Secret")
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls-ca", Namespace: ns}, &opSec)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "tier 1 must not mint the self-signed CA")
+		})
+
+		It("tier 3: mints a CA and serving cert, wires the StatefulSet, and preserves both across reconciles", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-tier3"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var ca, srv corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls-ca", Namespace: ns}, &ca)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			Expect(isOwnedBy(&ca, cluster)).To(BeTrue())
+			Expect(isOwnedBy(&srv, cluster)).To(BeTrue())
+			for _, k := range []string{"tls.crt", "tls.key", "ca.crt"} {
+				Expect(ca.Data[k]).NotTo(BeEmpty(), "CA Secret must carry %s", k)
+				Expect(srv.Data[k]).NotTo(BeEmpty(), "serving Secret must carry %s", k)
+			}
+			Expect(srv.Data["ca.crt"]).To(Equal(ca.Data["tls.crt"]), "serving ca.crt must be the minting CA's certificate")
+
+			leaf := parseLeaf(srv.Data["tls.crt"])
+			Expect(leaf.DNSNames).To(ContainElements(
+				name, name+"."+ns+".svc", "*."+name+"-headless."+ns+".svc", name+"-external"))
+
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name + "-tls"))
+			Expect(hasInit).To(BeTrue())
+
+			// Persistence: a second reconcile must not touch either Secret.
+			caUID, caData, srvData := ca.UID, ca.Data, srv.Data
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls-ca", Namespace: ns}, &ca)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			Expect(ca.UID).To(Equal(caUID), "CA Secret must be preserved (same object), not re-minted")
+			Expect(ca.Data).To(Equal(caData), "CA material must be byte-stable across reconciles")
+			Expect(srv.Data).To(Equal(srvData), "a valid serving cert must not be re-issued")
+		})
+
+		It("tier 3: reissues the serving cert when it enters the renewal window, preserving the CA", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-renew"
+			// Seed a healthy CA plus a serving cert whose 1h lifetime is
+			// inside the default 720h renewBefore window.
+			caCrt, caKey, err := tlsutil.NewCA("seed-ca", 5*365*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			oldCrt, oldKey, err := tlsutil.IssueServing(caCrt, caKey, tlsutil.SANsFor(name, ns, nil), time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			makeSecret(name+"-tls-ca", map[string][]byte{"tls.crt": caCrt, "tls.key": caKey, "ca.crt": caCrt})
+			makeSecret(name+"-tls", map[string][]byte{"tls.crt": oldCrt, "tls.key": oldKey, "ca.crt": caCrt})
+
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(name)
+
+			var ca, srv corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls-ca", Namespace: ns}, &ca)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			Expect(ca.Data["tls.crt"]).To(Equal(caCrt), "the CA must be preserved, not re-minted")
+			Expect(srv.Data["tls.crt"]).NotTo(Equal(oldCrt), "a cert inside renewBefore must be reissued")
+			Expect(srv.Data["tls.key"]).NotTo(Equal(oldKey))
+
+			newLeaf := parseLeaf(srv.Data["tls.crt"])
+			oldLeaf := parseLeaf(oldCrt)
+			Expect(newLeaf.NotAfter.After(oldLeaf.NotAfter)).To(BeTrue(), "the reissued cert must expire later than the seed")
+			roots := x509.NewCertPool()
+			Expect(roots.AppendCertsFromPEM(caCrt)).To(BeTrue())
+			_, err = newLeaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: name})
+			Expect(err).NotTo(HaveOccurred(), "the reissued cert must chain to the preserved CA")
+		})
+
+		It("degrades with TLSSecretError on a missing tier-1 Secret without wedging, renders without TLS wiring, and recovers", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-missing"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true, SecretName: "not-there"}
+			})
+			reconcileExpectError(name)
+
+			// Never wired: the template must NOT reference the unsatisfiable
+			// Secret (kubelet is never the validator).
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(BeEmpty(), "no tls volume may reference a Secret that failed validation")
+			Expect(hasInit).To(BeFalse())
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil(), "the resolution failure must surface as a Degraded condition")
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("TLSSecretError"))
+			Expect(cond.Message).To(ContainSubstring("not-there"), "the message must name the missing Secret")
+
+			// Non-wedging: a replicas change must still apply while degraded.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			five := int32(5)
+			cluster.Spec.Replicas = &five
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileExpectError(name)
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(five), "a replicas change must survive the TLS resolution failure")
+
+			// Recovery: creating the Secret wires TLS and clears Degraded.
+			makeSecret("not-there", newServingSecretData(name))
+			reconcileAndExpectSuccess(name)
+			secretName, hasInit = stsTLSWiring(name)
+			Expect(secretName).To(Equal("not-there"))
+			Expect(hasInit).To(BeTrue())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil(),
+				"the Degraded condition must clear once the Secret resolves")
+		})
+
+		It("degrades naming the missing ca.crt key when a tier-1 Secret lacks it", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-nokey"
+			data := newServingSecretData(name)
+			delete(data, "ca.crt")
+			makeSecret("partial-tls", data)
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true, SecretName: "partial-tls"}
+			})
+			reconcileExpectError(name)
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("TLSSecretError"))
+			Expect(cond.Message).To(ContainSubstring("ca.crt"), "the message must name the missing key")
+		})
+
+		It("holds the last-good TLS wiring when the spec switches to an unresolvable Secret", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-hold"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(name)
+			secretName, _ := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name+"-tls"), "premise: tier 3 wired the operator-managed Secret")
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.TLS.SecretName = "vanished"
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileExpectError(name)
+
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name+"-tls"),
+				"previously wired TLS must hold the last-good mount — neither go dark nor reference the broken Secret")
+			Expect(hasInit).To(BeTrue())
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("TLSSecretError"))
+			Expect(cond.Message).To(ContainSubstring("vanished"))
+		})
+
+		It("tier 2: creates the cert-manager Certificate with the SAN set, degrades until the Secret appears, then wires it", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-cm"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{
+					Enabled:   true,
+					IssuerRef: &proxysqlv1alpha1.TLSIssuerRef{Name: "test-issuer", Kind: "ClusterIssuer"},
+					ExtraSANs: []string{"proxy.example.com", "192.0.2.10"},
+				}
+			})
+			// No cert-manager controller in envtest: the Secret never
+			// appears, so the first reconcile must degrade and requeue.
+			reconcileExpectError(name)
+
+			cert := &unstructured.Unstructured{}
+			cert.SetGroupVersionKind(certGVK)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, cert)).To(Succeed())
+			Expect(isOwnedBy(cert, cluster)).To(BeTrue())
+			spec, ok := cert.Object["spec"].(map[string]any)
+			Expect(ok).To(BeTrue())
+			Expect(spec["secretName"]).To(Equal(name + "-tls"))
+			Expect(spec["dnsNames"]).To(ContainElements(
+				name, name+"."+ns+".svc", "*."+name+"-headless."+ns+".svc", name+"-external", "proxy.example.com"))
+			Expect(spec["ipAddresses"]).To(ContainElement("192.0.2.10"))
+			issuerRef, ok := spec["issuerRef"].(map[string]any)
+			Expect(ok).To(BeTrue())
+			Expect(issuerRef["name"]).To(Equal("test-issuer"))
+			Expect(issuerRef["kind"]).To(Equal("ClusterIssuer"))
+			Expect(issuerRef["group"]).To(Equal("cert-manager.io"))
+			Expect(spec["duration"]).To(Equal("2160h0m0s"))
+			Expect(spec["renewBefore"]).To(Equal("720h0m0s"))
+
+			// Tier 2 is not tier 3: no self-signed CA may be minted.
+			var caSec corev1.Secret
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls-ca", Namespace: ns}, &caSec)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+			// Degraded while waiting; the StatefulSet renders without TLS
+			// wiring (never wired ⇒ no unsatisfiable template).
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("TLSSecretError"))
+			secretName, _ := stsTLSWiring(name)
+			Expect(secretName).To(BeEmpty())
+
+			// Fake cert-manager issuance and reconcile again.
+			makeSecret(name+"-tls", newServingSecretData(name))
+			reconcileAndExpectSuccess(name)
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name + "-tls"))
+			Expect(hasInit).To(BeTrue())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+		})
+
+		It("keeps the tier-2 Certificate until a tier-1 switch actually validates (no GC before validation)", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-gc"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{
+					Enabled:   true,
+					IssuerRef: &proxysqlv1alpha1.TLSIssuerRef{Name: "test-issuer"},
+				}
+			})
+			reconcileExpectError(name) // Certificate created; Secret not issued yet
+			makeSecret(name+"-tls", newServingSecretData(name))
+			reconcileAndExpectSuccess(name) // tier 2 wired
+			secretName, _ := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name+"-tls"), "premise: tier 2 wired the cert-manager Secret")
+
+			// Switch to a tier-1 Secret that does NOT exist. The held
+			// material is the cert-manager-issued Secret — deleting the
+			// Certificate now would cut off its renewal source.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.TLS.SecretName = "user-switch-missing"
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileExpectError(name)
+
+			cert := &unstructured.Unstructured{}
+			cert.SetGroupVersionKind(certGVK)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, cert)).To(Succeed(),
+				"the Certificate must survive until the tier-1 switch validates — it renews the held material")
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name + "-tls"))
+			Expect(hasInit).To(BeTrue())
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("TLSSecretError"))
+
+			// Once the user Secret validates, tier 1 takes over AND the
+			// Certificate is garbage-collected.
+			makeSecret("user-switch-missing", newServingSecretData(name))
+			reconcileAndExpectSuccess(name)
+			secretName, _ = stsTLSWiring(name)
+			Expect(secretName).To(Equal("user-switch-missing"))
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, cert)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"the Certificate must be GC'd once tier 1 validates")
+		})
+
+		It("degrades on a missing backend CA Secret and renders without backend TLS until it validates", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-backend"
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{
+					Enabled: true,
+					Backend: &proxysqlv1alpha1.TLSBackendSpec{CASecretName: "backend-ca"},
+				}
+			})
+			reconcileExpectError(name)
+
+			// Serving (tier 3) resolved fine; the backend wiring must be
+			// withheld — never let the kubelet validate the missing Secret.
+			secretName, hasInit := stsTLSWiring(name)
+			Expect(secretName).To(Equal(name+"-tls"), "tier-3 serving cert must still resolve")
+			Expect(hasInit).To(BeTrue())
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			for _, v := range ss.Spec.Template.Spec.Volumes {
+				Expect(v.Name).NotTo(Equal("backend-tls"),
+					"no backend-tls volume may reference a Secret that failed validation")
+			}
+			var cnf corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnf)).To(Succeed())
+			Expect(string(cnf.Data["proxysql.cnf"])).NotTo(ContainSubstring("ssl_p2s_ca"),
+				"backend TLS variables must not render while the backend CA Secret is unresolved")
+
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(cond).NotTo(BeNil(), "the missing backend CA must surface as a Degraded condition")
+			Expect(cond.Reason).To(Equal("TLSSecretError"))
+			Expect(cond.Message).To(ContainSubstring("backend-ca"), "the message must name the missing Secret")
+
+			// Recovery: create the CA Secret → backend wiring + variables
+			// render, Degraded clears.
+			makeSecret("backend-ca", map[string][]byte{"ca.crt": newServingSecretData(name)["ca.crt"]})
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			foundBackend := false
+			for _, v := range ss.Spec.Template.Spec.Volumes {
+				if v.Name == "backend-tls" {
+					foundBackend = true
+				}
+			}
+			Expect(foundBackend).To(BeTrue())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnf)).To(Succeed())
+			Expect(string(cnf.Data["proxysql.cnf"])).To(ContainSubstring("ssl_p2s_ca"))
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+		})
+
+		It("rejects tls.renewBefore >= duration at admission", func() {
+			ctx := context.Background()
+			bad := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "pxc-tls-renew-bad", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+					TLS: &proxysqlv1alpha1.TLSSpec{
+						Enabled:     true,
+						Duration:    metav1.Duration{Duration: time.Hour},
+						RenewBefore: metav1.Duration{Duration: 2 * time.Hour},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, bad)
+			if err == nil {
+				// Admission let it through (rule missing/broken): remove it, or
+				// the leaked always-in-renewal cluster hot-loops the shared
+				// manager started by later specs — exactly the failure mode
+				// this rule exists to prevent.
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, bad) })
+			}
+			Expect(err).To(HaveOccurred(),
+				"renewBefore >= duration puts a fresh cert permanently inside its renewal window: reissue every reconcile, RELOAD on every pod — an error-free hot loop")
+			Expect(err.Error()).To(ContainSubstring("renewBefore"),
+				"the CEL message must name renewBefore")
+		})
+
+		It("accepts default and zero tls durations at admission", func() {
+			ctx := context.Background()
+			// Zero values: metav1.Duration is a struct, so omitempty never
+			// omits it — Go clients sending TLSSpec{Enabled: true} serialize
+			// duration: "0s", renewBefore: "0s", bypassing CRD defaulting.
+			// defaultTLS treats 0 as "use the default" (2160h/720h), so the
+			// admission rule must too.
+			zero := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "pxc-tls-renew-zero", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+					TLS: &proxysqlv1alpha1.TLSSpec{Enabled: true},
+				},
+			}
+			Expect(k8sClient.Create(ctx, zero)).To(Succeed(),
+				"zero durations mean the defaults (2160h/720h) and must be accepted")
+			Expect(k8sClient.Delete(ctx, zero)).To(Succeed())
+
+			explicit := &proxysqlv1alpha1.ProxySQLCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "pxc-tls-renew-explicit", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+					TLS: &proxysqlv1alpha1.TLSSpec{
+						Enabled:     true,
+						Duration:    metav1.Duration{Duration: 2160 * time.Hour},
+						RenewBefore: metav1.Duration{Duration: 720 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, explicit)).To(Succeed(),
+				"the documented defaults given explicitly must be accepted")
+			Expect(k8sClient.Delete(ctx, explicit)).To(Succeed())
+		})
+	})
+
+	When("the tls Secret content rotates (restart-free rotation engine)", func() {
+		// makeTLSCluster reconciles a tier-3 cluster to a wired steady
+		// state and returns the initial tls-applied marker.
+		makeTLSCluster := func(name string) string {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
+			})
+			reconcileAndExpectSuccess(name)
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			var srv corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			Expect(ss.Annotations[annotationTLSAppliedHash]).To(Equal(tlsContentHash(srv.Data)),
+				"the first reconcile must adopt the minted content (empty marker rule)")
+			return ss.Annotations[annotationTLSAppliedHash]
+		}
+
+		// rotateServingSecret re-issues the tier-3 serving cert from the
+		// SAME stored CA (what a renewal does) and overwrites the Secret,
+		// returning the new content hash. The new cert satisfies
+		// servingReissueNeeded=false, so the resolution keeps it verbatim
+		// and only the rotation engine reacts.
+		rotateServingSecret := func(name string) string {
+			ctx := context.Background()
+			var ca, srv corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls-ca", Namespace: ns}, &ca)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			crt, key, err := tlsutil.IssueServing(ca.Data["tls.crt"], ca.Data["tls.key"],
+				tlsutil.SANsFor(name, ns, nil), 90*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			srv.Data["tls.crt"] = crt
+			srv.Data["tls.key"] = key
+			Expect(k8sClient.Update(ctx, &srv)).To(Succeed())
+			newHash := tlsContentHash(srv.Data)
+			Expect(newHash).NotTo(Equal(tlsContentHash(map[string][]byte{})), "sanity")
+			return newHash
+		}
+
+		makeReadyPod := func(clusterName, podName string) {
+			ctx := context.Background()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      podName,
+					Namespace: ns,
+					Labels:    map[string]string{"proxysql.com/cluster": clusterName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "proxysql", Image: "proxysql/proxysql"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0)) })
+			// Loopback IP: dials go to 127.0.0.1:6032 where nothing listens,
+			// so every RELOAD/handshake attempt fails fast — exactly the
+			// "attempt made, cannot verify" shape envtest can prove (a real
+			// handshake needs a live proxysql; that is e2e's job).
+			pod.Status.PodIP = "127.0.0.1"
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+
+		It("adopts the marker on operator upgrade without dialing or restarting", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-rot-adopt"
+			makeTLSCluster(name)
+
+			// Simulate a StatefulSet written by an operator version predating
+			// the rotation engine: the marker annotation does not exist.
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			delete(ss.Annotations, annotationTLSAppliedHash)
+			Expect(k8sClient.Update(ctx, &ss)).To(Succeed())
+
+			reconcileAndExpectSuccess(name)
+
+			var srv corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-tls", Namespace: ns}, &srv)).To(Succeed())
+			var after appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &after)).To(Succeed())
+			Expect(after.Annotations[annotationTLSAppliedHash]).To(Equal(tlsContentHash(srv.Data)),
+				"an empty marker must be adopted, not rotated (operator upgrades must not churn every cluster)")
+			Expect(after.Spec.Template.Annotations).NotTo(HaveKey(builders.TLSRestartAnnotation),
+				"adoption must not bump the restart annotation")
+			Expect(after.Annotations).NotTo(HaveKey(annotationTLSRotationState))
+		})
+
+		It("keeps the marker unadvanced while zero pods are ready", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-rot-zero"
+			oldMarker := makeTLSCluster(name)
+
+			newHash := rotateServingSecret(name)
+			Expect(newHash).NotTo(Equal(oldMarker))
+
+			// envtest has no kubelet: no pod is ever Ready, so the engine
+			// must leave the marker alone (a NotReady pod may still serve
+			// the old cert once it recovers) — and report no error.
+			reconcileAndExpectSuccess(name)
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Annotations[annotationTLSAppliedHash]).To(Equal(oldMarker),
+				"zero ready pods must keep the marker unadvanced")
+			Expect(ss.Annotations).NotTo(HaveKey(annotationTLSRotationState))
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+		})
+
+		It("attempts RELOAD+verify on ready replicas, degrades inside the window, then falls back to a rolling restart", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-rot-fallback"
+			oldMarker := makeTLSCluster(name)
+			makeReadyPod(name, name+"-0")
+			reconciler.tlsVerifyRetryDelay = time.Millisecond // keep in-pass retries fast
+
+			newHash := rotateServingSecret(name)
+
+			// Inside the window: the dial to 127.0.0.1:6032 fails, the
+			// reconcile returns the rotation error (requeue/backoff), the
+			// marker stays put, the window start is persisted, and Degraded
+			// says why. envtest cannot complete a real handshake — the full
+			// verified path (fingerprint flip with restartCount unchanged)
+			// is e2e's to prove.
+			req = reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).To(HaveOccurred(), "an open rotation window must requeue")
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Annotations[annotationTLSAppliedHash]).To(Equal(oldMarker),
+				"an unverified rotation must not advance the marker")
+			Expect(ss.Annotations[annotationTLSRotationState]).To(HavePrefix(newHash+"@"),
+				"the window start must be persisted (crash-safe clock)")
+			Expect(ss.Spec.Template.Annotations).NotTo(HaveKey(builders.TLSRestartAnnotation),
+				"no restart bump before the window expires")
+			var got proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			degraded := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+			Expect(degraded).NotTo(BeNil())
+			Expect(degraded.Reason).To(Equal(reasonTLSRotationError))
+			Expect(degraded.Message).To(ContainSubstring("127.0.0.1:6032"))
+
+			// Window expired: the engine commits the rolling-restart
+			// fallback — pod-template bump to the content hash, marker
+			// advanced (the rollout delivers the material), state cleared,
+			// Degraded gone, Progressing explains the restart.
+			reconciler.TLSRotationWindow = time.Nanosecond
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred(), "the fallback is a decision, not an error")
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Spec.Template.Annotations[builders.TLSRestartAnnotation]).To(Equal(newHash),
+				"the fallback must bump the dedicated pod-template annotation to the content hash")
+			Expect(ss.Annotations[annotationTLSAppliedHash]).To(Equal(newHash))
+			Expect(ss.Annotations).NotTo(HaveKey(annotationTLSRotationState))
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)).To(BeNil())
+			progressing := meta.FindStatusCondition(got.Status.Conditions, condTypeProgressing)
+			Expect(progressing).NotTo(BeNil())
+			Expect(progressing.Message).To(ContainSubstring("TLS rotation fallback"))
+
+			// The bump is idempotent: another reconcile with unchanged
+			// content moves nothing (no restart churn).
+			reconcileAndExpectSuccess(name)
+			var again appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &again)).To(Succeed())
+			Expect(again.Spec.Template.Annotations[builders.TLSRestartAnnotation]).To(Equal(newHash))
+			Expect(again.Annotations[annotationTLSAppliedHash]).To(Equal(newHash))
+		})
+
+		It("disabling TLS removes the markers and renders the symlink-cleanup init container (probe-4)", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-rot-disable"
+			makeTLSCluster(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.TLS.Enabled = false
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+			Expect(ss.Annotations).NotTo(HaveKey(annotationTLSAppliedHash))
+			Expect(ss.Annotations).NotTo(HaveKey(annotationTLSRotationState))
+			names := make([]string, 0, len(ss.Spec.Template.Spec.InitContainers))
+			for _, c := range ss.Spec.Template.Spec.InitContainers {
+				names = append(names, c.Name)
+			}
+			Expect(names).To(ContainElement(builders.TLSCleanupInitContainerName),
+				"a previously-wired persistent cluster must shed its datadir symlinks: probe-4 showed proxysql EXITS at boot on dangling pem symlinks")
+			Expect(names).NotTo(ContainElement(builders.TLSInitContainerName))
+
+			// And it STAYS rendered (idempotent guard, no template churn).
+			reconcileAndExpectSuccess(name)
+			var again appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &again)).To(Succeed())
+			found := false
+			for _, c := range again.Spec.Template.Spec.InitContainers {
+				if c.Name == builders.TLSCleanupInitContainerName {
+					found = true
+				}
+			}
+			Expect(found).To(BeTrue())
+		})
+	})
+
+	When("a referenced TLS Secret changes out from under a running manager", func() {
+		It("re-reconciles promptly on a tier-1 user Secret content change (name-based watch, no resync wait)", func() {
+			ctx := context.Background()
+			const name = "pxc-tls-watch"
+			const userSecret = "watched-user-tls"
+
+			// A real manager wired via SetupWithManager: this spec exercises
+			// the watch topology itself, which direct Reconcile calls can't.
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme:  k8sClient.Scheme(),
+				Metrics: metricsserver.Options{BindAddress: "0"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect((&ProxySQLClusterReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr)).To(Succeed())
+			mgrCtx, mgrCancel := context.WithCancel(context.Background())
+			DeferCleanup(mgrCancel)
+			go func() {
+				defer GinkgoRecover()
+				Expect(mgr.Start(mgrCtx)).To(Succeed())
+			}()
+
+			caCrt, caKey, err := tlsutil.NewCA("watch-ca", 5*365*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			crt, key, err := tlsutil.IssueServing(caCrt, caKey, tlsutil.SANsFor(name, ns, nil), 90*24*time.Hour)
+			Expect(err).NotTo(HaveOccurred())
+			sec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: userSecret, Namespace: ns},
+				Data:       map[string][]byte{"tls.crt": crt, "tls.key": key, "ca.crt": caCrt},
+			}
+			Expect(k8sClient.Create(ctx, sec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, sec) })
+
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true, SecretName: userSecret}
+			})
+
+			// The manager reconciles the new cluster on its own (For watch).
+			Eventually(func(g Gomega) {
+				var ss appsv1.StatefulSet
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &ss)).To(Succeed())
+				found := ""
+				for _, v := range ss.Spec.Template.Spec.Volumes {
+					if v.Name == "tls" && v.Secret != nil {
+						found = v.Secret.SecretName
+					}
+				}
+				g.Expect(found).To(Equal(userSecret))
+			}, "10s", "100ms").Should(Succeed(), "premise: the manager wires tier-1 TLS on its own")
+
+			// Break the referenced Secret's CONTENT. The cluster object does
+			// not change, so only a Secret→cluster watch can trigger the
+			// reconcile that notices (informer resync is hours away).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: userSecret, Namespace: ns}, sec)).To(Succeed())
+			delete(sec.Data, "ca.crt")
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				var got proxysqlv1alpha1.ProxySQLCluster
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Reason).To(Equal("TLSSecretError"))
+				g.Expect(cond.Message).To(ContainSubstring("ca.crt"))
+			}, "10s", "100ms").Should(Succeed(),
+				"a content change to the referenced Secret must reach the cluster without waiting for resync")
 		})
 	})
 })

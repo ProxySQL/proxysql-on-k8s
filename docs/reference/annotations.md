@@ -73,6 +73,50 @@ Absent on StatefulSets created by operator versions that predate it; an
 absent marker is skipped (never forces a restart on operator upgrade) and is
 written on the next reconcile. Not user-configurable.
 
+### `proxysql.com/tls-applied-hash` (operator-set, on the StatefulSet object)
+
+| | |
+|---|---|
+| Set on | the StatefulSet's own `metadata.annotations` — **not** the pod template, so setting it never triggers a rollout |
+| Value | deterministic SHA-256 over exactly the three Secret keys ProxySQL serves through the datadir symlinks (`ca.crt`, `tls.crt`, `tls.key`) — other keys a Secret may carry (e.g. cert-manager's `tls-combined.pem`) never reach the pods and don't move this hash |
+| Purpose | records the `tls` Secret content every **ready** replica has been handshake-verified to actually serve, after `PROXYSQL RELOAD TLS`. Only advances once verification succeeds on every ready replica (or the rolling-restart fallback is committed in the same StatefulSet write) — an operator crash mid-rotation re-runs the (idempotent) `RELOAD TLS` rather than silently dropping it |
+
+Absent when `spec.tls` is off, or on a StatefulSet from before this
+annotation existed (operator upgrade) — either case is treated as "adopt
+without dialing," matching the pattern for
+[`structural-applied-hash`](#proxysqlcomstructural-applied-hash-operator-set-on-the-statefulset-object).
+See [TLS reference](proxysqlcluster.md#tls) and the [TLS user
+guide](../user-guide/tls.md#rotation) for the full rotation model. Not
+user-configurable.
+
+### `proxysql.com/tls-rotation-state` (operator-set, on the StatefulSet object)
+
+| | |
+|---|---|
+| Set on | the StatefulSet's own `metadata.annotations` — never the pod template |
+| Value | `<secretHash>@<RFC3339 window-start>` — the content hash being rotated to, and when the operator first attempted it |
+| Purpose | anchors the bounded rotation retry window (default 2 minutes) across reconciles and operator restarts, so a transient verification failure doesn't reset the clock (which would defer the restart fallback indefinitely) and clock skew can't extend it (a future-dated start is rejected in favor of "now") |
+
+Cleared once the window resolves — either every ready replica verifies, or
+the window expires into the restart fallback. Not user-configurable.
+
+### `proxysql.com/tls-restart` (operator-set, on the pod template)
+
+| | |
+|---|---|
+| Set on | the StatefulSet pod template — a change here **does** trigger a rolling restart |
+| Value | the `tls` Secret's content hash (same hash as `tls-applied-hash`) |
+| Purpose | the TLS rotation engine's restart fallback: written only when the bounded rotation window (see `tls-rotation-state` above) expires with some replica still unable to complete a handshake-verified `RELOAD TLS`. Using the content hash makes the bump idempotent — one restart per rotated content, safe to recompute after a crash |
+
+Like `cnf-checksum`, this key is **reserved**: the operator writes it after
+merging `spec.podAnnotations`, so a user-supplied entry with the same key
+is always overwritten. Absent until a rotation first needs the fallback
+(the common case) — and sticky after that: once written, the operator
+carries it forward through later restart-free rotations, because removing
+it would itself change the pod template and trigger a rollout. Its
+presence in `kubectl get sts <cluster> -o yaml` therefore means some past
+rotation needed the fallback path, not necessarily the most recent one. See [TLS user guide — rotation](../user-guide/tls.md#rotation).
+
 ## Standard label set
 
 Applied to every object the operator creates for a `ProxySQLCluster`

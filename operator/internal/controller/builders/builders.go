@@ -23,9 +23,11 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
@@ -41,6 +43,11 @@ const (
 	DefaultProxySQLImage         = "proxysql/proxysql"
 	DefaultProxySQLTag           = "3.0"
 	DefaultPersistenceSize       = "1Gi"
+
+	// Reserved admin usernames: a username/password auth Secret whose
+	// username matches one of these is not an extra credential.
+	userAdmin  = "admin"
+	userRadmin = "radmin"
 )
 
 // Default ProxySQL secret key names. Match the AuthKeys defaults on the CRD.
@@ -151,7 +158,7 @@ func PasswordsFromSecret(data map[string][]byte, keys proxysqlv1alpha1.AuthKeys)
 			}
 			pw.Monitor = monitor
 		}
-		if user != "admin" && user != "radmin" {
+		if user != userAdmin && user != userRadmin {
 			pw.ExtraAdminUser = user
 			pw.ExtraAdminPassword = pass
 		}
@@ -172,6 +179,38 @@ type Builder struct {
 	Scheme  *runtime.Scheme
 	Spec    proxysqlv1alpha1.ProxySQLClusterSpec // already defaulted
 	Pw      Passwords
+
+	// TLSMountSecret is the resolved name of the Secret mounted at
+	// /etc/proxysql/tls when spec.tls is enabled. The reconciler's TLS
+	// secret resolution (Task 4) sets it AFTER New(): for tier 1 it is
+	// the USER's spec.tls.secretName Secret (mounted directly, never
+	// copied); for tiers 2 (cert-manager) and 3 (operator self-signed)
+	// it is the operator-managed TLSSecretName(). Empty falls back to
+	// TLSSecretName(), so builders stay usable without the resolution
+	// step (unit tests, dry rendering).
+	TLSMountSecret string
+
+	// TLSRestartValue is the TLS rotation engine's rolling-restart
+	// fallback bump: when set (and spec.tls is enabled) it renders as the
+	// pod-template annotation TLSRestartAnnotation, so changing it rolls
+	// the pods. The reconciler sets it to the tls Secret's CONTENT hash —
+	// rotation never changes the cnf text, so the cnf checksum cannot
+	// carry this restart, and using the content hash makes the bump
+	// idempotent (one restart per rotated content, crash-safe). Empty
+	// (the default) renders no annotation.
+	TLSRestartValue string
+
+	// TLSCleanup asks for the tls-cleanup init container on a cluster
+	// whose spec.tls is now ABSENT/disabled: the reconciler sets it when
+	// the live StatefulSet shows TLS was previously wired. Probe-verified
+	// (task-5 report): proxysql:3.0 EXITS at boot when the fixed datadir
+	// pem names are dangling symlinks (the Secret mount is gone but the
+	// symlinks persist on a persistent datadir) — cert autogen fails on
+	// BIO_new_file. The cleanup container removes the operator's symlinks
+	// (symlinks ONLY — never real pem files) so the pods boot plaintext
+	// again. Rendered only with persistence enabled; an emptyDir datadir
+	// is fresh every boot and never dangles.
+	TLSCleanup bool
 }
 
 // New returns a Builder with .Spec already defaulted. Pass the resolved
@@ -195,6 +234,36 @@ func (b *Builder) Namespace() string { return b.Cluster.Namespace }
 // HeadlessName returns the name of the headless Service used as the
 // StatefulSet's serviceName.
 func (b *Builder) HeadlessName() string { return b.Cluster.Name + "-headless" }
+
+// TLSSecretName returns the name of the operator-managed serving-cert
+// Secret (kubernetes.io/tls shape: tls.crt/tls.key, plus ca.crt). Used by
+// tiers 2 (cert-manager writes into it) and 3 (the operator issues into
+// it); a tier-1 user Secret is mounted directly instead (TLSMountSecret).
+func (b *Builder) TLSSecretName() string { return b.Cluster.Name + "-tls" }
+
+// TLSCASecretName returns the name of the operator-managed self-signed CA
+// Secret (tier 3 only). Preserved across reconciles, like the
+// operator-managed auth Secret.
+func (b *Builder) TLSCASecretName() string { return b.Cluster.Name + "-tls-ca" }
+
+// tlsMountSecretName resolves the Secret the tls volume mounts: the
+// reconciler-resolved TLSMountSecret when set, else the operator-managed
+// default.
+func (b *Builder) tlsMountSecretName() string {
+	if b.TLSMountSecret != "" {
+		return b.TLSMountSecret
+	}
+	return b.TLSSecretName()
+}
+
+// backendTLSEnabled reports whether backend (proxy-to-server) TLS material
+// should be rendered and mounted. The API contract gates everything on
+// spec.tls.backend.caSecretName: without a CA to verify the backend
+// against, no backend TLS variables are rendered at all — even if a
+// client cert Secret is referenced.
+func (b *Builder) backendTLSEnabled() bool {
+	return b.Spec.TLSEnabled() && b.Spec.TLS.Backend != nil && b.Spec.TLS.Backend.CASecretName != ""
+}
 
 // SecretName returns the name of the Secret holding admin/radmin/monitor
 // passwords. Honors AuthSpec.SecretName if set; otherwise defaults to
@@ -352,6 +421,12 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 		defaultLogging(spec.Logging, c.Name)
 	}
 
+	// TLS defaults (only when the sub-spec is present; absent stays nil and
+	// renders the golden-pinned no-TLS output).
+	if spec.TLS != nil {
+		defaultTLS(spec.TLS)
+	}
+
 	// PSA-restricted-compatible default security contexts.
 	if spec.PodSecurityContext == nil {
 		nonRoot := true
@@ -378,6 +453,27 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 	}
 
 	return spec
+}
+
+// defaultTLS applies the documented defaults to a non-nil TLSSpec,
+// mirroring the CRD's kubebuilder defaults for older API servers: 90d
+// certificates renewed 30d before expiry, issuerRef kind/group per
+// cert-manager convention.
+func defaultTLS(t *proxysqlv1alpha1.TLSSpec) {
+	if t.Duration.Duration == 0 {
+		t.Duration = metav1.Duration{Duration: 2160 * time.Hour}
+	}
+	if t.RenewBefore.Duration == 0 {
+		t.RenewBefore = metav1.Duration{Duration: 720 * time.Hour}
+	}
+	if t.IssuerRef != nil {
+		if t.IssuerRef.Kind == "" {
+			t.IssuerRef.Kind = "Issuer"
+		}
+		if t.IssuerRef.Group == "" {
+			t.IssuerRef.Group = "cert-manager.io"
+		}
+	}
 }
 
 // defaultLogging applies the documented defaults to a non-nil LoggingSpec:

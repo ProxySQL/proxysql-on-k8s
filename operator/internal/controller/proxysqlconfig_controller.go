@@ -198,23 +198,13 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
 
-	// 4) Discover ready ProxySQL pods.
-	addrs, err := discoverPodAddresses(ctx, r.Client, &cluster, adminPort)
+	// 4) Discover ready ProxySQL pods plus the TLS dial config.
+	addrs, dialTLS, done, err := r.resolveDialTargets(ctx, &cfg, &cluster, adminPort)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if len(addrs) == 0 {
-		// A paused cluster (spec.pause) has 0 ready pods by design — its
-		// StatefulSet is intentionally scaled to 0 — so surface a reason
-		// that says so instead of the generic NoReadyReplicas, which would
-		// read as an unexpected outage.
-		reason, msg := "NoReadyReplicas", "no ready ProxySQL pods to push config to"
-		if cluster.Spec.Pause {
-			reason, msg = "ClusterPaused", "target ProxySQLCluster is paused (0 replicas); config push skipped"
-		}
-		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, reason, msg)
-		_ = r.Status().Update(ctx, &cfg)
-		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	if done != nil {
+		return *done, nil
 	}
 
 	// 5) Compute a fingerprint over (desired config + the exact pod set) for
@@ -242,7 +232,7 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// Informed resync: nothing about the spec or replica set changed, so
 		// instead of blind-pushing everything, read runtime state back and
 		// re-push only the replicas that actually drifted.
-		drifted, shunned := r.verifyReplicas(ctx, addrs, radminPassword, desired)
+		drifted, shunned := r.verifyReplicas(ctx, addrs, radminPassword, desired, dialTLS)
 		now := metav1.NewTime(time.Now())
 		cfg.Status.LastRuntimeCheckTime = &now
 		cfg.Status.ShunnedBackends = shunned
@@ -260,7 +250,7 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// 6) Fan out writes.
-	synced, syncErrs := r.applyToReplicas(ctx, pushAddrs, radminPassword, desired)
+	synced, syncErrs := r.applyToReplicas(ctx, pushAddrs, radminPassword, desired, dialTLS)
 
 	// 7) Status.
 	cfg.Status.ObservedGeneration = cfg.Generation
@@ -373,7 +363,8 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 	for _, s := range cfg.Spec.PostgreSQLServers {
 		d.PostgreSQLServers = append(d.PostgreSQLServers, proxysqlclient.PostgreSQLServer{
 			Hostgroup: s.Hostgroup, Hostname: s.Hostname, Port: s.Port,
-			Weight: s.Weight, MaxConnections: s.MaxConnections, Comment: s.Comment,
+			Weight: s.Weight, MaxConnections: s.MaxConnections,
+			UseSSL: s.UseSSL, Comment: s.Comment,
 		})
 	}
 	for _, u := range cfg.Spec.PostgreSQLUsers {
@@ -479,16 +470,63 @@ func pgsqlConfigured(cfg *proxysqlv1alpha1.ProxySQLConfig) bool {
 	return len(cfg.Spec.PostgreSQLServers)+len(cfg.Spec.PostgreSQLUsers)+len(cfg.Spec.PostgreSQLQueryRules) > 0
 }
 
+// resolveDialTargets discovers the ready replica addresses and the TLS
+// dial config for the target cluster (nil unless the cluster's pods are
+// TLS-wired: then the admin dials verify against the mounted Secret's CA
+// with per-pod DNS ServerNames; plaintext clusters dial exactly as
+// before). A non-nil done means Reconcile should return it as-is: the
+// status has already been updated (no ready pods, or an unbuildable TLS
+// dial config — both transient, both requeued).
+func (r *ProxySQLConfigReconciler) resolveDialTargets(
+	ctx context.Context,
+	cfg *proxysqlv1alpha1.ProxySQLConfig,
+	cluster *proxysqlv1alpha1.ProxySQLCluster,
+	adminPort int32,
+) (addrs []string, dialTLS *adminTLS, done *ctrl.Result, err error) {
+	endpoints, err := discoverPodEndpoints(ctx, r.Client, cluster, adminPort)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dialTLS, dialErr := adminDialTLS(ctx, r.Client, cluster, endpoints)
+	if dialErr != nil {
+		// Transient by nature (Secret/StatefulSet read hiccup, or a broken
+		// ca.crt the cluster reconciler is already degrading on): surface
+		// and retry rather than pushing over a channel we cannot
+		// trust-configure.
+		r.setCfgCondition(cfg, cfgCondReady, metav1.ConditionFalse, "TLSDialConfigError", dialErr.Error())
+		_ = r.Status().Update(ctx, cfg)
+		return nil, nil, &ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+	addrs = make([]string, 0, len(endpoints))
+	for _, ep := range endpoints {
+		addrs = append(addrs, ep.Addr)
+	}
+	if len(addrs) == 0 {
+		// A paused cluster (spec.pause) has 0 ready pods by design — its
+		// StatefulSet is intentionally scaled to 0 — so surface a reason
+		// that says so instead of the generic NoReadyReplicas, which would
+		// read as an unexpected outage.
+		reason, msg := "NoReadyReplicas", "no ready ProxySQL pods to push config to"
+		if cluster.Spec.Pause {
+			reason, msg = "ClusterPaused", "target ProxySQLCluster is paused (0 replicas); config push skipped"
+		}
+		r.setCfgCondition(cfg, cfgCondReady, metav1.ConditionFalse, reason, msg)
+		_ = r.Status().Update(ctx, cfg)
+		return nil, nil, &ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+	return addrs, dialTLS, nil, nil
+}
+
 // applyToReplicas opens a connection to each addr and runs Sync. Returns the
 // count of replicas that synced successfully, plus the per-addr errors.
 // Connections use the "radmin" account — ProxySQL restricts "admin" to
 // localhost, so remote (pod-network) admin connections must use radmin.
-func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []string, password string, d *proxysqlclient.Desired) (int, []error) {
+func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []string, password string, d *proxysqlclient.Desired, dialTLS *adminTLS) (int, []error) {
 	log := logf.FromContext(ctx)
 	var ok int
 	var errs []error
 	for _, addr := range addrs {
-		pxc, err := proxysqlclient.New(addr, "radmin", password)
+		pxc, err := dialTLS.dial(addr, radminUser, password)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", addr, err))
 			continue
@@ -509,10 +547,10 @@ func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []
 // addresses whose state drifted from desired, plus the total SHUNNED backend
 // count. A replica whose read-back fails is treated as drifted: we cannot
 // prove it converged, so it goes back through the push path.
-func (r *ProxySQLConfigReconciler) verifyReplicas(ctx context.Context, addrs []string, password string, d *proxysqlclient.Desired) (drifted []string, shunned int32) {
+func (r *ProxySQLConfigReconciler) verifyReplicas(ctx context.Context, addrs []string, password string, d *proxysqlclient.Desired, dialTLS *adminTLS) (drifted []string, shunned int32) {
 	log := logf.FromContext(ctx)
 	for _, addr := range addrs {
-		pxc, err := proxysqlclient.New(addr, "radmin", password)
+		pxc, err := dialTLS.dial(addr, radminUser, password)
 		if err != nil {
 			drifted = append(drifted, addr)
 			continue
@@ -577,9 +615,19 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 	}
 	radminPassword := adminPw.Radmin
 
-	addrs, err := discoverPodAddresses(ctx, r.Client, &cluster, b.Spec.Protocols.Admin.Port)
+	endpoints, err := discoverPodEndpoints(ctx, r.Client, &cluster, b.Spec.Protocols.Admin.Port)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	dialTLS, err := adminDialTLS(ctx, r.Client, &cluster, endpoints)
+	if err != nil {
+		log.Info("cleanup pending: TLS dial config unavailable; retrying",
+			"cluster", cluster.Name, "error", err.Error(), "escapeHatch", skipCleanupAnnotation)
+		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+	addrs := make([]string, 0, len(endpoints))
+	for _, ep := range endpoints {
+		addrs = append(addrs, ep.Addr)
 	}
 	if len(addrs) == 0 {
 		log.Info("cleanup pending: cluster exists but has no ready pods; retrying",
@@ -596,7 +644,7 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 	// are left as-is: ProxySQL has no "unset", and resetting values blind
 	// would be worse than leaving them.
 	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword,
-		cleanupDesired(b, len(cfg.Spec.ProxySQLServers) == 0))
+		cleanupDesired(b, len(cfg.Spec.ProxySQLServers) == 0), dialTLS)
 	if cleaned != len(addrs) {
 		log.Info("cleanup incomplete; retrying", "cleaned", cleaned, "total", len(addrs), "errors", joinErrs(errs))
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil

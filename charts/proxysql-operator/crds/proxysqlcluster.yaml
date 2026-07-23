@@ -2562,6 +2562,106 @@ spec:
                     - LoadBalancer
                     type: string
                 type: object
+              tls:
+                description: |-
+                  TLS configures certificate issuance and TLS wiring across the
+                  frontend (mysql/pgsql client ports), admin/cluster-peering, and
+                  backend (ProxySQL-to-database) surfaces. Absent (or Enabled=false)
+                  renders exactly what the operator renders today — golden-pinned,
+                  no upgrade restart. See TLSSpec for the three-tier issuance
+                  precedence.
+                properties:
+                  backend:
+                    description: |-
+                      Backend configures ProxySQL's TLS trust toward the backend databases
+                      (mysql-ssl_p2s_ca / pgsql equivalent). This is a DIFFERENT PKI from
+                      the frontend/admin serving certificate above: it must trust whatever
+                      issued the *database's* server certificate, which is the operator's
+                      own CA only when a single PKI happens to sign both sides. Absent
+                      disables backend TLS variable rendering entirely.
+                    properties:
+                      caSecretName:
+                        description: |-
+                          CASecretName references a Secret whose ca.crt trusts the backend
+                          database's server certificate, rendered into mysql-ssl_p2s_ca (and
+                          the pgsql equivalent). Unset: backend TLS variables are not
+                          rendered at all.
+                        type: string
+                      clientCertSecretName:
+                        description: |-
+                          ClientCertSecretName references an optional kubernetes.io/tls Secret
+                          (tls.crt/tls.key) presented to the backend for mTLS, rendered into
+                          ssl_p2s_cert / ssl_p2s_key.
+                        type: string
+                    type: object
+                  duration:
+                    default: 2160h
+                    description: |-
+                      Duration is the issued certificate's lifetime. Applies to tiers 2
+                      (cert-manager) and 3 (operator self-signed) only.
+                    type: string
+                  enabled:
+                    description: |-
+                      Enabled turns TLS on. Default off: absent or false renders exactly
+                      what the operator renders today (golden-pinned; no upgrade restart).
+                    type: boolean
+                  extraSANs:
+                    description: |-
+                      ExtraSANs adds DNS names or IPs to the issued serving certificate, on
+                      top of the operator's default set (cluster name, headless/regular
+                      Service DNS names, per-pod headless names). Useful for the external
+                      Service's LoadBalancer hostname or a custom DNS record. Ignored for
+                      tier 1 (SecretName) since that certificate is supplied as-is.
+                    items:
+                      type: string
+                    type: array
+                  issuerRef:
+                    description: |-
+                      IssuerRef points at a cert-manager Issuer or ClusterIssuer used to
+                      issue the frontend/admin serving certificate. Tier 2: used when
+                      SecretName is empty and Name is set.
+                    properties:
+                      group:
+                        default: cert-manager.io
+                        description: Group of the referenced resource's API.
+                        type: string
+                      kind:
+                        default: Issuer
+                        description: Kind of the referenced resource.
+                        enum:
+                        - Issuer
+                        - ClusterIssuer
+                        type: string
+                      name:
+                        description: Name of the Issuer or ClusterIssuer.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  renewBefore:
+                    default: 720h
+                    description: |-
+                      RenewBefore is how long before expiry the certificate is reissued.
+                      Applies to tiers 2 (cert-manager) and 3 (operator self-signed) only.
+                      Must be shorter than Duration — enforced at admission (see the
+                      TLSSpec-level rule), otherwise a fresh certificate would always be
+                      inside its renewal window and reissue on every reconcile.
+                    type: string
+                  secretName:
+                    description: |-
+                      SecretName is a user-provided kubernetes.io/tls Secret (tls.crt,
+                      tls.key, and ca.crt — all three required) used as the frontend/admin serving
+                      certificate. Tier 1: wins over IssuerRef and the operator's
+                      self-signed fallback whenever set. The operator never rotates or
+                      re-issues a Secret referenced this way — that's the caller's job.
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'tls.renewBefore must be shorter than tls.duration (a zero
+                    duration means its default: duration 2160h, renewBefore 720h)'
+                  rule: '(duration(self.renewBefore) == duration(''0s'') ? duration(''720h'')
+                    : duration(self.renewBefore)) < (duration(self.duration) == duration(''0s'')
+                    ? duration(''2160h'') : duration(self.duration))'
               tolerations:
                 description: Tolerations for pod scheduling.
                 items:

@@ -68,6 +68,53 @@ var reservedCnfKeys = map[string]struct{}{
 	"admin-restapi_port":      {},
 	"admin-web_enabled":       {},
 	"admin-web_port":          {},
+
+	// Backend TLS path variables (spec.tls.backend-owned; see tlsCnfVars
+	// below): rendered by the operator with values fixed to the
+	// backend-tls mount when spec.tls.backend is configured. Only the
+	// RENDERED variables are reserved. The have_ssl flags are deliberately
+	// NOT reserved: the operator never renders them (they default true in
+	// 3.0), and a TLS-less cluster legitimately sets e.g.
+	// mysql-have_ssl="false" via spec.variables to disable the
+	// autogen-cert frontend TLS (runtime-settable, so the flip applies
+	// restart-free). Likewise the unrendered p2s tuning knobs
+	// (capath/cipher/crl/crlpath) stay user-settable — the operator never
+	// renders them, so there is nothing to collide with.
+	"mysql-ssl_p2s_ca":   {},
+	"mysql-ssl_p2s_cert": {},
+	"mysql-ssl_p2s_key":  {},
+	"pgsql-ssl_p2s_ca":   {},
+	"pgsql-ssl_p2s_cert": {},
+	"pgsql-ssl_p2s_key":  {},
+}
+
+// tlsCnfVars — the complete TLS variable surface of ProxySQL 3.0, verified
+// live on 2026-07-23 against the shipped proxysql/proxysql:3.0 image
+// (3.0.9-618-g7ddb3dc, image ID 77bfbfc3d21c) by querying
+// `SELECT variable_name FROM global_variables WHERE variable_name LIKE
+// '%ssl%' OR ... '%tls%' OR ... '%cert%'` on the admin interface and
+// cross-checking the full 403-variable dump (evidence:
+// .superpowers/sdd/task-3-report.md):
+//
+//	mysql-have_ssl / pgsql-have_ssl                       frontend TLS enable, default true
+//	mysql-ssl_p2s_{ca,capath,cert,cipher,crl,crlpath,key} backend (proxy-to-server)
+//	pgsql-ssl_p2s_{ca,capath,cert,cipher,crl,crlpath,key} backend, pgsql equivalents
+//	admin-ssl_keylog_file                                 debug TLS keylog only
+//
+// Crucially there are NO frontend/admin cert-path variables: the
+// frontend/admin serving certs are the fixed datadir file names
+// proxysql-{ca,cert,key}.pem (auto-generated when absent, re-read by
+// `PROXYSQL RELOAD TLS`, live-confirmed via stats_tls_certificates and by
+// `SET mysql-ssl_cert=...` → "Unknown global variable"). Frontend/admin
+// cert delivery therefore does NOT go through the cnf at all — the
+// StatefulSet's tls-init container symlinks the datadir names into the
+// Secret mount (statefulset.go), boot-probe verified: proxysql loads the
+// symlinked certs, serves them on 6033 AND 6032, and never clobbers the
+// links. Only the backend ssl_p2s_* variables are rendered into the cnf.
+var tlsCnfVars = map[string]string{
+	"ssl_p2s_ca":   backendTLSMountPath + "/ca.crt",
+	"ssl_p2s_cert": backendTLSMountPath + "/tls.crt",
+	"ssl_p2s_key":  backendTLSMountPath + "/tls.key",
 }
 
 // cnfVarName constrains the variable name after its domain prefix. ProxySQL
@@ -243,7 +290,8 @@ func (b *Builder) adminDefaultVars(clusterSync bool) map[string]string {
 }
 
 // mysqlDefaultVars returns the mysql_variables defaults (threads plus, with
-// query logging enabled, the eventslog_* wiring for the fluent-bit sidecar).
+// query logging enabled, the eventslog_* wiring for the fluent-bit sidecar,
+// plus the reserved backend TLS paths when spec.tls.backend is configured).
 func (b *Builder) mysqlDefaultVars() map[string]string {
 	d := map[string]string{"threads": "4"}
 	if b.LoggingEnabled() && b.Spec.Logging.QueryLog {
@@ -252,12 +300,35 @@ func (b *Builder) mysqlDefaultVars() map[string]string {
 		d["eventslog_format"] = "2"
 		d["eventslog_filesize"] = "52428800"
 	}
+	b.addBackendTLSVars(d)
 	return d
 }
 
 // pgsqlDefaultVars returns the pgsql_variables defaults.
 func (b *Builder) pgsqlDefaultVars() map[string]string {
-	return map[string]string{"threads": "4"}
+	d := map[string]string{"threads": "4"}
+	b.addBackendTLSVars(d)
+	return d
+}
+
+// addBackendTLSVars adds the backend (proxy-to-server) TLS path variables
+// to a section's defaults map. Identical for the mysql and pgsql sections
+// (the verified 3.0 names differ only in their section prefix). Rendered
+// only when spec.tls is enabled AND backend.caSecretName is set; the
+// client cert/key pair additionally requires backend.clientCertSecretName.
+// The values are fixed mount paths — cert ROTATION changes Secret content,
+// never these lines, so rotation stays invisible to the cnf machinery.
+// Although merged through the defaults map, these keys are reserved
+// (reservedCnfKeys), so no user override can reach the merge.
+func (b *Builder) addBackendTLSVars(d map[string]string) {
+	if !b.backendTLSEnabled() {
+		return
+	}
+	d["ssl_p2s_ca"] = tlsCnfVars["ssl_p2s_ca"]
+	if b.Spec.TLS.Backend.ClientCertSecretName != "" {
+		d["ssl_p2s_cert"] = tlsCnfVars["ssl_p2s_cert"]
+		d["ssl_p2s_key"] = tlsCnfVars["ssl_p2s_key"]
+	}
 }
 
 // BootstrapCnf renders the minimal proxysql.cnf for this cluster.

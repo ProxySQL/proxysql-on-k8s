@@ -18,8 +18,10 @@ package proxysqlclient
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -30,12 +32,37 @@ import (
 type Client struct {
 	db   *sql.DB
 	addr string
+	// tlsKey is the go-sql-driver TLS-config registry key this client
+	// registered (empty for plaintext clients). Deregistered on Close.
+	tlsKey string
 }
 
-// New opens a connection to the ProxySQL admin interface at addr (host:port)
-// authenticating as user/pass. The connection pool is sized to 1 — admin
-// writes are serial.
+// tlsKeyCounter feeds the per-dial unique driver TLS-config keys; see
+// NewWithTLS.
+var tlsKeyCounter atomic.Uint64
+
+// New opens a plaintext connection to the ProxySQL admin interface at addr
+// (host:port) authenticating as user/pass. Equivalent to
+// NewWithTLS(addr, user, pass, nil).
 func New(addr, user, pass string) (*Client, error) {
+	return NewWithTLS(addr, user, pass, nil)
+}
+
+// NewWithTLS opens a connection to the ProxySQL admin interface at addr
+// (host:port) authenticating as user/pass. The connection pool is sized to
+// 1 — admin writes are serial.
+//
+// When tlsCfg is non-nil the MySQL-wire handshake upgrades to TLS with that
+// exact config (the admin plane is always MySQL wire protocol, TLS is the
+// STARTTLS-style capability upgrade the driver handles). The config is
+// registered with go-sql-driver under a key UNIQUE to this Client — the
+// driver's registry is process-global, so a shared key (per cluster name,
+// or a constant) would let concurrent dials to different clusters clobber
+// each other's trust anchors — and deregistered again on Close.
+//
+// A nil tlsCfg produces a plaintext client byte-identical to what New has
+// always produced: TLS-off clusters keep dialing exactly as before.
+func NewWithTLS(addr, user, pass string, tlsCfg *tls.Config) (*Client, error) {
 	cfg := mysql.NewConfig()
 	cfg.User = user
 	cfg.Passwd = pass
@@ -48,23 +75,41 @@ func New(addr, user, pass string) (*Client, error) {
 	// driver in its strictest mode and let errors surface verbatim.
 	cfg.AllowNativePasswords = true
 
+	tlsKey := ""
+	if tlsCfg != nil {
+		tlsKey = fmt.Sprintf("proxysql-operator-%d", tlsKeyCounter.Add(1))
+		if err := mysql.RegisterTLSConfig(tlsKey, tlsCfg); err != nil {
+			return nil, fmt.Errorf("register TLS config for %s: %w", addr, err)
+		}
+		cfg.TLSConfig = tlsKey
+	}
+
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
+		if tlsKey != "" {
+			mysql.DeregisterTLSConfig(tlsKey)
+		}
 		return nil, fmt.Errorf("open proxysql admin %s: %w", addr, err)
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Second)
 
-	return &Client{db: db, addr: addr}, nil
+	return &Client{db: db, addr: addr, tlsKey: tlsKey}, nil
 }
 
-// Close releases the underlying connection pool.
+// Close releases the underlying connection pool and deregisters any driver
+// TLS config this client registered. Idempotent.
 func (c *Client) Close() error {
 	if c == nil || c.db == nil {
 		return nil
 	}
-	return c.db.Close()
+	err := c.db.Close()
+	if c.tlsKey != "" {
+		mysql.DeregisterTLSConfig(c.tlsKey)
+		c.tlsKey = ""
+	}
+	return err
 }
 
 // Ping verifies the admin port is reachable and the credentials work.

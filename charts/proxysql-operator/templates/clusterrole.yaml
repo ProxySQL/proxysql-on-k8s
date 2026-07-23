@@ -38,6 +38,12 @@ rules:
   - apiGroups: [monitoring.coreos.com]
     resources: [servicemonitors]
     verbs: [create, delete, get, list, patch, update, watch]
+  # certificates: the cert-manager tier of spec.tls (issuerRef) creates and
+  # maintains one cert-manager.io Certificate per cluster; delete covers the
+  # garbage-collection when the tier is switched away.
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [create, delete, get, list, patch, update, watch]
   - apiGroups: [proxysql.com]
     resources: [proxysqlclusters, proxysqlconfigs]
     verbs: [create, delete, get, list, patch, update, watch]
