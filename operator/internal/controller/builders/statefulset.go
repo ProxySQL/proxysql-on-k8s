@@ -137,7 +137,109 @@ func (b *Builder) podSpec() corev1.PodSpec {
 		spec.Volumes = append(spec.Volumes, b.loggingVolumes()...)
 	}
 
+	// TLS (spec.tls): the serving-cert Secret volume plus the init
+	// container that symlinks the fixed datadir cert names into it — see
+	// tlsInitContainer for why symlinks and not variables.
+	if b.Spec.TLSEnabled() {
+		spec.InitContainers = append(spec.InitContainers, b.tlsInitContainer())
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: tlsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: b.tlsMountSecretName(),
+					Items: []corev1.KeyToPath{
+						{Key: "tls.crt", Path: "tls.crt"},
+						{Key: "tls.key", Path: "tls.key"},
+						{Key: "ca.crt", Path: "ca.crt"},
+					},
+				},
+			},
+		})
+		if b.backendTLSEnabled() {
+			spec.Volumes = append(spec.Volumes, b.backendTLSVolume())
+		}
+	}
+
 	return spec
+}
+
+// TLS volume/mount layout. The serving-cert Secret projects at
+// tlsMountPath; the backend trust material (a DIFFERENT PKI — the
+// database's issuer) projects at backendTLSMountPath, matching the
+// ssl_p2s_* paths rendered into the cnf (tlsCnfVars). Both are nested
+// under the /etc/proxysql config mount — kubelet mounts nested paths in
+// order, so a mount point inside another read-only mount is fine.
+const (
+	tlsVolumeName        = "tls"
+	tlsMountPath         = "/etc/proxysql/tls"
+	backendTLSVolumeName = "backend-tls"
+	backendTLSMountPath  = "/etc/proxysql/backend-tls"
+)
+
+// tlsInitContainer seeds the datadir cert symlinks before proxysql starts.
+//
+// ProxySQL 3.0 has no frontend/admin cert-path variables (probe-verified;
+// see tlsCnfVars in proxysql_cnf.go): it loads — or, when absent,
+// auto-generates — the fixed datadir files proxysql-{ca,cert,key}.pem, and
+// `PROXYSQL RELOAD TLS` re-reads exactly those paths. Symlinking them into
+// the read-only Secret mount gives cert delivery AND restart-free
+// rotation: kubelet updates the mounted Secret atomically, the symlinks
+// keep resolving, RELOAD TLS picks up new content. `ln -sfn` is idempotent
+// and replaces real pem files left by a pre-TLS boot on a persistent
+// datadir (all three flows boot-probe verified on proxysql/proxysql:3.0:
+// fresh+symlinked, admin handshake, and persistent-datadir reseed — see
+// .superpowers/sdd/task-3-report.md).
+//
+// The container reuses the cluster's own proxysql image (no extra pull,
+// same digest pinning) — any image with /bin/sh works — and the main
+// container's securityContext, so PSA `restricted` compliance is identical.
+func (b *Builder) tlsInitContainer() corev1.Container {
+	return corev1.Container{
+		Name:            "tls-init",
+		Image:           b.Image(),
+		ImagePullPolicy: b.Spec.Image.PullPolicy,
+		SecurityContext: b.Spec.ContainerSecurityContext,
+		Command:         []string{"sh", "-c"},
+		Args: []string{
+			"ln -sfn " + tlsMountPath + "/tls.crt /var/lib/proxysql/proxysql-cert.pem && " +
+				"ln -sfn " + tlsMountPath + "/tls.key /var/lib/proxysql/proxysql-key.pem && " +
+				"ln -sfn " + tlsMountPath + "/ca.crt /var/lib/proxysql/proxysql-ca.pem",
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: tlsVolumeName, MountPath: tlsMountPath, ReadOnly: true},
+			{Name: "data", MountPath: "/var/lib/proxysql"},
+		},
+	}
+}
+
+// backendTLSVolume projects the backend trust material: the CA bundle from
+// spec.tls.backend.caSecretName (ca.crt), plus — when referenced — the
+// mTLS client pair from clientCertSecretName (tls.crt/tls.key). One
+// projected volume keeps a single mount path for all ssl_p2s_* variables.
+func (b *Builder) backendTLSVolume() corev1.Volume {
+	sources := []corev1.VolumeProjection{{
+		Secret: &corev1.SecretProjection{
+			LocalObjectReference: corev1.LocalObjectReference{Name: b.Spec.TLS.Backend.CASecretName},
+			Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+		},
+	}}
+	if b.Spec.TLS.Backend.ClientCertSecretName != "" {
+		sources = append(sources, corev1.VolumeProjection{
+			Secret: &corev1.SecretProjection{
+				LocalObjectReference: corev1.LocalObjectReference{Name: b.Spec.TLS.Backend.ClientCertSecretName},
+				Items: []corev1.KeyToPath{
+					{Key: "tls.crt", Path: "tls.crt"},
+					{Key: "tls.key", Path: "tls.key"},
+				},
+			},
+		})
+	}
+	return corev1.Volume{
+		Name: backendTLSVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{Sources: sources},
+		},
+	}
 }
 
 func (b *Builder) container() corev1.Container {
@@ -241,6 +343,16 @@ func (b *Builder) proxysqlVolumeMounts() []corev1.VolumeMount {
 	}
 	if b.LoggingEnabled() {
 		mounts = append(mounts, corev1.VolumeMount{Name: "logs", MountPath: logsMountPath})
+	}
+	if b.Spec.TLSEnabled() {
+		// The tls mount is load-bearing at runtime, not just for the init
+		// step: the datadir symlinks resolve inside THIS container's
+		// filesystem, so proxysql (and RELOAD TLS re-reads) need the
+		// Secret projected here.
+		mounts = append(mounts, corev1.VolumeMount{Name: tlsVolumeName, MountPath: tlsMountPath, ReadOnly: true})
+		if b.backendTLSEnabled() {
+			mounts = append(mounts, corev1.VolumeMount{Name: backendTLSVolumeName, MountPath: backendTLSMountPath, ReadOnly: true})
+		}
 	}
 	return mounts
 }

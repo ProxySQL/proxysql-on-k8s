@@ -1297,3 +1297,337 @@ func TestBuilder_StatefulSet_Probes_PartialOverride_OnlyNamedProbeReplaced(t *te
 		t.Errorf("livenessProbe should stay at default when only readiness is overridden, got %+v", container.LivenessProbe)
 	}
 }
+
+// ---- TLS wiring (datadir-symlink delivery; see gate evidence in
+// .superpowers/sdd/task-3-report.md) ----
+
+// tlsCluster returns a cluster with spec.tls set via mut applied after
+// enabling TLS.
+func tlsCluster(mut ...func(*proxysqlv1alpha1.ProxySQLCluster)) *proxysqlv1alpha1.ProxySQLCluster {
+	base := func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
+	}
+	return newCluster(clusterName, append([]func(*proxysqlv1alpha1.ProxySQLCluster){base}, mut...)...)
+}
+
+// TestBuilder_TLS_AbsentOrDisabled_ByteIdentical is the unit-level golden
+// guarantee: spec.tls absent and spec.tls{enabled:false} must render a cnf
+// byte-identical to (and a StatefulSet deep-equal to) a spec with no TLS.
+func TestBuilder_TLS_AbsentOrDisabled_ByteIdentical(t *testing.T) {
+	pw := Passwords{Admin: "a", Radmin: "r", Monitor: "m"}
+	plain := New(newCluster(clusterName), newScheme(t), pw)
+	wantCnf, err := plain.BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	wantSS := plain.StatefulSet("checksum")
+
+	for name, c := range map[string]*proxysqlv1alpha1.ProxySQLCluster{
+		"enabled false": newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: false}
+		}),
+		"enabled false with backend": newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			c.Spec.TLS = &proxysqlv1alpha1.TLSSpec{
+				Enabled: false,
+				Backend: &proxysqlv1alpha1.TLSBackendSpec{CASecretName: "backend-ca"},
+			}
+		}),
+	} {
+		b := New(c, newScheme(t), pw)
+		cnf, err := b.BootstrapCnf(nil)
+		if err != nil {
+			t.Fatalf("%s: BootstrapCnf: %v", name, err)
+		}
+		if cnf != wantCnf {
+			t.Errorf("%s: cnf differs from TLS-less render:\n%s", name, cnf)
+		}
+		if ss := b.StatefulSet("checksum"); !reflect.DeepEqual(ss, wantSS) {
+			t.Errorf("%s: StatefulSet differs from TLS-less render", name)
+		}
+	}
+}
+
+// TestBuilder_TLS_Enabled_NoBackend_CnfByteIdentical pins the verified 3.0
+// reality: there are NO frontend/admin cert-path variables — cert delivery
+// is datadir symlinks, so enabling TLS without a backend block changes the
+// StatefulSet but leaves the cnf byte-identical.
+func TestBuilder_TLS_Enabled_NoBackend_CnfByteIdentical(t *testing.T) {
+	pw := Passwords{Admin: "a", Radmin: "r", Monitor: "m"}
+	plain, err := New(newCluster(clusterName), newScheme(t), pw).BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	withTLS, err := New(tlsCluster(), newScheme(t), pw).BootstrapCnf(nil)
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	if withTLS != plain {
+		t.Errorf("tls.enabled without backend must not change the cnf (no cert-path variables exist in 3.0):\n%s", withTLS)
+	}
+}
+
+// TestBuilder_TLS_BackendVars covers the ssl_p2s_* rendering matrix.
+func TestBuilder_TLS_BackendVars(t *testing.T) {
+	pw := Passwords{Admin: "a", Radmin: "r", Monitor: "m"}
+	pgOn := func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.PostgreSQL.Enabled = boolPtr(true)
+	}
+
+	t.Run("ca only", func(t *testing.T) {
+		c := tlsCluster(pgOn, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			c.Spec.TLS.Backend = &proxysqlv1alpha1.TLSBackendSpec{CASecretName: "backend-ca"}
+		})
+		cnf, err := New(c, newScheme(t), pw).BootstrapCnf(nil)
+		if err != nil {
+			t.Fatalf("BootstrapCnf: %v", err)
+		}
+		vars := ParseCnfVariables(cnf)
+		for _, absent := range []string{"mysql-ssl_p2s_ca", "pgsql-ssl_p2s_ca"} {
+			if _, ok := vars[absent]; ok {
+				t.Errorf("%s must be structural (excluded from runtime-appliable set)", absent)
+			}
+		}
+		for _, want := range []string{
+			`  ssl_p2s_ca="/etc/proxysql/backend-tls/ca.crt"`,
+		} {
+			if strings.Count(cnf, want) != 2 { // once in mysql_variables, once in pgsql_variables
+				t.Errorf("want %q twice (mysql+pgsql sections) in cnf:\n%s", want, cnf)
+			}
+		}
+		if strings.Contains(cnf, "ssl_p2s_cert") || strings.Contains(cnf, "ssl_p2s_key") {
+			t.Errorf("client cert vars rendered without clientCertSecretName:\n%s", cnf)
+		}
+	})
+
+	t.Run("ca plus client cert", func(t *testing.T) {
+		c := tlsCluster(func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			c.Spec.TLS.Backend = &proxysqlv1alpha1.TLSBackendSpec{
+				CASecretName:         "backend-ca",
+				ClientCertSecretName: "backend-client",
+			}
+		})
+		cnf, err := New(c, newScheme(t), pw).BootstrapCnf(nil)
+		if err != nil {
+			t.Fatalf("BootstrapCnf: %v", err)
+		}
+		for _, want := range []string{
+			`  ssl_p2s_ca="/etc/proxysql/backend-tls/ca.crt"`,
+			`  ssl_p2s_cert="/etc/proxysql/backend-tls/tls.crt"`,
+			`  ssl_p2s_key="/etc/proxysql/backend-tls/tls.key"`,
+		} {
+			if !strings.Contains(cnf, want) {
+				t.Errorf("cnf missing %q:\n%s", want, cnf)
+			}
+		}
+	})
+
+	t.Run("client cert without ca renders nothing", func(t *testing.T) {
+		// The API contract: CASecretName unset => backend TLS variables are
+		// not rendered at all, even if a client cert Secret is referenced.
+		c := tlsCluster(func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			c.Spec.TLS.Backend = &proxysqlv1alpha1.TLSBackendSpec{ClientCertSecretName: "backend-client"}
+		})
+		cnf, err := New(c, newScheme(t), pw).BootstrapCnf(nil)
+		if err != nil {
+			t.Fatalf("BootstrapCnf: %v", err)
+		}
+		if strings.Contains(cnf, "ssl_p2s") {
+			t.Errorf("backend vars rendered without caSecretName:\n%s", cnf)
+		}
+	})
+}
+
+// TestBuilder_TLS_ReservedKeys: every operator-owned TLS variable is
+// rejected when user-supplied via spec.variables.
+func TestBuilder_TLS_ReservedKeys(t *testing.T) {
+	for key, section := range map[string]string{
+		"mysql-have_ssl":     "mysql",
+		"mysql-ssl_p2s_ca":   "mysql",
+		"mysql-ssl_p2s_cert": "mysql",
+		"mysql-ssl_p2s_key":  "mysql",
+		"pgsql-have_ssl":     "pgsql",
+		"pgsql-ssl_p2s_ca":   "pgsql",
+		"pgsql-ssl_p2s_cert": "pgsql",
+		"pgsql-ssl_p2s_key":  "pgsql",
+	} {
+		c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			switch section {
+			case "mysql":
+				c.Spec.Variables.MySQL = map[string]string{key: "x"}
+			case "pgsql":
+				c.Spec.Variables.PostgreSQL = map[string]string{key: "x"}
+			}
+		})
+		_, err := New(c, newScheme(t), Passwords{}).BootstrapCnf(nil)
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("spec.variables[%q] should be rejected as reserved, got err=%v", key, err)
+		}
+	}
+}
+
+// TestBuilder_TLS_StatefulSetWiring: enabled => tls Secret volume (items
+// tls.crt/tls.key/ca.crt), read-only mount at /etc/proxysql/tls on the main
+// container, and the symlink-seeding init container running the cluster's
+// own proxysql image with the main container's securityContext.
+func TestBuilder_TLS_StatefulSetWiring(t *testing.T) {
+	b := New(tlsCluster(), newScheme(t), Passwords{})
+	pod := b.StatefulSet("checksum").Spec.Template.Spec
+
+	var tlsVol *corev1.Volume
+	for i := range pod.Volumes {
+		if pod.Volumes[i].Name == "tls" {
+			tlsVol = &pod.Volumes[i]
+		}
+	}
+	if tlsVol == nil {
+		t.Fatalf("no tls volume in %+v", pod.Volumes)
+	}
+	if tlsVol.Secret == nil || tlsVol.Secret.SecretName != clusterName+"-tls" {
+		t.Fatalf("tls volume must default to Secret %q, got %+v", clusterName+"-tls", tlsVol.VolumeSource)
+	}
+	gotItems := map[string]string{}
+	for _, it := range tlsVol.Secret.Items {
+		gotItems[it.Key] = it.Path
+	}
+	wantItems := map[string]string{"tls.crt": "tls.crt", "tls.key": "tls.key", "ca.crt": "ca.crt"}
+	if !reflect.DeepEqual(gotItems, wantItems) {
+		t.Errorf("tls volume items = %v, want %v", gotItems, wantItems)
+	}
+
+	main := pod.Containers[0]
+	foundMount := false
+	for _, m := range main.VolumeMounts {
+		if m.Name == "tls" {
+			foundMount = true
+			if m.MountPath != "/etc/proxysql/tls" || !m.ReadOnly {
+				t.Errorf("tls mount = %+v, want read-only at /etc/proxysql/tls", m)
+			}
+		}
+	}
+	if !foundMount {
+		t.Errorf("main container missing tls mount: %+v", main.VolumeMounts)
+	}
+
+	if len(pod.InitContainers) != 1 {
+		t.Fatalf("want exactly one init container, got %d", len(pod.InitContainers))
+	}
+	init := pod.InitContainers[0]
+	if init.Image != b.Image() {
+		t.Errorf("init container image = %q, want the cluster's proxysql image %q", init.Image, b.Image())
+	}
+	script := strings.Join(init.Command, " ") + " " + strings.Join(init.Args, " ")
+	for _, want := range []string{
+		"ln -sfn /etc/proxysql/tls/tls.crt /var/lib/proxysql/proxysql-cert.pem",
+		"ln -sfn /etc/proxysql/tls/tls.key /var/lib/proxysql/proxysql-key.pem",
+		"ln -sfn /etc/proxysql/tls/ca.crt /var/lib/proxysql/proxysql-ca.pem",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("init container script missing %q: %q", want, script)
+		}
+	}
+	initMounts := map[string]corev1.VolumeMount{}
+	for _, m := range init.VolumeMounts {
+		initMounts[m.Name] = m
+	}
+	if m, ok := initMounts["tls"]; !ok || !m.ReadOnly || m.MountPath != "/etc/proxysql/tls" {
+		t.Errorf("init container tls mount = %+v, want read-only /etc/proxysql/tls", initMounts["tls"])
+	}
+	if m, ok := initMounts["data"]; !ok || m.MountPath != "/var/lib/proxysql" {
+		t.Errorf("init container data mount = %+v, want /var/lib/proxysql", initMounts["data"])
+	}
+	if !reflect.DeepEqual(init.SecurityContext, b.Spec.ContainerSecurityContext) {
+		t.Errorf("init container securityContext = %+v, want the main container's %+v",
+			init.SecurityContext, b.Spec.ContainerSecurityContext)
+	}
+}
+
+// TestBuilder_TLS_MountSecretNameResolved: Task 4 sets Builder.TLSMountSecret
+// to the resolved serving-cert Secret (the USER's Secret for tier 1); the
+// volume must follow it. Default (empty) falls back to TLSSecretName().
+func TestBuilder_TLS_MountSecretNameResolved(t *testing.T) {
+	b := New(tlsCluster(), newScheme(t), Passwords{})
+	if got, want := b.TLSSecretName(), clusterName+"-tls"; got != want {
+		t.Errorf("TLSSecretName() = %q, want %q", got, want)
+	}
+	if got, want := b.TLSCASecretName(), clusterName+"-tls-ca"; got != want {
+		t.Errorf("TLSCASecretName() = %q, want %q", got, want)
+	}
+
+	b.TLSMountSecret = "user-provided-tls"
+	pod := b.StatefulSet("checksum").Spec.Template.Spec
+	for _, v := range pod.Volumes {
+		if v.Name == "tls" {
+			if v.Secret == nil || v.Secret.SecretName != "user-provided-tls" {
+				t.Errorf("tls volume secretName = %+v, want user-provided-tls", v.VolumeSource)
+			}
+			return
+		}
+	}
+	t.Fatalf("no tls volume in %+v", pod.Volumes)
+}
+
+// TestBuilder_TLS_BackendMount: the backend-tls projected volume exists only
+// when caSecretName is set; the client cert Secret joins the projection when
+// referenced.
+func TestBuilder_TLS_BackendMount(t *testing.T) {
+	t.Run("absent without caSecretName", func(t *testing.T) {
+		pod := New(tlsCluster(), newScheme(t), Passwords{}).StatefulSet("x").Spec.Template.Spec
+		for _, v := range pod.Volumes {
+			if v.Name == "backend-tls" {
+				t.Fatalf("backend-tls volume present without caSecretName")
+			}
+		}
+	})
+
+	t.Run("ca only", func(t *testing.T) {
+		c := tlsCluster(func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			c.Spec.TLS.Backend = &proxysqlv1alpha1.TLSBackendSpec{CASecretName: "backend-ca"}
+		})
+		pod := New(c, newScheme(t), Passwords{}).StatefulSet("x").Spec.Template.Spec
+		var vol *corev1.Volume
+		for i := range pod.Volumes {
+			if pod.Volumes[i].Name == "backend-tls" {
+				vol = &pod.Volumes[i]
+			}
+		}
+		if vol == nil || vol.Projected == nil {
+			t.Fatalf("backend-tls projected volume missing: %+v", pod.Volumes)
+		}
+		if len(vol.Projected.Sources) != 1 || vol.Projected.Sources[0].Secret == nil ||
+			vol.Projected.Sources[0].Secret.Name != "backend-ca" {
+			t.Fatalf("backend-tls sources = %+v, want single Secret backend-ca", vol.Projected.Sources)
+		}
+		found := false
+		for _, m := range pod.Containers[0].VolumeMounts {
+			if m.Name == "backend-tls" {
+				found = true
+				if m.MountPath != "/etc/proxysql/backend-tls" || !m.ReadOnly {
+					t.Errorf("backend-tls mount = %+v, want read-only /etc/proxysql/backend-tls", m)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("main container missing backend-tls mount")
+		}
+	})
+
+	t.Run("ca plus client cert", func(t *testing.T) {
+		c := tlsCluster(func(c *proxysqlv1alpha1.ProxySQLCluster) {
+			c.Spec.TLS.Backend = &proxysqlv1alpha1.TLSBackendSpec{
+				CASecretName:         "backend-ca",
+				ClientCertSecretName: "backend-client",
+			}
+		})
+		pod := New(c, newScheme(t), Passwords{}).StatefulSet("x").Spec.Template.Spec
+		for _, v := range pod.Volumes {
+			if v.Name == "backend-tls" {
+				if len(v.Projected.Sources) != 2 || v.Projected.Sources[1].Secret == nil ||
+					v.Projected.Sources[1].Secret.Name != "backend-client" {
+					t.Errorf("backend-tls sources = %+v, want backend-ca + backend-client", v.Projected.Sources)
+				}
+				return
+			}
+		}
+		t.Fatalf("backend-tls volume missing")
+	})
+}

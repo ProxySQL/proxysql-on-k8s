@@ -172,6 +172,16 @@ type Builder struct {
 	Scheme  *runtime.Scheme
 	Spec    proxysqlv1alpha1.ProxySQLClusterSpec // already defaulted
 	Pw      Passwords
+
+	// TLSMountSecret is the resolved name of the Secret mounted at
+	// /etc/proxysql/tls when spec.tls is enabled. The reconciler's TLS
+	// secret resolution (Task 4) sets it AFTER New(): for tier 1 it is
+	// the USER's spec.tls.secretName Secret (mounted directly, never
+	// copied); for tiers 2 (cert-manager) and 3 (operator self-signed)
+	// it is the operator-managed TLSSecretName(). Empty falls back to
+	// TLSSecretName(), so builders stay usable without the resolution
+	// step (unit tests, dry rendering).
+	TLSMountSecret string
 }
 
 // New returns a Builder with .Spec already defaulted. Pass the resolved
@@ -195,6 +205,36 @@ func (b *Builder) Namespace() string { return b.Cluster.Namespace }
 // HeadlessName returns the name of the headless Service used as the
 // StatefulSet's serviceName.
 func (b *Builder) HeadlessName() string { return b.Cluster.Name + "-headless" }
+
+// TLSSecretName returns the name of the operator-managed serving-cert
+// Secret (kubernetes.io/tls shape: tls.crt/tls.key, plus ca.crt). Used by
+// tiers 2 (cert-manager writes into it) and 3 (the operator issues into
+// it); a tier-1 user Secret is mounted directly instead (TLSMountSecret).
+func (b *Builder) TLSSecretName() string { return b.Cluster.Name + "-tls" }
+
+// TLSCASecretName returns the name of the operator-managed self-signed CA
+// Secret (tier 3 only). Preserved across reconciles, like the
+// operator-managed auth Secret.
+func (b *Builder) TLSCASecretName() string { return b.Cluster.Name + "-tls-ca" }
+
+// tlsMountSecretName resolves the Secret the tls volume mounts: the
+// reconciler-resolved TLSMountSecret when set, else the operator-managed
+// default.
+func (b *Builder) tlsMountSecretName() string {
+	if b.TLSMountSecret != "" {
+		return b.TLSMountSecret
+	}
+	return b.TLSSecretName()
+}
+
+// backendTLSEnabled reports whether backend (proxy-to-server) TLS material
+// should be rendered and mounted. The API contract gates everything on
+// spec.tls.backend.caSecretName: without a CA to verify the backend
+// against, no backend TLS variables are rendered at all — even if a
+// client cert Secret is referenced.
+func (b *Builder) backendTLSEnabled() bool {
+	return b.Spec.TLSEnabled() && b.Spec.TLS.Backend != nil && b.Spec.TLS.Backend.CASecretName != ""
+}
 
 // SecretName returns the name of the Secret holding admin/radmin/monitor
 // passwords. Honors AuthSpec.SecretName if set; otherwise defaults to
