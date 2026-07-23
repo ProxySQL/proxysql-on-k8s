@@ -427,7 +427,13 @@ doesn't take at runtime or a key is added/removed — see
 [runtime vs. restart
 semantics](../reference/proxysqlcluster.md#configuration-changes-runtime-vs-restart).
 Image and resource changes roll the pods the normal StatefulSet way.
-Pod management is `Parallel`, so initial creation doesn't serialize,
+Toggling `spec.tls.enabled` is a separate, pod-template-level trigger (the
+`tls-init`/`tls-cleanup` init container and the `tls` volume appearing or
+disappearing) — it rolls the pods once, the same as any other structural
+change, but isn't part of the cnf-checksum mechanism above. What happens
+*after* TLS is enabled — certificate renewal, cert-manager reissuing — is
+a restart-free rotation instead; see [TLS](./tls.md#rotation). Pod
+management is `Parallel`, so initial creation doesn't serialize,
 while updates follow the StatefulSet rolling-update semantics.
 
 Watch a rollout:

@@ -159,6 +159,7 @@ Maps to `pgsql_servers` (ProxySQL 3.x).
 | `port` | `int32` | `5432` (CRD; sync also falls back to 5432) | map key | Backend port. |
 | `weight` | `*int32` | unset → SQL `1` | — | Load-balancing weight. |
 | `maxConnections` | `*int32` | unset → SQL `1000` | — | Per-server connection cap. |
+| `useSSL` | `*bool` | accepted, not synced | — | **Not currently wired**: the field is admitted by the CRD schema but the config-reconciler's conversion to the SQL sync layer drops it — no `use_ssl` column is ever set on `pgsql_servers`, unlike [`mysqlServers[].useSSL`](#mysqlservers), which is fully wired. Setting it today has **no effect**; use `spec.tls.backend` (see the [ProxySQLCluster reference](proxysqlcluster.md#tlsbackendspec)) for backend TLS trust in the meantime, and track this as a known gap rather than relying on the field. |
 | `comment` | `string` | `''` | — | Free text. |
 
 Declaring any `pgsqlServers`/`pgsqlUsers`/`pgsqlQueryRules` against a cluster

@@ -1,10 +1,13 @@
 # Security
 
 Where every credential lives and travels, what RBAC the operator needs,
-what the pods are (and are not) allowed to do, and which ports are
-exposed where. For the security-relevant spec fields see the
-[ProxySQLCluster reference](../reference/proxysqlcluster.md); for chart
-values see the [Helm values reference](../reference/helm-values.md).
+what the pods are (and are not) allowed to do, which ports are exposed
+where, and what's encrypted in transit versus what isn't. For the
+security-relevant spec fields see the [ProxySQLCluster
+reference](../reference/proxysqlcluster.md); for chart values see the
+[Helm values reference](../reference/helm-values.md); for the full TLS
+story (issuance tiers, rotation, backend trust) see the [TLS user
+guide](./tls.md).
 
 ## The credential flow, end to end
 
@@ -35,6 +38,13 @@ Rotation semantics — which credential rotations restart pods and which
 apply at runtime — are covered in
 [Operations](./operations.md#what-restarts-pods-what-doesnt) and
 [Managing clusters](./clusters.md#auth-secrets).
+
+Every credential above still travels as **plaintext MySQL wire protocol**
+between the operator and a pod — and between a client and ProxySQL — unless
+`spec.tls` is configured. Enabling it does not change *where* these
+credentials live (the flow above is unaffected), only whether the
+connections carrying them are encrypted; see [TLS](./tls.md) and [Network
+exposure surface](#network-exposure-surface) below.
 
 ### Why the bootstrap cnf is a Secret, not a ConfigMap
 
@@ -149,13 +159,26 @@ Points to note:
 - The **admin port is always published cluster-internally** — the
   operator needs it. Remote admin logins require the `radmin`
   credential; `admin` only works from inside the pod.
-- The operator's admin connections speak plain MySQL wire protocol
-  without TLS, on the pod network. If your environment requires
-  encryption-in-transit inside the cluster, put a mesh/CNI encryption
-  layer under it, and use NetworkPolicy to restrict who can reach 6032
-  (the operator and any DBA tooling are the only legitimate clients).
+- **Encryption in transit is opt-in, via `spec.tls`.** With `spec.tls`
+  absent (the default), every listed port — including the operator's own
+  admin connections — speaks plain wire protocol on the pod network; if
+  your environment requires encryption-in-transit without configuring
+  `spec.tls`, put a mesh/CNI encryption layer under it, and use
+  NetworkPolicy to restrict who can reach 6032 (the operator and any DBA
+  tooling are the only legitimate clients). With `spec.tls.enabled: true`,
+  **all client-facing and admin ports serve TLS from the same
+  certificate** — 6033/6133 and 6032 alike, there's no partial-enable —
+  and the operator's own admin dials (config pushes, runtime reads,
+  cluster-sync checks) switch to TLS along with everything else. See the
+  [TLS user guide](./tls.md) for issuance tiers, rotation, and the
+  distinction between this (frontend/admin) certificate and backend trust.
 - Backend-side TLS for MySQL backends is per-server opt-in via
-  `mysqlServers[].useSSL` in the `ProxySQLConfig`.
+  `mysqlServers[].useSSL` in the `ProxySQLConfig`, verified against the
+  trust bundle configured in `spec.tls.backend` — see [Backend TLS is a
+  different PKI](./tls.md#backend-tls-is-a-different-pki). This is a
+  **separate PKI** from the frontend/admin certificate above: don't assume
+  enabling `spec.tls` alone encrypts ProxySQL's connections to your
+  backend databases.
 
 ### Exposing anything externally: source ranges and NetworkPolicy
 
