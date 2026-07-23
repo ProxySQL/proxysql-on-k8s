@@ -17,7 +17,7 @@
 - Builders pure; no new module dependencies (cert-manager via unstructured, like `ensureServiceMonitor`).
 - All rendered TLS variables join `reservedCnfKeys` (not overridable via `spec.variables`) and are structural for classification (their VALUES are file paths that never change at rotation; content rotation must NOT look like a cnf change).
 - Degraded reasons: `TLSSecretError` (resolution failures), non-wedging like `ExternalServiceError` (set condition, continue reconcile, requeue).
-- **Exact ProxySQL 3.0 variable names must be verified against the shipped `proxysql/proxysql:3.0` image before use** (admin `SELECT * FROM global_variables WHERE variable_name LIKE '%ssl%'` in a throwaway container is definitive). The names used in this plan are placeholders to be pinned in Task 3 and proven live by the e2e. Confirmed by the maintainer: frontend cert paths ARE configurable in 3.0.
+- **Gate outcome (2026-07-23, image 3.0.9-618)**: NO frontend/admin cert-path variables exist; frontend/admin certs are fixed datadir names `proxysql-{ca,cert,key}.pem` re-read by `PROXYSQL RELOAD TLS`; backend `*-ssl_p2s_*` variables DO exist. Architecture: datadir SYMLINKS into the Secret mount, seeded by an init container (idempotent `ln -sfn`, uid 999, PVC-safe). Task 3 must additionally probe: (a) proxysql boots and serves the provided cert when the symlinks pre-exist (no autogen clobber, no write-through failure on the read-only mount), (b) admin 6032 accepts a TLS handshake using the same certs, (c) behavior on a PERSISTENT datadir where real pem files already exist from a prior boot (symlink seeding must replace files idempotently).
 - PSA restricted: Secret mounts read-only; no datadir writes for certs.
 
 ---

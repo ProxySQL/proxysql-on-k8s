@@ -6,20 +6,29 @@
 operator self-signed) · v1 covers all three surfaces (frontend, backend,
 admin/cluster) · rotation = `PROXYSQL RELOAD TLS` + handshake verification +
 rolling-restart fallback · opt-in and permissive by default (`spec.tls`
-absent ⇒ byte-identical rendering) · frontend cert paths point directly at
-the Secret mount (ProxySQL 3.0 frontend cert paths are configurable — no
-datadir copy step, no sidecar)
+absent ⇒ byte-identical rendering) · frontend/admin certs reach ProxySQL via
+datadir SYMLINKS into the Secret mount (verified: proxysql:3.0 has no
+frontend/admin cert-path variables — certs are fixed datadir names; an
+init container seeds idempotent symlinks, kubelet's atomic Secret updates
+propagate through them, RELOAD TLS re-reads — restart-free rotation
+preserved)
 
 ## Background
 
 The operator has no TLS story: users hand-wire certs through variables and
 their own Secrets. The Percona operators issue and rotate certs but roll
 pods on every rotation and copy certs into the datadir (their ProxySQL
-vintage lacked configurable frontend cert paths). We can do better on both
-counts: explicit cert-path variables against a read-only Secret mount, and
-restart-free rotation using `PROXYSQL RELOAD TLS` verified by a real
+vintage lacked configurable frontend cert paths). We can do better on the rotation
+side: restart-free rotation using `PROXYSQL RELOAD TLS` verified by a real
 handshake — the same try-verify-fallback philosophy as the runtime
-reconfiguration feature.
+reconfiguration feature. A live probe of the shipped `proxysql:3.0` image
+(2026-07-23) found NO frontend/admin cert-path variables — frontend/admin
+certs are the fixed datadir names `proxysql-{ca,cert,key}.pem`, which
+`PROXYSQL RELOAD TLS` re-reads. The delivery mechanism is therefore
+datadir symlinks into the Secret mount (seeded by an init container,
+idempotent, PVC-safe): kubelet updates the mounted Secret atomically, the
+symlinks keep resolving, and RELOAD TLS picks up the new cert with no
+copy step and no sidecar.
 
 ## API
 
@@ -73,11 +82,19 @@ when `tls.enabled`** — all TLS variables join the reserved-key set (like
 credentials: not user-overridable via `spec.variables`, structural for
 classification):
 
-- **Frontend**: cert-path variables pointing at the mount + `have_ssl`
-  for mysql and pgsql. Permissive: TLS available on 6033/6133, not
-  required (ProxySQL default); a future `require` knob can enforce.
-- **Admin + cluster**: admin-interface TLS on 6032 and the cluster-peering
-  SSL flag, so operator→ProxySQL and peer sync are encrypted.
+- **Frontend**: an init container (the cluster's own proxysql image, uid
+  999) seeds idempotent symlinks `datadir/proxysql-{ca,cert,key}.pem →
+  /etc/proxysql/tls/{ca.crt,tls.crt,tls.key}` before proxysql starts, so
+  ProxySQL loads the operator-provided certs instead of auto-generating;
+  `have_ssl` stays on for mysql/pgsql (permissive — TLS available, not
+  required; a future `require` knob can enforce). First-boot autogen and
+  persistent-datadir interactions are pinned by a live boot probe during
+  implementation.
+- **Admin + cluster**: ProxySQL's admin interface serves TLS capability
+  from the same datadir certs; the operator dials 6032 with TLS when
+  enabled. Cluster-peering encryption follows whatever the image
+  supports (probe-verified during implementation; 3.0 exposes no
+  dedicated cluster-SSL flag).
 - **Backend**: `mysql-ssl_p2s_ca` (+ pgsql) from `backend.caSecretName`,
   `ssl_p2s_cert/key` from `backend.clientCertSecretName`, rendered only
   when the refs are set.
