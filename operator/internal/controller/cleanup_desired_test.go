@@ -17,11 +17,9 @@ limitations under the License.
 package controller
 
 import (
-	"context"
 	"reflect"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
@@ -137,28 +135,17 @@ func TestCleanupDesired_ClearsEverythingElse(t *testing.T) {
 	}
 }
 
-// buildDesired's auto-population branch (spec.proxysqlServers empty) and
-// cleanupDesired must derive the exact same peer rows from the same
-// builder — the whole point of sharing autoPopulatedProxySQLServers is that
-// the fix doesn't fork the derivation logic.
-func TestAutoPopulatedProxySQLServers_MatchesBuildDesired(t *testing.T) {
+// autoPopulatedProxySQLServers is the single shared peer derivation; the deletion path
+// (cleanupDesired, auto-populated case) and the sync path (buildUnionedDesired) both consume
+// it, so they must derive the exact same peer rows from the same builder — the #956 union
+// must not fork the derivation logic.
+func TestAutoPopulatedProxySQLServers_MatchesCleanupDesired(t *testing.T) {
 	b := newCleanupTestBuilder(int32Ptr(3))
-	r := &ProxySQLConfigReconciler{}
-	cfg := &proxysqlv1alpha1.ProxySQLConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "cfg", Namespace: "default"},
-		Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
-			ClusterRef: corev1.LocalObjectReference{Name: "cleanup-test"},
-		},
-	}
-
-	built, err := r.buildDesired(context.Background(), cfg, b)
-	if err != nil {
-		t.Fatalf("buildDesired: %v", err)
-	}
+	built := autoPopulatedProxySQLServers(b)
 	cleanup := cleanupDesired(b, true)
 
-	if !reflect.DeepEqual(built.ProxySQLServers, cleanup.ProxySQLServers) {
-		t.Errorf("buildDesired ProxySQLServers = %v, cleanupDesired ProxySQLServers = %v, want equal",
-			built.ProxySQLServers, cleanup.ProxySQLServers)
+	if !reflect.DeepEqual(built, cleanup.ProxySQLServers) {
+		t.Errorf("autoPopulatedProxySQLServers = %v, cleanupDesired.ProxySQLServers = %v, want equal",
+			built, cleanup.ProxySQLServers)
 	}
 }
