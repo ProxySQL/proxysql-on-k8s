@@ -39,6 +39,22 @@ spec:
 The target cluster must exist in the same namespace; otherwise the
 config sits at `ClusterFound=False` and retries.
 
+### Multiple ProxySQLConfigs per cluster
+
+You can split a cluster's config across several `ProxySQLConfig` CRs — the
+operator **unions** every config whose `clusterRef` points at the cluster into
+one desired runtime, so they *compose* rather than overwrite each other. This
+lets you keep, say, backends/users in one CR and query rules in another, or let
+a platform manage variables while an app owns its own users.
+
+Merge rules: sections are combined per key (servers by
+`hostgroup`+`hostname`+`port`, users by `username`, query rules by `ruleId`,
+variables by name, …). If two configs set the **same** key, the one whose CR
+name sorts **last** wins (deterministic last-writer-wins). Deleting one config
+re-pushes the union of the remaining configs — it does not wipe the cluster.
+Within the union the write-to-all model above is unchanged: the merged state is
+still what each `DELETE`/`INSERT`/`LOAD` asserts on every replica.
+
 ## Servers and users
 
 ```yaml

@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -190,8 +191,11 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	radminPassword := adminPw.Radmin
 
-	// 3) Resolve user passwords (mysql_users + pgsql_users) from Secrets.
-	desired, err := r.buildDesired(ctx, &cfg, b)
+	// 3) Assemble the desired runtime from the UNION of all ProxySQLConfigs targeting this
+	// cluster (#956) — not just this one — so multiple configs compose one runtime instead of
+	// each being authoritative and oscillating. Every sibling config reconciles to the same
+	// union, so they converge. User passwords are resolved from Secrets here.
+	desired, _, err := r.buildUnionedDesired(ctx, &cluster, b, "")
 	if err != nil {
 		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "UserSecretError", err.Error())
 		_ = r.Status().Update(ctx, &cfg)
@@ -296,13 +300,11 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // from the target cluster's StatefulSet pods (spec.proxysqlServers was empty).
 const autoPopulatedPeerComment = "operator-populated from ProxySQLCluster pods"
 
-// buildDesired translates the K8s spec into the resolved Desired struct
-// the proxysqlclient package operates on. b is the target cluster's builder
-// (defaulted spec): when spec.proxysqlServers is empty and the cluster runs
-// more than one replica, the peer list is auto-populated from the cluster's
-// stable per-pod DNS names so the sync doesn't DELETE the cnf-seeded
-// proxysql_servers table and silently disable ProxySQL Cluster sync (#39).
-func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig, b *builders.Builder) (*proxysqlclient.Desired, error) {
+// configToDesired translates ONE ProxySQLConfig's spec into the resolved Desired struct the
+// proxysqlclient package operates on (user passwords pulled from Secrets). It does NOT
+// auto-populate proxysql_servers: peer auto-population is a cluster-wide concern applied once
+// by buildUnionedDesired after merging all configs, so a second config can't wipe it (#956).
+func (r *ProxySQLConfigReconciler) configToDesired(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig) (*proxysqlclient.Desired, error) {
 	d := &proxysqlclient.Desired{
 		AdminVariables:      cfg.Spec.AdminVariables,
 		MySQLVariables:      cfg.Spec.MySQLVariables,
@@ -394,11 +396,48 @@ func (r *ProxySQLConfigReconciler) buildDesired(ctx context.Context, cfg *proxys
 			Hostname: s.Hostname, Port: s.Port, Weight: s.Weight, Comment: s.Comment,
 		})
 	}
-	if len(cfg.Spec.ProxySQLServers) == 0 {
-		// Auto-populate the peer table (documented CRD behavior, #39).
-		d.ProxySQLServers = autoPopulatedProxySQLServers(b)
-	}
 	return d, nil
+}
+
+// buildUnionedDesired assembles the desired runtime for a cluster from the UNION of ALL
+// ProxySQLConfigs targeting it (#956). Without this, the operator treats each ProxySQLConfig
+// as authoritative for the whole runtime, so two configs for one cluster oscillate — each Sync
+// DELETEs the other's rows and re-LOADs its own, dropping client connections (#940). Configs
+// are ordered by name so the merge is deterministic last-writer-wins, and every config for the
+// cluster reconciles to the SAME desired state. excludeName drops one config from the union
+// (used during that config's deletion so the REMAINING configs' state is pushed, not cleared).
+// Auto-population of proxysql_servers happens once, only when no config supplied an explicit
+// list. Returns the desired state and whether any config contributed to it.
+func (r *ProxySQLConfigReconciler) buildUnionedDesired(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, excludeName string) (*proxysqlclient.Desired, bool, error) {
+	var list proxysqlv1alpha1.ProxySQLConfigList
+	if err := r.List(ctx, &list, client.InNamespace(cluster.Namespace)); err != nil {
+		return nil, false, err
+	}
+	var cfgs []*proxysqlv1alpha1.ProxySQLConfig
+	for i := range list.Items {
+		c := &list.Items[i]
+		if c.Spec.ClusterRef.Name != cluster.Name || !c.DeletionTimestamp.IsZero() || c.Name == excludeName {
+			continue
+		}
+		cfgs = append(cfgs, c)
+	}
+	sort.Slice(cfgs, func(i, j int) bool { return cfgs[i].Name < cfgs[j].Name })
+
+	desireds := make([]*proxysqlclient.Desired, 0, len(cfgs))
+	for _, c := range cfgs {
+		d, err := r.configToDesired(ctx, c)
+		if err != nil {
+			return nil, false, fmt.Errorf("config %q: %w", c.Name, err)
+		}
+		desireds = append(desireds, d)
+	}
+	union := proxysqlclient.Union(desireds)
+	// Auto-populate the peer table once when no config set an explicit list (documented CRD
+	// behavior, #39) — the same condition buildDesired used to apply per-config.
+	if len(union.ProxySQLServers) == 0 {
+		union.ProxySQLServers = autoPopulatedProxySQLServers(b)
+	}
+	return union, len(cfgs) > 0, nil
 }
 
 // autoPopulatedProxySQLServers derives the proxysql_servers peer rows the
@@ -635,16 +674,23 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
 
-	// cleanupDesired DELETEs every managed table and LOAD/SAVEs each section.
-	// When the config's peer list was operator-populated (empty
-	// spec.proxysqlServers — same condition as buildDesired's auto-populate
-	// branch), the auto-derived peers are re-pushed instead of cleared (#42):
-	// the cluster still exists and still needs its peers to sync. An explicit
-	// spec.proxysqlServers list is cleared like every other table. Variables
-	// are left as-is: ProxySQL has no "unset", and resetting values blind
-	// would be worse than leaving them.
-	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword,
-		cleanupDesired(b, len(cfg.Spec.ProxySQLServers) == 0), dialTLS)
+	// Push the runtime the cluster should have WITHOUT this config: the union of the
+	// remaining ProxySQLConfigs (#956). If sibling configs still target the cluster, deleting
+	// one must NOT wipe their servers/users/rules — it re-pushes their combined state. Only
+	// when this was the last config do we fall back to cleanupDesired, which DELETEs every
+	// managed table and LOAD/SAVEs each section; there, when the config's peer list was
+	// operator-populated (empty spec.proxysqlServers) the auto-derived peers are re-pushed
+	// instead of cleared (#42), and an explicit list is cleared like every other table.
+	// Variables are left as-is: ProxySQL has no "unset". If the remaining union can't be built
+	// (e.g. a sibling's Secret is missing) we must not wedge deletion — fall back to cleanup.
+	cleanupState := cleanupDesired(b, len(cfg.Spec.ProxySQLServers) == 0)
+	if remaining, any, err := r.buildUnionedDesired(ctx, &cluster, b, cfg.Name); err != nil {
+		log.Info("could not build remaining-configs union for cleanup; falling back to full cleanup",
+			"cluster", cluster.Name, "error", err.Error())
+	} else if any {
+		cleanupState = remaining
+	}
+	cleaned, errs := r.applyToReplicas(ctx, addrs, radminPassword, cleanupState, dialTLS)
 	if cleaned != len(addrs) {
 		log.Info("cleanup incomplete; retrying", "cleaned", cleaned, "total", len(addrs), "errors", joinErrs(errs))
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
