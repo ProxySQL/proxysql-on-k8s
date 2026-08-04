@@ -17,6 +17,8 @@ limitations under the License.
 package proxysqlclient
 
 import (
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 )
@@ -84,9 +86,9 @@ func Union(desireds []*Desired) *Desired {
 		for _, s := range d.ProxySQLServers {
 			psrv[s.Hostname+":"+strconv.Itoa(int(s.Port))] = s
 		}
-		mergeStr(adminVars, d.AdminVariables)
-		mergeStr(mysqlVars, d.MySQLVariables)
-		mergeStr(pgVars, d.PostgreSQLVariables)
+		maps.Copy(adminVars, d.AdminVariables)
+		maps.Copy(mysqlVars, d.MySQLVariables)
+		maps.Copy(pgVars, d.PostgreSQLVariables)
 		out.SQLStatements = append(out.SQLStatements, d.SQLStatements...)
 	}
 
@@ -128,12 +130,6 @@ func hostKey(hg int32, host string, port int32) string {
 	return strconv.Itoa(int(hg)) + ":" + host + ":" + strconv.Itoa(int(port))
 }
 
-func mergeStr(dst, src map[string]string) {
-	for k, v := range src {
-		dst[k] = v
-	}
-}
-
 func nilIfEmpty(m map[string]string) map[string]string {
 	if len(m) == 0 {
 		return nil
@@ -155,6 +151,6 @@ func sortedInt32Keys[V any](m map[int32]V) []int32 {
 	for k := range m {
 		ks = append(ks, k)
 	}
-	sort.Slice(ks, func(i, j int) bool { return ks[i] < ks[j] })
+	slices.Sort(ks)
 	return ks
 }
