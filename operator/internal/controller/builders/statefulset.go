@@ -17,6 +17,7 @@ limitations under the License.
 package builders
 
 import (
+	"fmt"
 	"maps"
 	"strconv"
 
@@ -92,6 +93,15 @@ func (b *Builder) effectiveReplicas() *int32 {
 	return b.Spec.Replicas
 }
 
+// terminationGracePeriodSeconds returns the drain timeout + a 10s buffer when
+// graceful shutdown is enabled, else the historical default of 30.
+func (b *Builder) terminationGracePeriodSeconds() int64 {
+	if b.Spec.GracefulShutdownEnabled() {
+		return int64(b.Spec.DrainTimeoutSecondsOrDefault()) + 10
+	}
+	return 30
+}
+
 func (b *Builder) podSpec() corev1.PodSpec {
 	podSecurityContext := b.Spec.PodSecurityContext
 	if sysctls := b.keepaliveSysctls(); len(sysctls) > 0 {
@@ -107,7 +117,7 @@ func (b *Builder) podSpec() corev1.PodSpec {
 		NodeSelector:                  b.Spec.NodeSelector,
 		Tolerations:                   b.Spec.Tolerations,
 		Affinity:                      b.Spec.Affinity,
-		TerminationGracePeriodSeconds: ptrInt64(30),
+		TerminationGracePeriodSeconds: ptrInt64(b.terminationGracePeriodSeconds()),
 		Containers:                    []corev1.Container{b.container()},
 		Volumes: []corev1.Volume{
 			{
@@ -320,7 +330,7 @@ func (b *Builder) container() corev1.Container {
 		ports = append(ports, corev1.ContainerPort{Name: portNameWeb, ContainerPort: b.Spec.Protocols.Web.Port, Protocol: corev1.ProtocolTCP})
 	}
 
-	return corev1.Container{
+	c := corev1.Container{
 		Name:            "proxysql",
 		Image:           b.Image(),
 		ImagePullPolicy: b.Spec.Image.PullPolicy,
@@ -353,6 +363,47 @@ func (b *Builder) container() corev1.Container {
 		Resources:      b.Spec.Resources,
 		VolumeMounts:   b.proxysqlVolumeMounts(),
 	}
+
+	// Graceful shutdown (spec.gracefulShutdown, ProxySQL SaaS #196): a
+	// preStop hook that pauses new client connections and drains in-flight
+	// ones, plus the MYSQL_PWD env the hook's admin `mysql` calls need.
+	// Absent/disabled renders exactly the container above — golden-pinned.
+	if b.Spec.GracefulShutdownEnabled() {
+		c.Lifecycle = &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{Command: b.drainPreStopCommand()},
+			},
+		}
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name: "MYSQL_PWD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: b.SecretName()},
+					Key:                  SecretKeyAdminPassword,
+				},
+			},
+		})
+	}
+
+	return c
+}
+
+// drainPreStopCommand builds the preStop client-drain: PROXYSQL PAUSE stops new
+// client connections, then a bounded loop waits for Client_Connections_connected
+// to fall to the poll's own connection (<=1) or the drain timeout to elapse.
+// Best-effort: any admin failure falls through so termination is never blocked
+// beyond terminationGracePeriodSeconds. Auth via the MYSQL_PWD env (admin Secret).
+func (b *Builder) drainPreStopCommand() []string {
+	timeout := b.Spec.DrainTimeoutSecondsOrDefault()
+	port := b.Spec.Protocols.Admin.Port
+	script := fmt.Sprintf(
+		`mysql --no-defaults -h127.0.0.1 -P%d -uadmin -e 'PROXYSQL PAUSE' 2>/dev/null || true; `+
+			`for i in $(seq 1 %d); do `+
+			`c=$(mysql --no-defaults -N -h127.0.0.1 -P%d -uadmin -e `+
+			`"SELECT Variable_Value FROM stats_mysql_global WHERE Variable_Name='Client_Connections_connected'" 2>/dev/null); `+
+			`[ "${c:-0}" -le 1 ] && break; sleep 1; done`,
+		port, timeout, port)
+	return []string{"/bin/sh", "-c", script}
 }
 
 // startupProbe, livenessProbe, and readinessProbe resolve spec.probes

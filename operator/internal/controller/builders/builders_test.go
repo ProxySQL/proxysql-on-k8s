@@ -1773,3 +1773,82 @@ func TestBuilder_TLS_CleanupInitContainer(t *testing.T) {
 		}
 	})
 }
+
+// TestPodTemplate_GracefulShutdown_Enabled verifies that spec.gracefulShutdown
+// with Enabled:true wires a preStop client-drain hook, the MYSQL_PWD env var
+// sourced from the admin Secret, and raises terminationGracePeriodSeconds to
+// the configured drain timeout plus the fixed 10s buffer.
+func TestPodTemplate_GracefulShutdown_Enabled(t *testing.T) {
+	b := New(newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.GracefulShutdown = &proxysqlv1alpha1.GracefulShutdownSpec{
+			Enabled:             true,
+			DrainTimeoutSeconds: int32Ptr(45),
+		}
+	}), newScheme(t), Passwords{})
+
+	podSpec := b.StatefulSet("checksum").Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	if container.Lifecycle == nil || container.Lifecycle.PreStop == nil || container.Lifecycle.PreStop.Exec == nil {
+		t.Fatalf("container.Lifecycle.PreStop.Exec = nil, want a drain hook")
+	}
+	cmd := container.Lifecycle.PreStop.Exec.Command
+	if len(cmd) == 0 || cmd[0] != "/bin/sh" {
+		t.Errorf("preStop command[0] = %v, want /bin/sh", cmd)
+	}
+	script := strings.Join(cmd, " ")
+	for _, want := range []string{"PROXYSQL PAUSE", "Client_Connections_connected"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("preStop script %q missing %q", script, want)
+		}
+	}
+
+	var mysqlPwd *corev1.EnvVar
+	for i := range container.Env {
+		if container.Env[i].Name == "MYSQL_PWD" {
+			mysqlPwd = &container.Env[i]
+		}
+	}
+	if mysqlPwd == nil {
+		t.Fatalf("container.Env missing MYSQL_PWD")
+	}
+	if mysqlPwd.ValueFrom == nil || mysqlPwd.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("MYSQL_PWD env has no SecretKeyRef: %+v", mysqlPwd)
+	}
+	if mysqlPwd.ValueFrom.SecretKeyRef.Name != b.SecretName() {
+		t.Errorf("MYSQL_PWD secret name = %q, want %q", mysqlPwd.ValueFrom.SecretKeyRef.Name, b.SecretName())
+	}
+	if mysqlPwd.ValueFrom.SecretKeyRef.Key != SecretKeyAdminPassword {
+		t.Errorf("MYSQL_PWD secret key = %q, want %q", mysqlPwd.ValueFrom.SecretKeyRef.Key, SecretKeyAdminPassword)
+	}
+
+	wantGrace := ptrInt64(55) // 45 + 10
+	if podSpec.TerminationGracePeriodSeconds == nil || *podSpec.TerminationGracePeriodSeconds != *wantGrace {
+		t.Errorf("terminationGracePeriodSeconds = %v, want %v", podSpec.TerminationGracePeriodSeconds, wantGrace)
+	}
+}
+
+// TestPodTemplate_GracefulShutdown_Disabled verifies that a nil
+// spec.gracefulShutdown renders the historical default: no lifecycle hook,
+// no MYSQL_PWD env, terminationGracePeriodSeconds stays 30 — byte-identical
+// to the pre-#196 template (see TestGolden).
+func TestPodTemplate_GracefulShutdown_Disabled(t *testing.T) {
+	b := New(newCluster(clusterName), newScheme(t), Passwords{})
+
+	podSpec := b.StatefulSet("checksum").Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	if container.Lifecycle != nil {
+		t.Errorf("container.Lifecycle = %+v, want nil", container.Lifecycle)
+	}
+	for _, e := range container.Env {
+		if e.Name == "MYSQL_PWD" {
+			t.Errorf("container.Env contains MYSQL_PWD, want none: %+v", e)
+		}
+	}
+
+	wantGrace := ptrInt64(30)
+	if podSpec.TerminationGracePeriodSeconds == nil || *podSpec.TerminationGracePeriodSeconds != *wantGrace {
+		t.Errorf("terminationGracePeriodSeconds = %v, want %v", podSpec.TerminationGracePeriodSeconds, wantGrace)
+	}
+}
