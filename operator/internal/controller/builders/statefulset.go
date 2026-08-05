@@ -393,13 +393,18 @@ func (b *Builder) container() corev1.Container {
 // to fall to the poll's own connection (<=1) or the drain timeout to elapse.
 // Best-effort: any admin failure falls through so termination is never blocked
 // beyond terminationGracePeriodSeconds. Auth via the MYSQL_PWD env (admin Secret).
+// Both mysql invocations set --connect-timeout=2 so a not-yet-listening or
+// stalled admin interface fails fast per iteration instead of hanging on the
+// client's default connect timeout, which could otherwise let the loop's
+// total wall-time exceed terminationGracePeriodSeconds and get SIGKILLed
+// mid-drain.
 func (b *Builder) drainPreStopCommand() []string {
 	timeout := b.Spec.DrainTimeoutSecondsOrDefault()
 	port := b.Spec.Protocols.Admin.Port
 	script := fmt.Sprintf(
-		`mysql --no-defaults -h127.0.0.1 -P%d -uadmin -e 'PROXYSQL PAUSE' 2>/dev/null || true; `+
+		`mysql --no-defaults --connect-timeout=2 -h127.0.0.1 -P%d -uadmin -e 'PROXYSQL PAUSE' 2>/dev/null || true; `+
 			`for i in $(seq 1 %d); do `+
-			`c=$(mysql --no-defaults -N -h127.0.0.1 -P%d -uadmin -e `+
+			`c=$(mysql --no-defaults --connect-timeout=2 -N -h127.0.0.1 -P%d -uadmin -e `+
 			`"SELECT Variable_Value FROM stats_mysql_global WHERE Variable_Name='Client_Connections_connected'" 2>/dev/null); `+
 			`[ "${c:-0}" -le 1 ] && break; sleep 1; done`,
 		port, timeout, port)

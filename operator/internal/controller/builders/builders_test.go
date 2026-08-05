@@ -1797,7 +1797,7 @@ func TestPodTemplate_GracefulShutdown_Enabled(t *testing.T) {
 		t.Errorf("preStop command[0] = %v, want /bin/sh", cmd)
 	}
 	script := strings.Join(cmd, " ")
-	for _, want := range []string{"PROXYSQL PAUSE", "Client_Connections_connected"} {
+	for _, want := range []string{"PROXYSQL PAUSE", "Client_Connections_connected", "--connect-timeout"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("preStop script %q missing %q", script, want)
 		}
