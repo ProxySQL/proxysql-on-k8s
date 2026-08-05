@@ -139,6 +139,15 @@ type ProxySQLClusterSpec struct {
 	// +optional
 	Probes ProbesSpec `json:"probes,omitempty"`
 
+	// GracefulShutdown configures pre-termination client-connection draining
+	// (ProxySQL SaaS #196). Absent or Enabled=false renders exactly what the
+	// operator renders today — golden-pinned, no upgrade restart. When enabled,
+	// the proxysql container gets a preStop hook that runs PROXYSQL PAUSE and
+	// waits (bounded) for client connections to drain, and the pod's
+	// terminationGracePeriodSeconds is raised to cover the drain.
+	// +optional
+	GracefulShutdown *GracefulShutdownSpec `json:"gracefulShutdown,omitempty"`
+
 	// TLS configures certificate issuance and TLS wiring across the
 	// frontend (mysql/pgsql client ports), admin/cluster-peering, and
 	// backend (ProxySQL-to-database) surfaces. Absent (or Enabled=false)
@@ -152,6 +161,21 @@ type ProxySQLClusterSpec struct {
 // TLSEnabled reports whether TLS is configured and turned on. Safe to call
 // on a nil-TLS spec.
 func (s *ProxySQLClusterSpec) TLSEnabled() bool { return s.TLS != nil && s.TLS.Enabled }
+
+// GracefulShutdownEnabled reports whether pre-termination draining is on.
+// Safe on a nil GracefulShutdown.
+func (s *ProxySQLClusterSpec) GracefulShutdownEnabled() bool {
+	return s.GracefulShutdown != nil && s.GracefulShutdown.Enabled
+}
+
+// DrainTimeoutSecondsOrDefault returns the configured drain timeout or the
+// default (30s) when unset.
+func (s *ProxySQLClusterSpec) DrainTimeoutSecondsOrDefault() int32 {
+	if s.GracefulShutdown != nil && s.GracefulShutdown.DrainTimeoutSeconds != nil {
+		return *s.GracefulShutdown.DrainTimeoutSeconds
+	}
+	return 30
+}
 
 // ProbesSpec overrides the proxysql container's probes. Every field is a
 // full corev1.Probe; a set field replaces the operator's default probe
@@ -663,6 +687,23 @@ type TLSSpec struct {
 	// disables backend TLS variable rendering entirely.
 	// +optional
 	Backend *TLSBackendSpec `json:"backend,omitempty"`
+}
+
+// GracefulShutdownSpec configures pre-termination client-connection draining.
+type GracefulShutdownSpec struct {
+	// Enabled installs a preStop hook that pauses new client connections and
+	// waits for in-flight ones to drain before the pod is terminated.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// DrainTimeoutSeconds bounds the wait for client connections to drain. The
+	// pod's terminationGracePeriodSeconds is set to this plus a fixed buffer.
+	// +optional
+	// +kubebuilder:default=30
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=600
+	DrainTimeoutSeconds *int32 `json:"drainTimeoutSeconds,omitempty"`
 }
 
 // TLSIssuerRef references a cert-manager Issuer or ClusterIssuer used to

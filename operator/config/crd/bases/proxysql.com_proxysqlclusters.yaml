@@ -1191,6 +1191,31 @@ spec:
                         type: string
                     type: object
                 type: object
+              gracefulShutdown:
+                description: |-
+                  GracefulShutdown configures pre-termination client-connection draining
+                  (ProxySQL SaaS #196). Absent or Enabled=false renders exactly what the
+                  operator renders today — golden-pinned, no upgrade restart. When enabled,
+                  the proxysql container gets a preStop hook that runs PROXYSQL PAUSE and
+                  waits (bounded) for client connections to drain, and the pod's
+                  terminationGracePeriodSeconds is raised to cover the drain.
+                properties:
+                  drainTimeoutSeconds:
+                    default: 30
+                    description: |-
+                      DrainTimeoutSeconds bounds the wait for client connections to drain. The
+                      pod's terminationGracePeriodSeconds is set to this plus a fixed buffer.
+                    format: int32
+                    maximum: 600
+                    minimum: 1
+                    type: integer
+                  enabled:
+                    default: false
+                    description: |-
+                      Enabled installs a preStop hook that pauses new client connections and
+                      waits for in-flight ones to drain before the pod is terminated.
+                    type: boolean
+                type: object
               image:
                 description: Image is the ProxySQL container image to run.
                 properties:
