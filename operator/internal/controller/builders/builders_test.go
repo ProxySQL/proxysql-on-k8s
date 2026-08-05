@@ -1818,13 +1818,42 @@ func TestPodTemplate_GracefulShutdown_Enabled(t *testing.T) {
 	if mysqlPwd.ValueFrom.SecretKeyRef.Name != b.SecretName() {
 		t.Errorf("MYSQL_PWD secret name = %q, want %q", mysqlPwd.ValueFrom.SecretKeyRef.Name, b.SecretName())
 	}
-	if mysqlPwd.ValueFrom.SecretKeyRef.Key != SecretKeyAdminPassword {
-		t.Errorf("MYSQL_PWD secret key = %q, want %q", mysqlPwd.ValueFrom.SecretKeyRef.Key, SecretKeyAdminPassword)
+	if mysqlPwd.ValueFrom.SecretKeyRef.Key != b.SecretKeys().AdminPassword {
+		t.Errorf("MYSQL_PWD secret key = %q, want %q", mysqlPwd.ValueFrom.SecretKeyRef.Key, b.SecretKeys().AdminPassword)
 	}
 
 	wantGrace := ptrInt64(55) // 45 + 10
 	if podSpec.TerminationGracePeriodSeconds == nil || *podSpec.TerminationGracePeriodSeconds != *wantGrace {
 		t.Errorf("terminationGracePeriodSeconds = %v, want %v", podSpec.TerminationGracePeriodSeconds, wantGrace)
+	}
+}
+
+// TestPodTemplate_GracefulShutdown_CustomAdminPasswordKey verifies that the
+// MYSQL_PWD env follows a customized spec.auth.keys.adminPassword rather
+// than the hardcoded "admin-password" constant — a cluster with a custom
+// key and gracefulShutdown enabled must not render a SecretKeyRef pointing
+// at a key that doesn't exist in its auth Secret (which would otherwise
+// CreateContainerConfigError at pod startup).
+func TestPodTemplate_GracefulShutdown_CustomAdminPasswordKey(t *testing.T) {
+	const customKey = "custom-admin-pw"
+	b := New(newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.GracefulShutdown = &proxysqlv1alpha1.GracefulShutdownSpec{Enabled: true}
+		c.Spec.Auth.Keys.AdminPassword = customKey
+	}), newScheme(t), Passwords{})
+
+	container := b.StatefulSet("checksum").Spec.Template.Spec.Containers[0]
+	var mysqlPwd *corev1.EnvVar
+	for i := range container.Env {
+		if container.Env[i].Name == "MYSQL_PWD" {
+			mysqlPwd = &container.Env[i]
+		}
+	}
+	if mysqlPwd == nil || mysqlPwd.ValueFrom == nil || mysqlPwd.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("container.Env missing a well-formed MYSQL_PWD SecretKeyRef")
+	}
+	if mysqlPwd.ValueFrom.SecretKeyRef.Key != customKey {
+		t.Errorf("MYSQL_PWD secret key = %q, want the configured key %q (not the %q default)",
+			mysqlPwd.ValueFrom.SecretKeyRef.Key, customKey, SecretKeyAdminPassword)
 	}
 }
 

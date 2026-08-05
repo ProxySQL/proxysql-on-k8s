@@ -379,7 +379,14 @@ func (b *Builder) container() corev1.Container {
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: b.SecretName()},
-					Key:                  SecretKeyAdminPassword,
+					// SecretKeys() resolves spec.auth.keys.adminPassword (with the
+					// SecretKeyAdminPassword default applied) — the same
+					// configurable key the rest of the builder reads/writes
+					// (AuthSecret, PasswordsFromSecret). Hardcoding the constant
+					// here would break clusters with a custom adminPassword key:
+					// the Secret would have no "admin-password" entry and this
+					// non-optional SecretKeyRef would CreateContainerConfigError.
+					Key: b.SecretKeys().AdminPassword,
 				},
 			},
 		})
@@ -390,14 +397,17 @@ func (b *Builder) container() corev1.Container {
 
 // drainPreStopCommand builds the preStop client-drain: PROXYSQL PAUSE stops new
 // client connections, then a bounded loop waits for Client_Connections_connected
-// to fall to the poll's own connection (<=1) or the drain timeout to elapse.
-// Best-effort: any admin failure falls through so termination is never blocked
-// beyond terminationGracePeriodSeconds. Auth via the MYSQL_PWD env (admin Secret).
-// Both mysql invocations set --connect-timeout=2 so a not-yet-listening or
-// stalled admin interface fails fast per iteration instead of hanging on the
-// client's default connect timeout, which could otherwise let the loop's
-// total wall-time exceed terminationGracePeriodSeconds and get SIGKILLed
-// mid-drain.
+// to reach zero (no in-flight client/frontend connections left) or the drain
+// timeout to elapse. The poll itself connects to the ADMIN port, a separate
+// pool from the frontend ports Client_Connections_connected counts, so the
+// poll's own connection never inflates that counter — the threshold is a
+// real zero, not <=1. Best-effort: any admin failure falls through so
+// termination is never blocked beyond terminationGracePeriodSeconds. Auth
+// via the MYSQL_PWD env (admin Secret). Both mysql invocations set
+// --connect-timeout=2 so a not-yet-listening or stalled admin interface
+// fails fast per iteration instead of hanging on the client's default
+// connect timeout, which could otherwise let the loop's total wall-time
+// exceed terminationGracePeriodSeconds and get SIGKILLed mid-drain.
 func (b *Builder) drainPreStopCommand() []string {
 	timeout := b.Spec.DrainTimeoutSecondsOrDefault()
 	port := b.Spec.Protocols.Admin.Port
@@ -406,7 +416,7 @@ func (b *Builder) drainPreStopCommand() []string {
 			`for i in $(seq 1 %d); do `+
 			`c=$(mysql --no-defaults --connect-timeout=2 -N -h127.0.0.1 -P%d -uadmin -e `+
 			`"SELECT Variable_Value FROM stats_mysql_global WHERE Variable_Name='Client_Connections_connected'" 2>/dev/null); `+
-			`[ "${c:-0}" -le 1 ] && break; sleep 1; done`,
+			`[ "${c:-0}" -le 0 ] && break; sleep 1; done`,
 		port, timeout, port)
 	return []string{"/bin/sh", "-c", script}
 }
