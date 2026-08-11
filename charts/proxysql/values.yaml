@@ -52,8 +52,9 @@ backends:
   #
   # maxReplicationLag (seconds, mysql only) shuns a reader whose replication lag
   # exceeds it, so stale reads fail over to another host in the hostgroup instead of
-  # being served. Requires monitoring to be able to read replica status: the backend
-  # user needs REPLICATION CLIENT, or SLAVE MONITOR on MariaDB 10.5+. Omit or 0 to
+  # being served. Requires ProxySQL's monitor account (monitor_username, default
+  # "monitor") to be able to read replica status: grant it REPLICATION CLIENT — or
+  # SLAVE MONITOR on MariaDB 10.5+ — on every monitored backend. Omit or 0 to
   # disable, which is ProxySQL's default.
   pgsql: []
   # - { host: postgres-rw, port: 5432, hostgroup: 0, maxConnections: 1000 }
