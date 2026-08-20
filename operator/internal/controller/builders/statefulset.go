@@ -370,9 +370,7 @@ func (b *Builder) container() corev1.Container {
 	// Absent/disabled renders exactly the container above — golden-pinned.
 	if b.Spec.GracefulShutdownEnabled() {
 		c.Lifecycle = &corev1.Lifecycle{
-			PreStop: &corev1.LifecycleHandler{
-				Exec: &corev1.ExecAction{Command: b.drainPreStopCommand()},
-			},
+			PreStop: b.preStopHandler(),
 		}
 		c.Env = append(c.Env, corev1.EnvVar{
 			Name: "MYSQL_PWD",
@@ -408,6 +406,15 @@ func (b *Builder) container() corev1.Container {
 // fails fast per iteration instead of hanging on the client's default
 // connect timeout, which could otherwise let the loop's total wall-time
 // exceed terminationGracePeriodSeconds and get SIGKILLed mid-drain.
+func (b *Builder) preStopHandler() *corev1.LifecycleHandler {
+	if b.Spec.GracefulShutdown != nil && b.Spec.GracefulShutdown.PreStop != nil {
+		return b.Spec.GracefulShutdown.PreStop.DeepCopy()
+	}
+	return &corev1.LifecycleHandler{
+		Exec: &corev1.ExecAction{Command: b.drainPreStopCommand()},
+	}
+}
+
 func (b *Builder) drainPreStopCommand() []string {
 	timeout := b.Spec.DrainTimeoutSecondsOrDefault()
 	port := b.Spec.Protocols.Admin.Port

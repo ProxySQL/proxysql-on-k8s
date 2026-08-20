@@ -704,6 +704,13 @@ type GracefulShutdownSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=600
 	DrainTimeoutSeconds *int32 `json:"drainTimeoutSeconds,omitempty"`
+
+	// PreStop replaces the operator's built-in drain preStop hook wholesale
+	// when set (handler, command — everything). Leave unset to keep the
+	// operator's PROXYSQL PAUSE + drain loop. MYSQL_PWD is still injected
+	// from the admin Secret so a custom exec can call the admin interface.
+	// +optional
+	PreStop *corev1.LifecycleHandler `json:"preStop,omitempty"`
 }
 
 // TLSIssuerRef references a cert-manager Issuer or ClusterIssuer used to
