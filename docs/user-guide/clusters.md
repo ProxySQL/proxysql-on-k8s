@@ -314,10 +314,41 @@ Unset fields keep the node's kernel defaults.
 
 ## Scheduling
 
-`spec.nodeSelector`, `spec.tolerations`, and `spec.affinity` pass
-through to the pod template. No affinity is applied by default — if you
-want replicas spread across nodes (you usually do for `replicas > 1`),
-set pod anti-affinity explicitly:
+`spec.nodeSelector`, `spec.tolerations`, `spec.affinity`, and
+`spec.topologySpreadConstraints` pass through to the pod template.
+Nothing is applied by default — if you want replicas spread across
+nodes or zones (you usually do for `replicas > 1`), ask for it
+explicitly.
+
+**Prefer `topologySpreadConstraints`.** `maxSkew` bounds how uneven the
+distribution may get, which is what "spread my replicas" actually means.
+A *preferred* pod anti-affinity is only a scheduling weight — with 4
+replicas over 3 zones it can still pile two into one zone — and a
+*required* one caps replicas at the number of domains outright.
+
+```yaml
+spec:
+  replicas: 3
+  topologySpreadConstraints:
+    # At most one more replica in any zone than in any other. ScheduleAnyway
+    # keeps the cluster schedulable on a single-zone cluster; use
+    # DoNotSchedule when you would rather a pod stay Pending than lose the
+    # failure-domain guarantee.
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+```
+
+`labelSelector` may be omitted: the operator fills in this cluster's own
+selector labels. Supply one only to scope a constraint differently — and
+note that a constraint with a selector matching no pods silently does
+nothing.
+
+Pod anti-affinity remains available via `spec.affinity` for cases a
+spread constraint cannot express:
 
 ```yaml
 spec:

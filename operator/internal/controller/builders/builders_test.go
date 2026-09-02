@@ -1881,3 +1881,68 @@ func TestPodTemplate_GracefulShutdown_Disabled(t *testing.T) {
 		t.Errorf("terminationGracePeriodSeconds = %v, want %v", podSpec.TerminationGracePeriodSeconds, wantGrace)
 	}
 }
+
+// TestStatefulSet_TopologySpreadConstraints verifies the constraints reach the
+// pod template unchanged, and that a constraint omitting LabelSelector is
+// defaulted to this cluster's selector labels — so callers (the proxysql-saas
+// agent, #207) need not encode the operator's label scheme to spread pods.
+func TestStatefulSet_TopologySpreadConstraints(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+			{MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.ScheduleAnyway},
+			{
+				MaxSkew:           1,
+				TopologyKey:       "kubernetes.io/hostname",
+				WhenUnsatisfiable: corev1.ScheduleAnyway,
+				LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{"explicit": "kept"}},
+			},
+		}
+	})
+	b := New(c, newScheme(t), Passwords{})
+
+	got := b.StatefulSet("checksum").Spec.Template.Spec.TopologySpreadConstraints
+	if len(got) != 2 {
+		t.Fatalf("constraints on pod template = %d, want 2: %+v", len(got), got)
+	}
+	if got[0].TopologyKey != "topology.kubernetes.io/zone" || got[0].MaxSkew != 1 ||
+		got[0].WhenUnsatisfiable != corev1.ScheduleAnyway {
+		t.Errorf("zone constraint not passed through unchanged: %+v", got[0])
+	}
+	if got[0].LabelSelector == nil ||
+		!reflect.DeepEqual(got[0].LabelSelector.MatchLabels, b.SelectorLabels()) {
+		t.Errorf("omitted LabelSelector = %+v, want defaulted to SelectorLabels %v",
+			got[0].LabelSelector, b.SelectorLabels())
+	}
+	if got[1].LabelSelector == nil || got[1].LabelSelector.MatchLabels["explicit"] != "kept" {
+		t.Errorf("an explicit LabelSelector must not be overwritten: %+v", got[1].LabelSelector)
+	}
+}
+
+// TestStatefulSet_TopologySpreadConstraints_DefaultingIsSideEffectFree: builders
+// are pure (see CLAUDE.md). Defaulting the label selector must not write back
+// into the caller's ProxySQLCluster, or a reconcile would mutate the object it
+// was handed and the next call would see different input.
+func TestStatefulSet_TopologySpreadConstraints_DefaultingIsSideEffectFree(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+			{MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.ScheduleAnyway},
+		}
+	})
+	b := New(c, newScheme(t), Passwords{})
+	_ = b.StatefulSet("checksum")
+
+	if c.Spec.TopologySpreadConstraints[0].LabelSelector != nil {
+		t.Errorf("builder mutated the input cluster's constraint: %+v",
+			c.Spec.TopologySpreadConstraints[0].LabelSelector)
+	}
+}
+
+// TestStatefulSet_NoTopologySpreadConstraints: an absent field leaves the pod
+// template's slice nil, so a CR that predates this field renders a
+// byte-identical StatefulSet and no existing cluster is rolled by the upgrade.
+func TestStatefulSet_NoTopologySpreadConstraints(t *testing.T) {
+	b := New(newCluster(clusterName), newScheme(t), Passwords{})
+	if got := b.StatefulSet("checksum").Spec.Template.Spec.TopologySpreadConstraints; got != nil {
+		t.Fatalf("constraints = %+v, want nil", got)
+	}
+}

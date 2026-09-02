@@ -57,6 +57,7 @@ says which.
 | `nodeSelector` | `map[string]string` | none | — | Pod scheduling. |
 | `tolerations` | `[]corev1.Toleration` | none | — | Pod scheduling. |
 | `affinity` | `*corev1.Affinity` | none | — | Pod scheduling. No default affinity is injected; unset means the pod has no affinity rules. |
+| `topologySpreadConstraints` | `[]corev1.TopologySpreadConstraint` | none | — | How replicas spread across zones/nodes. Passed through unchanged; a constraint omitting `labelSelector` is defaulted to the cluster's selector labels. See [Scheduling](../user-guide/clusters.md#scheduling). |
 | `podSecurityContext` | `*corev1.PodSecurityContext` | PSA-restricted (operator) | — | See [Security contexts](#security-contexts). |
 | `containerSecurityContext` | `*corev1.SecurityContext` | PSA-restricted (operator) | — | See [Security contexts](#security-contexts). |
 | `metrics` | `MetricsSpec` | see [Metrics](#metrics) | — | Prometheus exporter port + optional ServiceMonitor. |
