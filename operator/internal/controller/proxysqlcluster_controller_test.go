@@ -691,7 +691,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
 			pushErr := errors.New("apply variables on 10.1.2.3:6032: dial tcp: i/o timeout")
 			err := reconciler.handleRuntimeApplyError(ctx, cluster, b, prev,
-				stsMarkers{varsApplied: appliedVars, structuralApplied: structuralApplied}, pushErr)
+				stsMarkers{varsApplied: appliedVars, structuralApplied: structuralApplied}, pushErr, "")
 			Expect(err).To(MatchError(pushErr), "the push error must be returned for requeue")
 
 			var after appsv1.StatefulSet

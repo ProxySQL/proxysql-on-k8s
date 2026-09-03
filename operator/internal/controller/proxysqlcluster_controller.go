@@ -85,8 +85,10 @@ type ProxySQLClusterReconciler struct {
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 // certificates: the cert-manager tier of spec.tls (issuerRef) creates and
 // maintains one cert-manager.io Certificate per cluster; delete covers the
-// garbage-collection when the tier is switched away.
-// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
+// garbage-collection when the tier is switched away. list/watch omitted:
+// the operator only Get/CreateOrUpdate/Deletes by name; Secret watches
+// cover rotation (#82).
+// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;create;update;patch;delete
 
 const (
 	condTypeAvailable   = "Available"
@@ -148,7 +150,7 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// the reconcile continues, updateStatus surfaces
 	// Degraded=TLSSecretError, and tlsErr requeues at the end (the
 	// ExternalServiceError contract).
-	tlsReady, tlsErr := r.ensureTLSSecrets(ctx, &cluster, b)
+	tlsReady, tlsRequeue, tlsErr := r.ensureTLSSecrets(ctx, &cluster, b)
 	if b.Spec.TLSEnabled() && !tlsReady {
 		if err := r.holdTLSLastGood(ctx, b); err != nil {
 			return ctrl.Result{}, err
@@ -250,7 +252,7 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			tlsApplied:        rot.applied,
 			tlsRotationState:  rot.state,
 		}
-		return ctrl.Result{}, errors.Join(r.handleRuntimeApplyError(ctx, &cluster, b, cur.cnfChecksum, markers, err), rotErr)
+		return ctrl.Result{}, errors.Join(r.handleRuntimeApplyError(ctx, &cluster, b, cur.cnfChecksum, markers, err, rot.summary), rotErr)
 	}
 	markers := stsMarkers{
 		varsApplied:       appliedVarsHash,
@@ -279,7 +281,11 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Deferred external-Service/TLS failures requeue only after everything
 	// else applied and the Degraded condition landed in status. rotErr's
 	// backoff paces the RELOAD-and-verify retries inside the rotation window.
-	return ctrl.Result{}, errors.Join(extSvcErr, tlsErr, rotErr)
+	joinErr := errors.Join(extSvcErr, tlsErr, rotErr)
+	if joinErr != nil {
+		return ctrl.Result{}, joinErr
+	}
+	return ctrl.Result{RequeueAfter: tlsRequeue}, nil
 }
 
 // currentCnfData reads the cnf Secret's full data map as it stood before
@@ -608,6 +614,7 @@ func (r *ProxySQLClusterReconciler) handleRuntimeApplyError(
 	prev string,
 	markers stsMarkers,
 	pushErr error,
+	tlsSummary string,
 ) error {
 	// prev can only be empty when no StatefulSet exists yet, and fresh
 	// clusters classify as bootHash before any push runs — but guard anyway
@@ -618,7 +625,11 @@ func (r *ProxySQLClusterReconciler) handleRuntimeApplyError(
 			return fmt.Errorf("ensure statefulset after runtime-apply failure: %w (runtime apply: %v)", err, pushErr)
 		}
 	}
-	r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, "RuntimeApplyError", pushErr.Error())
+	msg := pushErr.Error()
+	if tlsSummary != "" {
+		msg = msg + "; " + tlsSummary
+	}
+	r.setCondition(cluster, condTypeDegraded, metav1.ConditionTrue, "RuntimeApplyError", msg)
 	if serr := r.Status().Update(ctx, cluster); serr != nil {
 		// Best-effort: the requeue driven by pushErr will retry the status
 		// write on the next pass.

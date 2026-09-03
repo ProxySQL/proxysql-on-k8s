@@ -110,7 +110,7 @@ func TestEnsureTLSSecretsCertManagerCRDAbsent(t *testing.T) {
 		r := &ProxySQLClusterReconciler{Client: cl, Scheme: sch}
 		b := builders.New(cluster, sch, builders.Passwords{})
 
-		ready, err := r.ensureTLSSecrets(context.Background(), cluster, b)
+		ready, _, err := r.ensureTLSSecrets(context.Background(), cluster, b)
 		if ready {
 			t.Fatal("ensureTLSSecrets must not report ready without cert-manager CRDs")
 		}
@@ -138,7 +138,7 @@ func TestEnsureTLSSecretsCertManagerCRDAbsent(t *testing.T) {
 		r := &ProxySQLClusterReconciler{Client: cl, Scheme: sch}
 		b := builders.New(cluster, sch, builders.Passwords{})
 
-		ready, err := r.ensureTLSSecrets(context.Background(), cluster, b)
+		ready, _, err := r.ensureTLSSecrets(context.Background(), cluster, b)
 		if err != nil {
 			t.Fatalf("tier 1 must not fail on a cluster without cert-manager: %v", err)
 		}
@@ -149,4 +149,28 @@ func TestEnsureTLSSecretsCertManagerCRDAbsent(t *testing.T) {
 			t.Fatalf("tier 1 must mount the user's Secret directly, got %q", b.TLSMountSecret)
 		}
 	})
+}
+
+func TestValidateTLSSecret_CorruptPEM(t *testing.T) {
+	sch := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(sch); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad-tls", Namespace: "default"},
+		Data: map[string][]byte{
+			"tls.crt": []byte("not a cert"),
+			"tls.key": []byte("not a key"),
+			"ca.crt":  []byte("not a ca"),
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(sch).WithObjects(sec).Build()
+	r := &ProxySQLClusterReconciler{Client: cl, Scheme: sch}
+	err := r.validateTLSSecret(context.Background(), "bad-tls", "default")
+	if err == nil {
+		t.Fatal("corrupt PEM must fail validation")
+	}
+	if !strings.Contains(err.Error(), "bad-tls") {
+		t.Fatalf("error must name the Secret, got: %v", err)
+	}
 }

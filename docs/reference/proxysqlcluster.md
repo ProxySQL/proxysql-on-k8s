@@ -162,6 +162,8 @@ Resolution rules (operator defaulting, applied every reconcile):
 | `protocols.pgsql` | off (`port` set ⇒ on) | `6133` | PostgreSQL data plane (ProxySQL 3.x). |
 | `protocols.web` | off (`port` set ⇒ on) | `6080` | ProxySQL's built-in HTTPS stats web UI (admin `web_enabled`/`web_port`). Exposed on the regular Service only. |
 
+**Pairwise-distinct ports (CEL).** Every enabled listener — admin, mysql, pgsql, web, and `metrics` (default on, port `6070`) — must use a distinct port. The rule uses the same effective ports as operator defaulting (`protocols.web.port: 6032` is rejected even though web is off-by-default, because a non-zero port implies enabled). Disabled listeners are not compared.
+
 All defaults here are operator-level; there are no CRD markers on
 `ProtocolSpec`.
 
@@ -244,15 +246,14 @@ cluster. Combine it with `loadBalancerSourceRanges` and a NetworkPolicy — see
 [Security](../user-guide/security.md#network-exposure-surface) for the full
 recommendation.
 
-**LoadBalancer-only fields, dropped on `NodePort`.** `loadBalancerClass`,
-`loadBalancerSourceRanges`, `allocateLoadBalancerNodePorts`, and
-`healthCheckNodePort` are only sent to the apiserver when
-`service.external.type: LoadBalancer`. On `NodePort` the builder omits them
-entirely — the apiserver otherwise rejects `allocateLoadBalancerNodePorts`
-and `loadBalancerClass` outright ("may only be used when 'type' is
-'LoadBalancer'"), and the other two carry LB-only semantics. This applies
-even when the CRD default (`allocateLoadBalancerNodePorts: true`) would
-otherwise populate the field.
+**LoadBalancer-only fields.** `loadBalancerClass`, `loadBalancerSourceRanges`,
+and `healthCheckNodePort` are rejected at admission when
+`service.external.type: NodePort`. `allocateLoadBalancerNodePorts` cannot be
+admission-rejected: it defaults to `true`, so after CRD defaulting it is
+always present and would refuse every NodePort Service. The builder still
+omits all four on `NodePort` — the apiserver otherwise rejects
+`allocateLoadBalancerNodePorts` and `loadBalancerClass` outright ("may only
+be used when 'type' is 'LoadBalancer'").
 
 **Apply failures.** A persistent apiserver rejection of the external
 Service — a pinned `nodePort` colliding with another Service, the
@@ -522,7 +523,7 @@ operational caveat — see the [TLS user guide](../user-guide/tls.md).
 | `tls.secretName` | `string` | `""` | — | Tier 1: a user-provided `kubernetes.io/tls` Secret (`tls.crt`, `tls.key`, and **`ca.crt`, required even here** — see [validation](#validate-and-hold)) used as-is for the frontend/admin serving certificate. Wins over `issuerRef` and the self-signed fallback whenever non-empty. The operator never rotates or re-issues a Secret referenced this way. |
 | `tls.issuerRef` | `*TLSIssuerRef` | `nil` | see [TLSIssuerRef](#tlsissuerref) | Tier 2: a cert-manager `Issuer`/`ClusterIssuer`. Used when `secretName` is empty and `issuerRef.name` is set. |
 | `tls.duration` | `metav1.Duration` | `2160h` (CRD + operator, i.e. 90 days) | must exceed `renewBefore` (CEL) | Issued certificate lifetime. Applies to tiers 2 and 3 only — ignored for tier 1. |
-| `tls.renewBefore` | `metav1.Duration` | `720h` (CRD + operator, i.e. 30 days) | must be shorter than `duration` (CEL; a zero value stands for that field's default) | How long before expiry the certificate is reissued. Tiers 2 and 3 only. `renewBefore >= duration` is rejected at admission — it would put a fresh certificate permanently inside its renewal window and reissue it on every reconcile. |
+| `tls.renewBefore` | `metav1.Duration` | `720h` (CRD + operator, i.e. 30 days) | must be shorter than `duration` (CEL; a zero value stands for that field's default) | How long before expiry the certificate is reissued. Tiers 2 and 3 only. `renewBefore >= duration` is rejected at admission — it would put a fresh certificate permanently inside its renewal window and reissue it on every reconcile. Tier 3 also sets `RequeueAfter` to fire at `NotAfter − renewBefore` so an idle cluster does not wait on the ~10h informer resync; tier 2 is Secret-watch driven. |
 | `tls.extraSANs` | `[]string` | none | — | Extra DNS names or IPs added to the issued serving certificate, on top of the operator's default set (see [SAN set](#san-set)). Useful for an external Service's LoadBalancer hostname or a custom DNS record. Ignored for tier 1 — that certificate is supplied as-is. |
 | `tls.backend` | `*TLSBackendSpec` | `nil` (backend TLS variables not rendered) | see [TLSBackendSpec](#tlsbackendspec) | ProxySQL's trust toward the **backend databases** — a different PKI from the rest of this block; see [TLSBackendSpec](#tlsbackendspec) below. |
 
@@ -546,11 +547,12 @@ Evaluated in this order, every reconcile:
 
 The kubelet is never the validator: before any TLS wiring reaches the
 StatefulSet, the resolved Secret must exist with non-empty `tls.crt`,
-`tls.key`, **and `ca.crt`** — `ca.crt` is required for every tier, including
-tier 2, because it's what the `tls-init` init container symlinks to
-`proxysql-ca.pem` (see [What gets wired](#what-gets-wired)); a CA-less
-cert-manager `Issuer` fails this check the same as a malformed tier-1
-Secret. On failure the reconcile does not wedge: it holds the **last-good**
+`tls.key`, **and `ca.crt`**, and those values must PEM-parse (`tls.crt` may
+be a chain) with `tls.key` matching the leaf — `ca.crt` is required for
+every tier, including tier 2, because it's what the `tls-init` init
+container symlinks to `proxysql-ca.pem` (see [What gets wired](#what-gets-wired));
+a CA-less cert-manager `Issuer` or a Secret with corrupt PEM fails this
+check the same as a missing key. On failure the reconcile does not wedge: it holds the **last-good**
 render (previously-wired StatefulSets keep serving their current mount;
 never-wired clusters render with no TLS at all this pass), surfaces
 `Degraded=True`/`TLSSecretError` (see [status reference](status.md)), and

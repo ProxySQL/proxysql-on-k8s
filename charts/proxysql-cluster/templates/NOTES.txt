@@ -43,5 +43,11 @@ queries to. Either populate `backends.mysql` / `backends.pgsql` in values.yaml,
 or pair this chart with the proxysql-operator and use a ProxySQLConfig CR.
 {{- end }}
 
+{{- if .Values.reload }}
+
+This release starts ProxySQL with --reload (cnf merges over proxysql.db).
+Existing installs roll once on upgrade. Set reload=false to keep db-wins.
+{{- end }}
+
 Run the bundled Helm test:
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

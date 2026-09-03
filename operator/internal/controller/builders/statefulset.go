@@ -25,6 +25,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/ProxySQL/kubernetes/operator/internal/tlsutil"
 )
 
 // StatefulSet builds the desired-state StatefulSet. cnfChecksum is the
@@ -161,11 +163,7 @@ func (b *Builder) podSpec() corev1.PodSpec {
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: b.tlsMountSecretName(),
-					Items: []corev1.KeyToPath{
-						{Key: "tls.crt", Path: "tls.crt"},
-						{Key: "tls.key", Path: "tls.key"},
-						{Key: "ca.crt", Path: "ca.crt"},
-					},
+					Items:      tlsSecretVolumeItems(),
 				},
 			},
 		})
@@ -194,6 +192,14 @@ const (
 	backendTLSVolumeName = "backend-tls"
 	backendTLSMountPath  = "/etc/proxysql/backend-tls"
 )
+
+func tlsSecretVolumeItems() []corev1.KeyToPath {
+	items := make([]corev1.KeyToPath, 0, len(tlsutil.SecretKeys))
+	for _, k := range tlsutil.SecretKeys {
+		items = append(items, corev1.KeyToPath{Key: k, Path: k})
+	}
+	return items
+}
 
 // Exported TLS pod-template markers. The reconciler's validate-and-hold
 // logic (tls_secrets.go) inspects the EXISTING StatefulSet for these to

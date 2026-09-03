@@ -17,6 +17,7 @@ limitations under the License.
 package tlsutil
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"net"
@@ -284,5 +285,120 @@ func TestSANsFor_FeedsIssueServing(t *testing.T) {
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: "pod-0.mycluster-headless.default.svc", Roots: pool}); err != nil {
 		t.Errorf("wildcard chain verification failed: %v", err)
+	}
+}
+
+func TestLeafFingerprint_RejectsNonCertificatePEM(t *testing.T) {
+	_, keyPEM, err := NewCA("test-ca", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA() error = %v", err)
+	}
+	if _, err := LeafFingerprint(keyPEM); err == nil {
+		t.Errorf("LeafFingerprint() on PRIVATE KEY PEM: want error, got nil")
+	}
+}
+
+func TestNewCA_MaxPathLenZero(t *testing.T) {
+	certPEM, _, err := NewCA("test-ca", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA() error = %v", err)
+	}
+	cert := mustParseCert(t, certPEM)
+	if !cert.MaxPathLenZero {
+		t.Errorf("CA cert MaxPathLenZero = false, want true")
+	}
+}
+
+func TestIssuedPairs_X509KeyPairRoundTrip(t *testing.T) {
+	caCertPEM, caKeyPEM, err := NewCA("test-ca", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA() error = %v", err)
+	}
+	servingCertPEM, servingKeyPEM, err := IssueServing(caCertPEM, caKeyPEM, []string{"proxysql.default.svc"}, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueServing() error = %v", err)
+	}
+	if _, err := tls.X509KeyPair(caCertPEM, caKeyPEM); err != nil {
+		t.Errorf("tls.X509KeyPair(CA) error = %v", err)
+	}
+	if _, err := tls.X509KeyPair(servingCertPEM, servingKeyPEM); err != nil {
+		t.Errorf("tls.X509KeyPair(serving) error = %v", err)
+	}
+}
+
+func TestNewCA_PositiveSerial(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		certPEM, _, err := NewCA("test-ca", time.Hour)
+		if err != nil {
+			t.Fatalf("NewCA() error = %v", err)
+		}
+		if mustParseCert(t, certPEM).SerialNumber.Sign() <= 0 {
+			t.Errorf("CA serial is not positive")
+		}
+	}
+}
+
+func TestRenewalRequeueAfter(t *testing.T) {
+	const duration = 2 * time.Hour
+	const renewBefore = 30 * time.Minute
+	certPEM, _, err := NewCA("test-ca", duration)
+	if err != nil {
+		t.Fatalf("NewCA() error = %v", err)
+	}
+	got := RenewalRequeueAfter(certPEM, renewBefore, time.Now())
+	// clockSkew backdates NotBefore, not NotAfter; expect ~90m, never the 1m floor.
+	if got < 80*time.Minute || got > 95*time.Minute {
+		t.Errorf("RenewalRequeueAfter() = %s, want ~90m", got)
+	}
+	if RenewalRequeueAfter([]byte("garbage"), renewBefore, time.Now()) != 0 {
+		t.Errorf("unparseable PEM: want 0")
+	}
+	short, _, err := NewCA("test-ca", time.Second)
+	if err != nil {
+		t.Fatalf("NewCA() error = %v", err)
+	}
+	if RenewalRequeueAfter(short, time.Hour, time.Now()) != time.Minute {
+		t.Errorf("already inside window: want 1m floor")
+	}
+}
+
+func TestSecretHashKeys_LoadBearingOrder(t *testing.T) {
+	got := SecretHashKeys()
+	want := []string{"ca.crt", "tls.crt", "tls.key"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SecretHashKeys() = %#v, want %#v (reordering changes every TLS cluster's content hash)", got, want)
+	}
+	if !reflect.DeepEqual(SecretKeys, []string{"tls.crt", "tls.key", "ca.crt"}) {
+		t.Errorf("SecretKeys = %#v, want volume-mount order tls.crt, tls.key, ca.crt", SecretKeys)
+	}
+}
+
+func TestValidateSecretMaterial(t *testing.T) {
+	caCrt, caKey, err := NewCA("test-ca", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA() error = %v", err)
+	}
+	crt, key, err := IssueServing(caCrt, caKey, []string{"proxysql.default.svc"}, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueServing() error = %v", err)
+	}
+
+	if err := ValidateSecretMaterial(crt, key, caCrt); err != nil {
+		t.Errorf("valid material: %v", err)
+	}
+
+	if err := ValidateSecretMaterial([]byte("not a cert"), key, caCrt); err == nil {
+		t.Errorf("garbage tls.crt: want error")
+	}
+	if err := ValidateSecretMaterial(crt, key, []byte("not a ca")); err == nil {
+		t.Errorf("garbage ca.crt: want error")
+	}
+	if err := ValidateSecretMaterial(crt, caKey, caCrt); err == nil {
+		t.Errorf("mismatched tls.key: want error")
+	}
+
+	chain := append(append([]byte{}, crt...), caCrt...)
+	if err := ValidateSecretMaterial(chain, key, caCrt); err != nil {
+		t.Errorf("tls.crt chain (leaf+CA): %v", err)
 	}
 }

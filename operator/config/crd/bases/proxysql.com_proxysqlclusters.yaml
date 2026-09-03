@@ -2567,6 +2567,12 @@ spec:
                         - LoadBalancer
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: loadBalancerClass, loadBalancerSourceRanges, and healthCheckNodePort
+                        are LoadBalancer-only
+                      rule: '!has(self.type) || self.type != ''NodePort'' || (!has(self.loadBalancerClass)
+                        && (!has(self.loadBalancerSourceRanges) || size(self.loadBalancerSourceRanges)
+                        == 0) && self.?healthCheckNodePort.orValue(0) == 0)'
                   sessionAffinityTimeoutSeconds:
                     description: |-
                       SessionAffinityTimeoutSeconds enables ClientIP session affinity with
@@ -2762,6 +2768,49 @@ spec:
                       rule: self.all(k, k.startsWith('pgsql-'))
                 type: object
             type: object
+            x-kubernetes-validations:
+            - message: enabled listener ports must be pairwise distinct (admin vs
+                mysql)
+              rule: '!self.?protocols.?mysql.?enabled.orValue(true) || self.?protocols.?admin.?port.orValue(6032)
+                != self.?protocols.?mysql.?port.orValue(6033)'
+            - message: enabled listener ports must be pairwise distinct (admin vs
+                pgsql)
+              rule: '!self.?protocols.?pgsql.?enabled.orValue(self.?protocols.?pgsql.?port.orValue(0)
+                != 0) || self.?protocols.?admin.?port.orValue(6032) != self.?protocols.?pgsql.?port.orValue(6133)'
+            - message: enabled listener ports must be pairwise distinct (admin vs
+                web)
+              rule: '!self.?protocols.?web.?enabled.orValue(self.?protocols.?web.?port.orValue(0)
+                != 0) || self.?protocols.?admin.?port.orValue(6032) != self.?protocols.?web.?port.orValue(6080)'
+            - message: enabled listener ports must be pairwise distinct (admin vs
+                metrics)
+              rule: '!self.?metrics.?enabled.orValue(true) || self.?protocols.?admin.?port.orValue(6032)
+                != self.?metrics.?port.orValue(6070)'
+            - message: enabled listener ports must be pairwise distinct (mysql vs
+                pgsql)
+              rule: '!self.?protocols.?mysql.?enabled.orValue(true) || !self.?protocols.?pgsql.?enabled.orValue(self.?protocols.?pgsql.?port.orValue(0)
+                != 0) || self.?protocols.?mysql.?port.orValue(6033) != self.?protocols.?pgsql.?port.orValue(6133)'
+            - message: enabled listener ports must be pairwise distinct (mysql vs
+                web)
+              rule: '!self.?protocols.?mysql.?enabled.orValue(true) || !self.?protocols.?web.?enabled.orValue(self.?protocols.?web.?port.orValue(0)
+                != 0) || self.?protocols.?mysql.?port.orValue(6033) != self.?protocols.?web.?port.orValue(6080)'
+            - message: enabled listener ports must be pairwise distinct (mysql vs
+                metrics)
+              rule: '!self.?protocols.?mysql.?enabled.orValue(true) || !self.?metrics.?enabled.orValue(true)
+                || self.?protocols.?mysql.?port.orValue(6033) != self.?metrics.?port.orValue(6070)'
+            - message: enabled listener ports must be pairwise distinct (pgsql vs
+                web)
+              rule: '!self.?protocols.?pgsql.?enabled.orValue(self.?protocols.?pgsql.?port.orValue(0)
+                != 0) || !self.?protocols.?web.?enabled.orValue(self.?protocols.?web.?port.orValue(0)
+                != 0) || self.?protocols.?pgsql.?port.orValue(6133) != self.?protocols.?web.?port.orValue(6080)'
+            - message: enabled listener ports must be pairwise distinct (pgsql vs
+                metrics)
+              rule: '!self.?protocols.?pgsql.?enabled.orValue(self.?protocols.?pgsql.?port.orValue(0)
+                != 0) || !self.?metrics.?enabled.orValue(true) || self.?protocols.?pgsql.?port.orValue(6133)
+                != self.?metrics.?port.orValue(6070)'
+            - message: enabled listener ports must be pairwise distinct (web vs metrics)
+              rule: '!self.?protocols.?web.?enabled.orValue(self.?protocols.?web.?port.orValue(0)
+                != 0) || !self.?metrics.?enabled.orValue(true) || self.?protocols.?web.?port.orValue(6080)
+                != self.?metrics.?port.orValue(6070)'
           status:
             description: status defines the observed state of ProxySQLCluster
             properties:

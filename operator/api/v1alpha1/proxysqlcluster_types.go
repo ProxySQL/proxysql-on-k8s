@@ -26,6 +26,22 @@ import (
 // ProxySQLClusterSpec defines the desired state of a ProxySQL control-plane
 // cluster. The operator reconciles this into a StatefulSet, headless+regular
 // Services, an admin Secret, and an optional PodDisruptionBudget.
+//
+// Listener ports (admin, mysql, pgsql, web, metrics) that are enabled must
+// be pairwise distinct. Effective ports apply: unset admin=6032, mysql=6033,
+// pgsql=6133, web=6080, metrics=6070. mysql/metrics default on; pgsql/web
+// default off unless enabled or given a non-zero port; admin is always on.
+//
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?mysql.?enabled.orValue(true) || self.?protocols.?admin.?port.orValue(6032) != self.?protocols.?mysql.?port.orValue(6033)",message="enabled listener ports must be pairwise distinct (admin vs mysql)"
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?pgsql.?enabled.orValue(self.?protocols.?pgsql.?port.orValue(0) != 0) || self.?protocols.?admin.?port.orValue(6032) != self.?protocols.?pgsql.?port.orValue(6133)",message="enabled listener ports must be pairwise distinct (admin vs pgsql)"
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?web.?enabled.orValue(self.?protocols.?web.?port.orValue(0) != 0) || self.?protocols.?admin.?port.orValue(6032) != self.?protocols.?web.?port.orValue(6080)",message="enabled listener ports must be pairwise distinct (admin vs web)"
+// +kubebuilder:validation:XValidation:rule="!self.?metrics.?enabled.orValue(true) || self.?protocols.?admin.?port.orValue(6032) != self.?metrics.?port.orValue(6070)",message="enabled listener ports must be pairwise distinct (admin vs metrics)"
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?mysql.?enabled.orValue(true) || !self.?protocols.?pgsql.?enabled.orValue(self.?protocols.?pgsql.?port.orValue(0) != 0) || self.?protocols.?mysql.?port.orValue(6033) != self.?protocols.?pgsql.?port.orValue(6133)",message="enabled listener ports must be pairwise distinct (mysql vs pgsql)"
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?mysql.?enabled.orValue(true) || !self.?protocols.?web.?enabled.orValue(self.?protocols.?web.?port.orValue(0) != 0) || self.?protocols.?mysql.?port.orValue(6033) != self.?protocols.?web.?port.orValue(6080)",message="enabled listener ports must be pairwise distinct (mysql vs web)"
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?mysql.?enabled.orValue(true) || !self.?metrics.?enabled.orValue(true) || self.?protocols.?mysql.?port.orValue(6033) != self.?metrics.?port.orValue(6070)",message="enabled listener ports must be pairwise distinct (mysql vs metrics)"
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?pgsql.?enabled.orValue(self.?protocols.?pgsql.?port.orValue(0) != 0) || !self.?protocols.?web.?enabled.orValue(self.?protocols.?web.?port.orValue(0) != 0) || self.?protocols.?pgsql.?port.orValue(6133) != self.?protocols.?web.?port.orValue(6080)",message="enabled listener ports must be pairwise distinct (pgsql vs web)"
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?pgsql.?enabled.orValue(self.?protocols.?pgsql.?port.orValue(0) != 0) || !self.?metrics.?enabled.orValue(true) || self.?protocols.?pgsql.?port.orValue(6133) != self.?metrics.?port.orValue(6070)",message="enabled listener ports must be pairwise distinct (pgsql vs metrics)"
+// +kubebuilder:validation:XValidation:rule="!self.?protocols.?web.?enabled.orValue(self.?protocols.?web.?port.orValue(0) != 0) || !self.?metrics.?enabled.orValue(true) || self.?protocols.?web.?port.orValue(6080) != self.?metrics.?port.orValue(6070)",message="enabled listener ports must be pairwise distinct (web vs metrics)"
 type ProxySQLClusterSpec struct {
 	// Replicas is the number of ProxySQL control-plane pods.
 	// +optional
@@ -377,6 +393,11 @@ type ServiceSpec struct {
 // ExternalServiceSpec configures a second, curated Service
 // "<cluster>-external" for out-of-cluster clients, independent of the main
 // (internal) Service's type and annotations.
+// LoadBalancer-only fields are rejected when type is NodePort. allocateLoadBalancerNodePorts
+// is not in this rule: it defaults to true, so after CRD defaulting it is always present
+// and would reject every NodePort Service. The builder still omits it on NodePort.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.type) || self.type != 'NodePort' || (!has(self.loadBalancerClass) && (!has(self.loadBalancerSourceRanges) || size(self.loadBalancerSourceRanges) == 0) && self.?healthCheckNodePort.orValue(0) == 0)",message="loadBalancerClass, loadBalancerSourceRanges, and healthCheckNodePort are LoadBalancer-only"
 type ExternalServiceSpec struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`

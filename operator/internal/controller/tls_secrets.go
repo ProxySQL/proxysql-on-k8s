@@ -50,12 +50,6 @@ const reasonTLSSecretError = "TLSSecretError"
 // preserved across reconciles so clients pinning it don't churn.
 const tlsCADuration = 5 * 365 * 24 * time.Hour
 
-// tlsRequiredKeys are the keys the resolved serving-cert Secret MUST carry
-// before any TLS wiring reaches the StatefulSet. ca.crt is required even
-// for tier 2 — a CA-less cert-manager issuer omits it, and the datadir
-// symlink delivery (proxysql-ca.pem) needs a real file behind it.
-var tlsRequiredKeys = []string{"tls.crt", "tls.key", "ca.crt"}
-
 // ensureTLSSecrets resolves the frontend/admin serving-cert Secret per the
 // three-tier precedence (user Secret > cert-manager issuerRef > operator
 // self-signed) and flips the Builder's TLS mount input (TLSMountSecret)
@@ -83,7 +77,7 @@ var tlsRequiredKeys = []string{"tls.crt", "tls.key", "ca.crt"}
 // A leftover tier-2 Certificate is garbage-collected whenever tier 2 is
 // not the selected tier — otherwise cert-manager and the operator (or the
 // user's Secret) would fight over the serving Secret's content.
-func (r *ProxySQLClusterReconciler) ensureTLSSecrets(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder) (bool, error) {
+func (r *ProxySQLClusterReconciler) ensureTLSSecrets(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder) (bool, time.Duration, error) {
 	if !b.Spec.TLSEnabled() {
 		// Disabled-but-present spec: still GC a tier-2 Certificate so
 		// cert-manager stops maintaining an unused Secret. A fully absent
@@ -92,7 +86,7 @@ func (r *ProxySQLClusterReconciler) ensureTLSSecrets(ctx context.Context, cluste
 		if b.Spec.TLS != nil {
 			r.cleanupTLSCertificate(ctx, cluster, b.TLSSecretName())
 		}
-		return false, nil
+		return false, 0, nil
 	}
 
 	tls := b.Spec.TLS
@@ -103,39 +97,57 @@ func (r *ProxySQLClusterReconciler) ensureTLSSecrets(ctx context.Context, cluste
 			// switch doesn't validate, the held last-good material may be
 			// the cert-manager-issued Secret — deleting the Certificate now
 			// would cut off that material's renewal source while degraded.
-			return false, err
+			return false, 0, err
 		}
 		r.cleanupTLSCertificate(ctx, cluster, b.TLSSecretName())
 		b.TLSMountSecret = tls.SecretName
-		return true, nil
+		return true, 0, nil
 
 	case tls.IssuerRef != nil && tls.IssuerRef.Name != "": // tier 2
 		if err := r.ensureTLSCertificate(ctx, cluster, b.Certificate()); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		if err := r.validateTLSSecret(ctx, b.TLSSecretName(), b.Namespace()); err != nil {
-			return false, fmt.Errorf("waiting for cert-manager issuance: %w", err)
+			return false, 0, fmt.Errorf("waiting for cert-manager issuance: %w", err)
 		}
 		b.TLSMountSecret = b.TLSSecretName()
-		return true, nil
+		return true, 0, nil
 
 	default: // tier 3
-		if err := r.ensureSelfSignedTLS(ctx, cluster, b); err != nil {
-			return false, err
+		requeue, err := r.ensureSelfSignedTLS(ctx, cluster, b)
+		if err != nil {
+			return false, 0, err
 		}
 		// GC only on the ready path (see tier 1 for why).
 		r.cleanupTLSCertificate(ctx, cluster, b.TLSSecretName())
 		b.TLSMountSecret = b.TLSSecretName()
-		return true, nil
+		return true, requeue, nil
 	}
 }
 
-// validateTLSSecret GETs the resolved serving-cert Secret and requires
-// every tlsRequiredKeys entry to be present and non-empty. The returned
-// error names the Secret and, when applicable, the exact missing key — it
-// becomes the Degraded=TLSSecretError message.
+// validateTLSSecret GETs the resolved serving-cert Secret, requires every
+// tlsutil.SecretKeys entry to be present and non-empty, then PEM-parses
+// tls.crt/ca.crt and checks the tls.key pairing. Presence-only would let a
+// corrupt Secret mount and crash-loop ProxySQL — the outcome validate-and-hold
+// exists to prevent. The returned error names the Secret and becomes the
+// Degraded=TLSSecretError message.
 func (r *ProxySQLClusterReconciler) validateTLSSecret(ctx context.Context, name, namespace string) error {
-	return r.requireSecretKeys(ctx, name, namespace, tlsRequiredKeys)
+	var sec corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sec); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("tls secret %q not found", name)
+		}
+		return fmt.Errorf("get tls secret %q: %w", name, err)
+	}
+	for _, k := range tlsutil.SecretKeys {
+		if len(sec.Data[k]) == 0 {
+			return fmt.Errorf("tls secret %q is missing key %q", name, k)
+		}
+	}
+	if err := tlsutil.ValidateSecretMaterial(sec.Data["tls.crt"], sec.Data["tls.key"], sec.Data["ca.crt"]); err != nil {
+		return fmt.Errorf("tls secret %q: %w", name, err)
+	}
+	return nil
 }
 
 // validateBackendTLSSecrets GETs the backend (proxy-to-server) TLS Secrets
@@ -329,7 +341,7 @@ func (r *ProxySQLClusterReconciler) cleanupTLSCertificate(ctx context.Context, o
 // freshly issued serving cert (duration+renewBefore before CA expiry); the
 // serving cert is (re)issued per servingReissueNeeded. Both Secrets are
 // shaped by construction — no separate validation pass is needed.
-func (r *ProxySQLClusterReconciler) ensureSelfSignedTLS(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder) error {
+func (r *ProxySQLClusterReconciler) ensureSelfSignedTLS(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder) (time.Duration, error) {
 	duration := b.Spec.TLS.Duration.Duration
 	renewBefore := b.Spec.TLS.RenewBefore.Duration
 
@@ -357,7 +369,7 @@ func (r *ProxySQLClusterReconciler) ensureSelfSignedTLS(ctx context.Context, clu
 		return controllerutil.SetControllerReference(cluster, caSec, r.Scheme)
 	})
 	if err != nil {
-		return fmt.Errorf("ensure CA secret %q: %w", b.TLSCASecretName(), err)
+		return 0, fmt.Errorf("ensure CA secret %q: %w", b.TLSCASecretName(), err)
 	}
 
 	// --- Serving cert ---
@@ -381,9 +393,9 @@ func (r *ProxySQLClusterReconciler) ensureSelfSignedTLS(ctx context.Context, clu
 		return controllerutil.SetControllerReference(cluster, srvSec, r.Scheme)
 	})
 	if err != nil {
-		return fmt.Errorf("ensure serving-cert secret %q: %w", b.TLSSecretName(), err)
+		return 0, fmt.Errorf("ensure serving-cert secret %q: %w", b.TLSSecretName(), err)
 	}
-	return nil
+	return tlsutil.RenewalRequeueAfter(srvSec.Data["tls.crt"], renewBefore, time.Now()), nil
 }
 
 // servingReissueNeeded reports whether the tier-3 serving Secret's content
@@ -393,7 +405,7 @@ func (r *ProxySQLClusterReconciler) ensureSelfSignedTLS(ctx context.Context, clu
 // edits, cluster renames can't happen but namespace-shaped SANs are cheap
 // to recheck).
 func servingReissueNeeded(data map[string][]byte, caCert []byte, sans []string, renewBefore time.Duration) bool {
-	for _, k := range tlsRequiredKeys {
+	for _, k := range tlsutil.SecretKeys {
 		if len(data[k]) == 0 {
 			return true
 		}

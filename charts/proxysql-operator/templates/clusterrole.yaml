@@ -40,10 +40,12 @@ rules:
     verbs: [create, delete, get, list, patch, update, watch]
   # certificates: the cert-manager tier of spec.tls (issuerRef) creates and
   # maintains one cert-manager.io Certificate per cluster; delete covers the
-  # garbage-collection when the tier is switched away.
+  # garbage-collection when the tier is switched away. list/watch are omitted
+  # — the operator only Get/CreateOrUpdate/Deletes by name; Secret watches
+  # cover rotation.
   - apiGroups: [cert-manager.io]
     resources: [certificates]
-    verbs: [create, delete, get, list, patch, update, watch]
+    verbs: [create, delete, get, patch, update]
   - apiGroups: [proxysql.com]
     resources: [proxysqlclusters, proxysqlconfigs]
     verbs: [create, delete, get, list, patch, update, watch]
