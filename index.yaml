@@ -84,6 +84,30 @@ entries:
     version: 0.1.0
   proxysql-operator:
   - apiVersion: v2
+    appVersion: 0.7.0
+    created: "2026-09-04T14:06:07.13351714Z"
+    description: Operator that reconciles ProxySQLCluster and ProxySQLConfig CRDs
+      (proxysql.com/v1alpha1)
+    digest: 629d1680e72279ba06c8d7255acd1f72da4264d345a6d45f190a35828ac999c3
+    home: https://proxysql.com
+    icon: https://proxysql.com/wp-content/uploads/2020/04/ProxySQL-Colour-Logo.png
+    keywords:
+    - proxysql
+    - operator
+    - mysql
+    - postgresql
+    kubeVersion: '>=1.29.0-0'
+    maintainers:
+    - name: ProxySQL
+      url: https://proxysql.com
+    name: proxysql-operator
+    sources:
+    - https://github.com/ProxySQL/kubernetes
+    type: application
+    urls:
+    - https://github.com/ProxySQL/proxysql-on-k8s/releases/download/proxysql-operator-0.7.0/proxysql-operator-0.7.0.tgz
+    version: 0.7.0
+  - apiVersion: v2
     appVersion: 0.6.0
     created: "2026-08-05T22:42:16.918274283Z"
     description: Operator that reconciles ProxySQLCluster and ProxySQLConfig CRDs
@@ -203,4 +227,4 @@ entries:
     urls:
     - https://github.com/ProxySQL/proxysql-on-k8s/releases/download/proxysql-operator-0.2.5/proxysql-operator-0.2.5.tgz
     version: 0.2.5
-generated: "2026-08-05T22:42:16.918297648Z"
+generated: "2026-09-04T14:06:07.133536548Z"
