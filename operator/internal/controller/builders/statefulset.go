@@ -117,6 +117,7 @@ func (b *Builder) podSpec() corev1.PodSpec {
 		NodeSelector:                  b.Spec.NodeSelector,
 		Tolerations:                   b.Spec.Tolerations,
 		Affinity:                      b.Spec.Affinity,
+		TopologySpreadConstraints:     b.topologySpreadConstraints(),
 		TerminationGracePeriodSeconds: ptrInt64(b.terminationGracePeriodSeconds()),
 		Containers:                    []corev1.Container{b.container()},
 		Volumes: []corev1.Volume{
@@ -508,6 +509,32 @@ func (b *Builder) dataPVC() corev1.PersistentVolumeClaim {
 // sysctls. All three are in the Kubernetes safe-sysctl set since v1.29
 // (KEP-3105), so they are admitted under PSA `restricted` without any
 // kubelet --allowed-unsafe-sysctls configuration.
+// topologySpreadConstraints returns the pod-template spread constraints, with a
+// defaulted LabelSelector on any constraint that omits one.
+//
+// Defaulting matters because a TopologySpreadConstraint with a nil selector
+// matches NO pods, so it silently does nothing — the failure mode is a cluster
+// that looks configured for AZ spreading and is not. Callers should not have to
+// restate this operator's label scheme to avoid that.
+//
+// Returns nil (not an empty slice) when unset, so an unchanged spec renders a
+// byte-identical pod template and no existing cluster is rolled on upgrade.
+// Builders are pure (see CLAUDE.md): the constraints are copied before the
+// selector is filled in, never mutated in place on b.Spec.
+func (b *Builder) topologySpreadConstraints() []corev1.TopologySpreadConstraint {
+	if len(b.Spec.TopologySpreadConstraints) == 0 {
+		return nil
+	}
+	out := make([]corev1.TopologySpreadConstraint, len(b.Spec.TopologySpreadConstraints))
+	for i, c := range b.Spec.TopologySpreadConstraints {
+		c.DeepCopyInto(&out[i])
+		if out[i].LabelSelector == nil {
+			out[i].LabelSelector = &metav1.LabelSelector{MatchLabels: b.SelectorLabels()}
+		}
+	}
+	return out
+}
+
 func (b *Builder) keepaliveSysctls() []corev1.Sysctl {
 	ka := b.Spec.Networking.TCPKeepalive
 	var out []corev1.Sysctl

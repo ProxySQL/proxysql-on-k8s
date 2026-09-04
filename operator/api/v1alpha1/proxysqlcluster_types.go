@@ -84,6 +84,21 @@ type ProxySQLClusterSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// TopologySpreadConstraints describes how the pods of this cluster spread
+	// across topology domains — typically topology.kubernetes.io/zone for
+	// availability-zone spreading and kubernetes.io/hostname for node spreading.
+	// Passed through to the StatefulSet pod template unchanged.
+	//
+	// Prefer this over an equivalent podAntiAffinity: maxSkew bounds the
+	// imbalance between domains, whereas a preferred anti-affinity is only a
+	// scheduling weight (4 replicas over 3 zones can still pile up) and a
+	// required one caps replicas at the number of domains.
+	//
+	// A constraint that omits LabelSelector is defaulted to this cluster's
+	// selector labels, so callers need not encode the operator's label scheme.
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
 	// PodSecurityContext defaults to PSA-restricted-compatible (non-root, fsGroup 999,
 	// runtime/default seccomp). Override only if a specific image needs it.
 	// +optional
