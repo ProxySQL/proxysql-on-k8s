@@ -118,7 +118,7 @@ func classifyTLSRotation(applied, secretHash string) tlsRotationVerdict {
 // rotations. Length-prefixed framing, same shape as structuralHash.
 func tlsContentHash(data map[string][]byte) string {
 	h := sha256.New()
-	for _, k := range []string{"ca.crt", "tls.crt", "tls.key"} {
+	for _, k := range tlsutil.SecretHashKeys() {
 		v := data[k]
 		_, _ = fmt.Fprintf(h, "%d:%s:%d:", len(k), k, len(v))
 		_, _ = h.Write(v)

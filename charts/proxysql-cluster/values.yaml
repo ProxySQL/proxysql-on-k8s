@@ -21,6 +21,11 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+# Merge bootstrap cnf over persisted proxysql.db on every start (parity
+# with the operator). Set false to restore db-wins-after-first-boot.
+# Changing this value restarts pods.
+reload: true
+
 imagePullSecrets: []
 
 nameOverride: ""

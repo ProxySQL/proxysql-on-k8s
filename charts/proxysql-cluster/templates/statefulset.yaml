@@ -48,6 +48,9 @@ spec:
             - "/etc/proxysql/proxysql.cnf"
             - "-D"
             - "/var/lib/proxysql"
+            {{- if .Values.reload }}
+            - "--reload"
+            {{- end }}
           ports:
             - name: admin
               containerPort: {{ .Values.admin.port }}

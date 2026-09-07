@@ -48,8 +48,10 @@ spec:
 The operator mints a 5-year self-signed CA into `<cluster>-tls-ca` (once,
 preserved across reconciles) and a 90-day serving certificate into
 `<cluster>-tls`, reissued automatically inside the 30-day renewal window
-(`duration`/`renewBefore`, both overridable). This is the zero-config
-path: no cert-manager dependency, works in any cluster.
+(`duration`/`renewBefore`, both overridable). The reconciler requeues
+just before that window so an idle cluster does not wait on the informer
+resync. This is the zero-config path: no cert-manager dependency, works in
+any cluster.
 
 ### Tier 1 — bring your own certificate
 

@@ -26,6 +26,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -33,8 +34,48 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"sort"
 	"time"
 )
+
+// SecretKeys is the serving-cert Secret key set, in volume-mount order.
+// tlsContentHash iterates SecretHashKeys (this list sorted); that sorted
+// order is load-bearing and must not change — reordering it rotates every
+// TLS-enabled cluster once.
+var SecretKeys = []string{"tls.crt", "tls.key", "ca.crt"}
+
+// SecretHashKeys returns SecretKeys sorted. The result is ca.crt, tls.crt,
+// tls.key — the historical tlsContentHash order.
+func SecretHashKeys() []string {
+	keys := append([]string(nil), SecretKeys...)
+	sort.Strings(keys)
+	return keys
+}
+
+// ValidateSecretMaterial PEM-parses tls.crt / ca.crt and checks that
+// tls.key matches tls.crt. A certificate chain in tls.crt is accepted
+// (cert-manager). Used by validate-and-hold so a corrupt Secret never
+// mounts and crash-loops ProxySQL.
+func ValidateSecretMaterial(crt, key, ca []byte) error {
+	block, _ := pem.Decode(crt)
+	if block == nil {
+		return fmt.Errorf("tls.crt: no PEM block found")
+	}
+	if block.Type != "CERTIFICATE" {
+		return fmt.Errorf("tls.crt: PEM block type %q is not CERTIFICATE", block.Type)
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return fmt.Errorf("tls.crt: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(ca) {
+		return fmt.Errorf("ca.crt contains no usable certificates")
+	}
+	if _, err := tls.X509KeyPair(crt, key); err != nil {
+		return fmt.Errorf("tls.crt/tls.key: %w", err)
+	}
+	return nil
+}
 
 // clockSkew backdates NotBefore slightly so certs are immediately valid
 // even when the verifier's clock is a little behind the issuer's.
@@ -66,6 +107,7 @@ func NewCA(commonName string, duration time.Duration) (certPEM, keyPEM []byte, e
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
+		MaxPathLenZero:        true,
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
@@ -141,11 +183,32 @@ func NeedsRenewal(certPEM []byte, renewBefore time.Duration) bool {
 	return time.Until(cert.NotAfter) < renewBefore
 }
 
+const minRenewalRequeue = time.Minute
+
+// RenewalRequeueAfter is how long until a tier-3 serving cert enters its
+// renewBefore window. 0 means "do not requeue on this path" (unparseable).
+// A floor of 1m avoids a hot loop if the cert is already inside the window
+// (the caller reissues on that pass; the next reconcile sees a fresh cert).
+func RenewalRequeueAfter(certPEM []byte, renewBefore time.Duration, now time.Time) time.Duration {
+	cert, err := parseCert(certPEM)
+	if err != nil {
+		return 0
+	}
+	d := cert.NotAfter.Add(-renewBefore).Sub(now)
+	if d < minRenewalRequeue {
+		return minRenewalRequeue
+	}
+	return d
+}
+
 // LeafFingerprint returns the SHA-256 fingerprint of the first PEM cert.
 func LeafFingerprint(certPEM []byte) (string, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
 		return "", fmt.Errorf("no PEM block found in certificate data")
+	}
+	if block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("PEM block type %q is not CERTIFICATE", block.Type)
 	}
 	sum := sha256.Sum256(block.Bytes)
 	return hex.EncodeToString(sum[:]), nil
@@ -181,7 +244,15 @@ func splitSANs(sans []string) (dnsNames []string, ips []net.IP) {
 
 func randomSerial() (*big.Int, error) {
 	limit := new(big.Int).Lsh(big.NewInt(1), serialBits)
-	return rand.Int(rand.Reader, limit)
+	for {
+		n, err := rand.Int(rand.Reader, limit)
+		if err != nil {
+			return nil, err
+		}
+		if n.Sign() > 0 {
+			return n, nil
+		}
+	}
 }
 
 func encodeCert(der []byte) []byte {
