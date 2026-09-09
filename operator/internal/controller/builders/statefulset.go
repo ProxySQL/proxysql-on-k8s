@@ -93,11 +93,13 @@ func (b *Builder) effectiveReplicas() *int32 {
 	return b.Spec.Replicas
 }
 
-// terminationGracePeriodSeconds returns the drain timeout + a 10s buffer when
-// graceful shutdown is enabled, else the historical default of 30.
+// terminationGracePeriodSeconds returns the preStop delay, drain timeout, and
+// a 10s buffer when graceful shutdown is enabled, else the historical default
+// of 30.
 func (b *Builder) terminationGracePeriodSeconds() int64 {
 	if b.Spec.GracefulShutdownEnabled() {
-		return int64(b.Spec.DrainTimeoutSecondsOrDefault()) + 10
+		return int64(b.Spec.PreStopDelaySecondsOrDefault()) +
+			int64(b.Spec.DrainTimeoutSecondsOrDefault()) + 10
 	}
 	return 30
 }
@@ -410,15 +412,17 @@ func (b *Builder) container() corev1.Container {
 // connect timeout, which could otherwise let the loop's total wall-time
 // exceed terminationGracePeriodSeconds and get SIGKILLed mid-drain.
 func (b *Builder) drainPreStopCommand() []string {
+	delay := b.Spec.PreStopDelaySecondsOrDefault()
 	timeout := b.Spec.DrainTimeoutSecondsOrDefault()
 	port := b.Spec.Protocols.Admin.Port
 	script := fmt.Sprintf(
-		`mysql --no-defaults --connect-timeout=2 -h127.0.0.1 -P%d -uadmin -e 'PROXYSQL PAUSE' 2>/dev/null || true; `+
+		`sleep %d; `+
+			`mysql --no-defaults --connect-timeout=2 -h127.0.0.1 -P%d -uadmin -e 'PROXYSQL PAUSE' 2>/dev/null || true; `+
 			`for i in $(seq 1 %d); do `+
 			`c=$(mysql --no-defaults --connect-timeout=2 -N -h127.0.0.1 -P%d -uadmin -e `+
 			`"SELECT Variable_Value FROM stats_mysql_global WHERE Variable_Name='Client_Connections_connected'" 2>/dev/null); `+
 			`[ "${c:-0}" -le 0 ] && break; sleep 1; done`,
-		port, timeout, port)
+		delay, port, timeout, port)
 	return []string{"/bin/sh", "-c", script}
 }
 

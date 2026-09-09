@@ -192,6 +192,15 @@ func (s *ProxySQLClusterSpec) DrainTimeoutSecondsOrDefault() int32 {
 	return 30
 }
 
+// PreStopDelaySecondsOrDefault returns the configured preStop delay or zero
+// when unset.
+func (s *ProxySQLClusterSpec) PreStopDelaySecondsOrDefault() int32 {
+	if s.GracefulShutdown != nil && s.GracefulShutdown.PreStopDelaySeconds != nil {
+		return *s.GracefulShutdown.PreStopDelaySeconds
+	}
+	return 0
+}
+
 // ProbesSpec overrides the proxysql container's probes. Every field is a
 // full corev1.Probe; a set field replaces the operator's default probe
 // wholesale (handler, timings, thresholds — everything), not just the
@@ -719,6 +728,15 @@ type GracefulShutdownSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=600
 	DrainTimeoutSeconds *int32 `json:"drainTimeoutSeconds,omitempty"`
+
+	// PreStopDelaySeconds waits before PROXYSQL PAUSE so EndpointSlice /
+	// kube-proxy can stop routing new connections to the terminating pod.
+	// Included in terminationGracePeriodSeconds.
+	// +optional
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=120
+	PreStopDelaySeconds *int32 `json:"preStopDelaySeconds,omitempty"`
 }
 
 // TLSIssuerRef references a cert-manager Issuer or ClusterIssuer used to
