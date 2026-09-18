@@ -121,6 +121,56 @@ judgment for a placement decision that was made explicitly. `status.topology
 .coreZones[].readyReplicas` below `desiredReplicas` with pods `Pending` is
 the signal that a zone can't currently host what was asked of it.
 
+**Shrinking or removing a zone deletes its StatefulSet and its PVCs — but
+only once the replacement shape is actually serving, and never while the
+cluster is paused.** Dropping a zone from `core.zones` (or converting a
+cluster from direct to coreSatellite, which leaves the old `<cluster>`
+StatefulSet behind) doesn't delete anything immediately: the operator
+first ensures every role StatefulSet the *current* topology calls for, and
+only prunes a StatefulSet that's no longer called for once **every**
+surviving role set is fully Ready — deleting the old shape before its
+replacement is serving would turn a topology change into an outage. The
+prune takes the StatefulSet's PVCs with it (matched by exact claim name,
+never by label, so a live role's PVCs are never swept up by accident) —
+they're a separate object the StatefulSet controller never garbage-collects,
+and the persisted `proxysql.db` is reproducible from the operator or a
+peer.
+
+**What's deleted:** exactly the StatefulSets (and their PVCs) the current
+topology no longer calls for. **What survives:** every StatefulSet still
+called for and its PVCs, the cluster's Services/Secrets/PDBs, and — the one
+unconditional exception — **everything**, while `spec.pause: true`. A
+paused cluster's StatefulSets are all scaled to 0, which would otherwise
+satisfy "every surviving set is Ready" vacuously and prune a dropped zone's
+data while the cluster is deliberately stopped, directly against `pause`'s
+own promise to retain Services, Secrets, and PVCs. So the prune holds
+unconditionally while paused and resumes once the cluster is unpaused and
+the replacement shape is Ready — the same guard applies whether the stale
+object is a coreSatellite role set or the direct-mode single StatefulSet
+left behind by a downgrade, since both flow through the same prune path.
+Only objects this cluster actually **controls** (an owner-reference check,
+not just the `proxysql.com/cluster` label) are ever candidates, so a
+hand-made or foreign-cluster object carrying the same label is left alone.
+
+This delete path is why the operator's ClusterRole grants
+`persistentvolumeclaims: get, list, watch, delete` — never create, update,
+or patch; the StatefulSet controller is the only thing that ever creates a
+PVC, from a `volumeClaimTemplate`.
+
+**A conversion also has to keep the restart-checksum and TLS-rotation
+markers (see the [annotations reference](reference/annotations.md))
+readable across it.** Those are object-level annotations on a StatefulSet;
+in direct mode that's unambiguous (`<cluster>`), but a coreSatellite
+cluster mid-conversion, or with a zone just prepended to `core.zones`, may
+not yet have its first-preference StatefulSet. The operator reads them back
+from the first StatefulSet that actually exists, in preference order: each
+core zone in spec order, then the satellite set, then the pre-conversion
+`<cluster>` set. Reading a name that doesn't exist yet would read back an
+empty marker set — indistinguishable from a brand-new cluster — which would
+reset the restart-checksum tracking and, worse, make the TLS engine treat
+an in-flight rotation as already applied when no pod ever reloaded the
+certificate.
+
 **Objects shared across both tiers:**
 
 | Object | Scope | Notes |

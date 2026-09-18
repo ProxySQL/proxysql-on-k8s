@@ -49,6 +49,19 @@ runtime-vs-restart classification diffs `proxysql.cnf` only; for example, a
 lines in `proxysql.cnf` itself. See [runtime vs. restart
 semantics](proxysqlcluster.md#configuration-changes-runtime-vs-restart).
 
+**In coreSatellite mode, "the StatefulSet object" below means whichever
+role StatefulSet currently carries these markers, not a set literally named
+after the cluster.** The four annotations below (`vars-applied-hash`,
+`structural-applied-hash`, `tls-applied-hash`, `tls-rotation-state`) are
+object-level, and the operator writes the same values to every role
+StatefulSet it applies — so any one of them reads back the same state. On
+read, it takes the first StatefulSet that actually exists, in preference
+order: each core zone's set in spec order, then the satellite set, then the
+pre-conversion `<cluster>` set (still present until pruned after a
+direct→coreSatellite conversion). See [Core/satellite
+topology](../architecture.md#coresatellite-topology). Direct-mode clusters
+are unaffected — there's only ever the one `<cluster>` set.
+
 ### `proxysql.com/vars-applied-hash` (operator-set, on the StatefulSet object)
 
 | | |

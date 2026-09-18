@@ -153,6 +153,17 @@ refused; only a tag that positively parses as `major.minor.patch` (with a
 1–99 major, ruling out four-digit calendar tags) and reads below `x.y.8` is
 rejected. Direct-mode clusters never run this check.
 
+#### Shrinking or removing a zone
+
+Dropping a `core.zones` entry (or converting from direct mode) prunes the
+StatefulSet that zone-drop leaves behind, **and its PVCs**, but only once
+every surviving role StatefulSet is fully Ready, and never while
+`spec.pause: true` — a paused cluster prunes nothing at all, matching
+`pause`'s promise to retain Services/Secrets/PVCs. See [Core/satellite
+topology](../architecture.md#coresatellite-topology) for the full
+pruning contract (what's deleted, what survives, the RBAC it requires) and
+how the restart-checksum/TLS-rotation markers survive a conversion.
+
 ### Auth
 
 | Field | Type | Default | Validation | Description |
