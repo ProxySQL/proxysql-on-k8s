@@ -40,8 +40,13 @@ func (b *Builder) CoreStatefulSetName(zone string) string {
 	return fmt.Sprintf("%s-core-%s", b.Name(), zone)
 }
 
-// SatelliteStatefulSetName is the satellite StatefulSet name.
+// SatelliteStatefulSetName is the satellite StatefulSet name. The satellite
+// PDB shares it (one PDB per role, and the satellite role is one set).
 func (b *Builder) SatelliteStatefulSetName() string { return b.Name() + "-satellite" }
+
+// CorePDBName is the core tier's PodDisruptionBudget name. It is not a
+// StatefulSet name: the core PDB spans every zone's set.
+func (b *Builder) CorePDBName() string { return b.Name() + "-core" }
 
 // RoleSelectorLabels is SelectorLabels() plus the role (and, for core, the
 // zone). It is the selector of a per-role StatefulSet and the pod-template
@@ -211,7 +216,7 @@ func (b *Builder) CorePDB() *policyv1.PodDisruptionBudget {
 	one := intstr.FromInt32(1)
 	return &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      b.Name() + "-core",
+			Name:      b.CorePDBName(),
 			Namespace: b.Namespace(),
 			Labels:    b.Labels(),
 		},

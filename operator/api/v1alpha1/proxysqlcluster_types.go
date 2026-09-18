@@ -886,6 +886,11 @@ type ProxySQLClusterStatus struct {
 	// +optional
 	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
 
+	// Topology reports the shape actually reconciled. Nil for direct-mode
+	// clusters, which keeps their status byte-identical.
+	// +optional
+	Topology *TopologyStatus `json:"topology,omitempty"`
+
 	// Phase is a coarse, single-word projection of the conditions for
 	// dashboards and external pollers. Conditions remain the source of truth.
 	// One of: Pending, Creating, Running, Updating, Degraded, Failed,
@@ -911,6 +916,45 @@ type ProxySQLClusterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// TopologyStatus reports the reconciled core/satellite shape. It is only
+// populated for coreSatellite clusters; a direct-mode cluster leaves
+// status.topology absent, so its status stays exactly what it was before
+// this field existed.
+type TopologyStatus struct {
+	// Mode is the reconciled topology mode.
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// CoreZones is one entry per core StatefulSet, in spec order.
+	// +optional
+	CoreZones []CoreZoneStatus `json:"coreZones,omitempty"`
+
+	// SatelliteReplicas is the desired satellite count.
+	// +optional
+	SatelliteReplicas int32 `json:"satelliteReplicas,omitempty"`
+
+	// SatelliteReadyReplicas is the satellite StatefulSet's ready count.
+	// +optional
+	SatelliteReadyReplicas int32 `json:"satelliteReadyReplicas,omitempty"`
+}
+
+// CoreZoneStatus is one zone's core placement outcome. Ready below Desired
+// with pods Pending means the zone cannot host them — by design the
+// operator never relocates a pinned core pod.
+type CoreZoneStatus struct {
+	// Zone is the topology.kubernetes.io/zone value the core StatefulSet is
+	// pinned to.
+	Zone string `json:"zone"`
+
+	// DesiredReplicas is the core pod count requested for this zone.
+	// +optional
+	DesiredReplicas int32 `json:"desiredReplicas,omitempty"`
+
+	// ReadyReplicas is this zone's core StatefulSet's ready count.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 }
 
 // ClusterEndpoints lists in-cluster DNS endpoints (host:port) per surface,

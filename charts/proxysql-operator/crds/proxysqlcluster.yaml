@@ -3159,6 +3159,52 @@ spec:
                 description: Replicas is the desired replica count.
                 format: int32
                 type: integer
+              topology:
+                description: |-
+                  Topology reports the shape actually reconciled. Nil for direct-mode
+                  clusters, which keeps their status byte-identical.
+                properties:
+                  coreZones:
+                    description: CoreZones is one entry per core StatefulSet, in spec
+                      order.
+                    items:
+                      description: |-
+                        CoreZoneStatus is one zone's core placement outcome. Ready below Desired
+                        with pods Pending means the zone cannot host them — by design the
+                        operator never relocates a pinned core pod.
+                      properties:
+                        desiredReplicas:
+                          description: DesiredReplicas is the core pod count requested
+                            for this zone.
+                          format: int32
+                          type: integer
+                        readyReplicas:
+                          description: ReadyReplicas is this zone's core StatefulSet's
+                            ready count.
+                          format: int32
+                          type: integer
+                        zone:
+                          description: |-
+                            Zone is the topology.kubernetes.io/zone value the core StatefulSet is
+                            pinned to.
+                          type: string
+                      required:
+                      - zone
+                      type: object
+                    type: array
+                  mode:
+                    description: Mode is the reconciled topology mode.
+                    type: string
+                  satelliteReadyReplicas:
+                    description: SatelliteReadyReplicas is the satellite StatefulSet's
+                      ready count.
+                    format: int32
+                    type: integer
+                  satelliteReplicas:
+                    description: SatelliteReplicas is the desired satellite count.
+                    format: int32
+                    type: integer
+                type: object
               updatedReplicas:
                 description: |-
                   UpdatedReplicas is the number of pods at the current StatefulSet
