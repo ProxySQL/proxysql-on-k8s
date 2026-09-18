@@ -135,6 +135,31 @@ func TestGolden(t *testing.T) {
 	checkGolden(t, "pod-template.yaml", podTemplateYAML)
 }
 
+// TestGoldenCoreSatellite pins the rendered bootstrap cnf for a
+// coreSatellite cluster, the same upgrade-stability contract TestGolden
+// gives direct mode. Regenerate with UPDATE_GOLDEN=1.
+func TestGoldenCoreSatellite(t *testing.T) {
+	cluster := goldenCluster()
+	cluster.Spec.Replicas = nil
+	cluster.Spec.Topology = &proxysqlv1alpha1.TopologySpec{
+		Mode: proxysqlv1alpha1.TopologyModeCoreSatellite,
+		Core: proxysqlv1alpha1.CoreSpec{
+			Zones: []proxysqlv1alpha1.CoreZone{
+				{Zone: "us-east-1a", Replicas: 2},
+				{Zone: "us-east-1b", Replicas: 1},
+			},
+		},
+		Satellites: proxysqlv1alpha1.SatellitesSpec{Replicas: 4},
+	}
+	b := New(cluster, newScheme(t), goldenPasswords)
+
+	cnf, err := b.BootstrapCnf(b.CorePodDNS())
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	checkGolden(t, "coresatellite-bootstrap.cnf", []byte(cnf))
+}
+
 // checkGolden compares got against testdata/golden/<name>. With
 // UPDATE_GOLDEN=1 set, it (re)writes the file instead of comparing.
 func checkGolden(t *testing.T, name string, got []byte) {

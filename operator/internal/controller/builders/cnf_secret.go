@@ -32,7 +32,14 @@ func (b *Builder) CnfSecretName() string { return b.Name() + "-cnf" }
 // passwords. Until v0.3.0 this lived in a ConfigMap named after the cluster;
 // the reconciler garbage-collects that leftover on upgrade.
 func (b *Builder) CnfSecret() (*corev1.Secret, error) {
-	cnf, err := b.BootstrapCnf(b.ProxySQLServerDNS())
+	// In coreSatellite mode every pod's peer list is the CORE pods: cores
+	// peer with each other, satellites pull from them and are deliberately
+	// absent so no core ever syncs from a satellite.
+	peers := b.ProxySQLServerDNS()
+	if b.Spec.IsCoreSatellite() {
+		peers = b.CorePodDNS()
+	}
+	cnf, err := b.BootstrapCnf(peers)
 	if err != nil {
 		return nil, err
 	}

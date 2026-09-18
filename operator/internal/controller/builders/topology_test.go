@@ -2,6 +2,7 @@ package builders
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -203,5 +204,76 @@ func TestDirectModeStatefulSetUnchanged(t *testing.T) {
 	}
 	if b.SatelliteStatefulSet("chk") != nil {
 		t.Error("SatelliteStatefulSet must be nil in direct mode")
+	}
+}
+
+func TestBootstrapCnf_CoreSatelliteSyncKeys(t *testing.T) {
+	b := New(coreSatelliteCluster(), newScheme(t), goldenPasswords)
+	cnf, err := b.BootstrapCnf(b.CorePodDNS())
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+
+	// Every pod — core and satellite — gets the SAME peer list: the cores.
+	for _, want := range []string{
+		`hostname="pxc-core-us-east-1a-0.pxc-headless.ns1.svc"`,
+		`hostname="pxc-core-us-east-1b-0.pxc-headless.ns1.svc"`,
+	} {
+		if !strings.Contains(cnf, want) {
+			t.Errorf("cnf missing peer %s", want)
+		}
+	}
+	if strings.Contains(cnf, "pxc-satellite") {
+		t.Error("satellites must never appear in proxysql_servers")
+	}
+
+	// Native sync must cover the modules the operator stops writing in
+	// #2319: variables and the pgsql tables.
+	for _, want := range []string{
+		"cluster_mysql_variables_diffs_before_sync",
+		"cluster_admin_variables_diffs_before_sync",
+		"cluster_pgsql_servers_diffs_before_sync",
+		"cluster_pgsql_users_diffs_before_sync",
+		"cluster_pgsql_query_rules_diffs_before_sync",
+		"cluster_pgsql_variables_diffs_before_sync",
+		"cluster_pgsql_servers_save_to_disk",
+	} {
+		if !strings.Contains(cnf, want) {
+			t.Errorf("cnf missing %s", want)
+		}
+	}
+}
+
+func TestBootstrapCnf_DirectModeHasNoExtraSyncKeys(t *testing.T) {
+	c := coreSatelliteCluster()
+	c.Spec.Topology = nil
+	three := int32(3)
+	c.Spec.Replicas = &three
+	b := New(c, newScheme(t), goldenPasswords)
+
+	cnf, err := b.BootstrapCnf(b.ProxySQLServerDNS())
+	if err != nil {
+		t.Fatalf("BootstrapCnf: %v", err)
+	}
+	// Adding these in direct mode would change the cnf of every existing
+	// multi-replica cluster and roll it once on upgrade.
+	for _, absent := range []string{
+		"cluster_mysql_variables_diffs_before_sync",
+		"cluster_pgsql_servers_diffs_before_sync",
+	} {
+		if strings.Contains(cnf, absent) {
+			t.Errorf("direct-mode cnf gained %s — existing clusters would roll on upgrade", absent)
+		}
+	}
+}
+
+func TestCnfSecret_CoreSatelliteSeedsCorePeers(t *testing.T) {
+	b := New(coreSatelliteCluster(), newScheme(t), goldenPasswords)
+	sec, err := b.CnfSecret()
+	if err != nil {
+		t.Fatalf("CnfSecret: %v", err)
+	}
+	if !strings.Contains(string(sec.Data["proxysql.cnf"]), "pxc-core-us-east-1a-0") {
+		t.Error("cnf Secret does not carry the core peer list")
 	}
 }
