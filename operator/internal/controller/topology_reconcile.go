@@ -160,12 +160,18 @@ func (r *ProxySQLClusterReconciler) statefulSetReady(ctx context.Context, ns, na
 // from core.zones, or the old single StatefulSet after a conversion.
 //
 // It waits for allReady on purpose: deleting the previous shape before the
-// replacement is serving would turn a topology change into an outage. Two
-// further guards keep the blast radius at exactly this cluster's own stale
-// objects: the list is scoped by the cluster label, and each candidate must
-// be controlled by THIS cluster (an object that merely carries the label —
-// a hand-made StatefulSet, one adopted from another cluster — is left
-// alone).
+// replacement is serving would turn a topology change into an outage. A
+// paused cluster never prunes at all: every set is scaled to 0, which
+// satisfies "ready" vacuously, and pause's contract is that Services,
+// Secrets and PVCs are retained — destroying a dropped zone's data while
+// the cluster is deliberately stopped is exactly what it promises not to
+// do. The prune resumes when the cluster does.
+//
+// Two further guards keep the blast radius at exactly this cluster's own
+// stale objects: the list is scoped by the cluster label, and each candidate
+// must be controlled by THIS cluster (an object that merely carries the
+// label — a hand-made StatefulSet, one adopted from another cluster — is
+// left alone).
 //
 // The pruned set's PVCs go with it: they are separate objects the
 // StatefulSet controller never garbage-collects, and the persisted
@@ -176,7 +182,9 @@ func (r *ProxySQLClusterReconciler) pruneStaleStatefulSets(
 	keep map[string]bool,
 	allReady bool,
 ) error {
-	if !allReady {
+	// spec.pause is a plain bool with no defaulting, so the raw spec is
+	// authoritative here.
+	if !allReady || cluster.Spec.Pause {
 		return nil
 	}
 	var list appsv1.StatefulSetList
@@ -338,15 +346,33 @@ func topologyDesiredReplicas(b *builders.Builder) int32 {
 	return b.Spec.CoreTotal() + b.Spec.Topology.Satellites.Replicas
 }
 
-// markerStatefulSetName is the StatefulSet whose marker annotations carry
-// this cluster's restart-checksum and TLS-rotation state across reconciles.
-// In coreSatellite mode there is no set named after the cluster, so the
-// first core set stands for the cluster: ensureStatefulSet writes the same
-// markers to every role set, so any one of them reads back the same values,
-// and the first core zone is the one that exists whenever the mode does.
-func markerStatefulSetName(b *builders.Builder) string {
-	if b.Spec.IsCoreSatellite() && len(b.Spec.Topology.Core.Zones) > 0 {
-		return b.CoreStatefulSetName(b.Spec.Topology.Core.Zones[0].Zone)
+// markerStatefulSetNames lists, in preference order, the StatefulSets whose
+// marker annotations could carry this cluster's restart-checksum and
+// TLS-rotation state. ensureStatefulSet writes the same object-level markers
+// to every set it applies, so any EXISTING one of these reads back the same
+// values — but which ones exist varies:
+//
+//   - a direct-mode cluster has only <cluster>;
+//   - a settled coreSatellite cluster has every role set;
+//   - a cluster mid-conversion (direct -> coreSatellite, or a new zone
+//     prepended to core.zones) has the OLD shape's sets and not yet the
+//     first-preference one.
+//
+// Reading a name that does not exist yet would hand the engines an empty
+// marker set, which reads as a fresh cluster: the cnf checksum would reset
+// to bootHash and, worse, an empty tls-applied marker makes
+// classifyTLSRotation ADOPT — silently marking an in-flight rotation applied
+// though no pod ever reloaded the certificate. Hence: first one that exists.
+func markerStatefulSetNames(b *builders.Builder) []string {
+	if !b.Spec.IsCoreSatellite() {
+		return []string{b.Name()}
 	}
-	return b.Name()
+	names := make([]string, 0, len(b.Spec.Topology.Core.Zones)+2)
+	for _, z := range b.Spec.Topology.Core.Zones {
+		names = append(names, b.CoreStatefulSetName(z.Zone))
+	}
+	names = append(names, b.SatelliteStatefulSetName())
+	// The pre-conversion single set, still carrying the live markers until
+	// the role sets take over and it is pruned.
+	return append(names, b.Name())
 }

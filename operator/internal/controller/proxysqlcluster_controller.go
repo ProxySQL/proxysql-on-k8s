@@ -73,6 +73,11 @@ type ProxySQLClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// persistentvolumeclaims: read + delete only — the operator never creates a
+// PVC (the StatefulSet controller does, from the volumeClaimTemplate). The
+// delete is deleteStatefulSetPVCs, which reclaims the claims a pruned
+// StatefulSet leaves behind; nothing else garbage-collects them.
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
 // pods: get;list;watch only — needed by resolveRestartChecksum's and
 // resolveTLSRotation's discoverPodEndpoints calls to find ready replicas to
 // push runtime variable changes / PROXYSQL RELOAD TLS to.
@@ -134,6 +139,10 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// than half-provisioned into a tier that would never converge.
 	if cluster.Spec.IsCoreSatellite() {
 		if verr := checkTopologyVersion(builders.DefaultedSpec(&cluster).Image.Tag); verr != nil {
+			// ObservedGeneration too: a refusal IS an observation of this
+			// generation, and a poller that reads a stale one would wait
+			// forever for a verdict that has already been reached.
+			cluster.Status.ObservedGeneration = cluster.Generation
 			cluster.Status.Phase = proxysqlv1alpha1.PhaseDegraded
 			r.setCondition(&cluster, condTypeDegraded, metav1.ConditionTrue, "TopologyUnsupportedVersion", verr.Error())
 			_ = r.Status().Update(ctx, &cluster)
@@ -347,18 +356,27 @@ type stsMarkers struct {
 }
 
 // currentStatefulSetAnnotations reads the marker annotations as they stood
-// before this reconcile, from the StatefulSet that carries them for this
-// cluster — the single set in direct mode, the first core set in
-// coreSatellite mode (see markerStatefulSetName; every role set is written
-// the same markers, so any one of them reads back the same state).
+// before this reconcile, from the first StatefulSet of this cluster that
+// actually EXISTS (see markerStatefulSetNames — every set this operator
+// applies carries the same markers, but which sets exist depends on where a
+// topology conversion has got to). Only a cluster with no StatefulSet at all
+// yields the zero value.
 func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Context, b *builders.Builder) (stsAnnotations, error) {
 	var ss appsv1.StatefulSet
-	getErr := r.Get(ctx, types.NamespacedName{Name: markerStatefulSetName(b), Namespace: b.Namespace()}, &ss)
-	if apierrors.IsNotFound(getErr) {
-		return stsAnnotations{}, nil
+	found := false
+	for _, name := range markerStatefulSetNames(b) {
+		getErr := r.Get(ctx, types.NamespacedName{Name: name, Namespace: b.Namespace()}, &ss)
+		if apierrors.IsNotFound(getErr) {
+			continue
+		}
+		if getErr != nil {
+			return stsAnnotations{}, fmt.Errorf("get statefulset: %w", getErr)
+		}
+		found = true
+		break
 	}
-	if getErr != nil {
-		return stsAnnotations{}, fmt.Errorf("get statefulset: %w", getErr)
+	if !found {
+		return stsAnnotations{}, nil
 	}
 	return stsAnnotations{
 		cnfChecksum:       ss.Spec.Template.Annotations[annotationCnfChecksum],

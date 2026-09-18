@@ -13,6 +13,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+
+	"github.com/ProxySQL/kubernetes/operator/internal/controller/builders"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -141,6 +143,39 @@ var _ = Describe("ProxySQLCluster topology validation", func() {
 	})
 })
 
+// ownedStatefulSet is a minimal StatefulSet controlled by the cluster and
+// labelled as one of its objects — the shape of a set the topology has
+// stopped calling for. It carries a "data" claim template so the prune's PVC
+// reclaim has something to match.
+func ownedStatefulSet(owner *proxysqlv1alpha1.ProxySQLCluster, n string) *appsv1.StatefulSet {
+	ss := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: n, Namespace: owner.Namespace,
+			Labels: map[string]string{clusterLabel: owner.Name},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas:    ptr.To(int32(1)),
+			ServiceName: owner.Name + "-headless",
+			Selector:    &metav1.LabelSelector{MatchLabels: map[string]string{"sts": n}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"sts": n}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "proxysql", Image: "proxysql/proxysql:3.0.11"}}},
+			},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
+				ObjectMeta: metav1.ObjectMeta{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+					},
+				},
+			}},
+		},
+	}
+	ExpectWithOffset(1, controllerutil.SetControllerReference(owner, ss, k8sClient.Scheme())).To(Succeed())
+	return ss
+}
+
 var _ = Describe("ProxySQLCluster coreSatellite reconcile", func() {
 	const ns = "default"
 	const name = "pxc-cs"
@@ -261,45 +296,15 @@ var _ = Describe("ProxySQLCluster coreSatellite reconcile", func() {
 		stale := name + "-core-us-east-1c"
 
 		// A set this cluster owns that the topology no longer calls for...
-		staleSS := &appsv1.StatefulSet{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: stale, Namespace: ns,
-				Labels: map[string]string{clusterLabel: name},
-			},
-			Spec: appsv1.StatefulSetSpec{
-				Replicas:    ptr.To(int32(1)),
-				ServiceName: name + "-headless",
-				Selector:    &metav1.LabelSelector{MatchLabels: map[string]string{"sts": stale}},
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"sts": stale}},
-					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "proxysql", Image: "proxysql/proxysql:3.0.11"}}},
-				},
-				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
-					ObjectMeta: metav1.ObjectMeta{Name: "data"},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
-						},
-					},
-				}},
-			},
-		}
 		owner := &proxysqlv1alpha1.ProxySQLCluster{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, owner)).To(Succeed())
-		Expect(controllerutil.SetControllerReference(owner, staleSS, k8sClient.Scheme())).To(Succeed())
-		Expect(k8sClient.Create(ctx, staleSS)).To(Succeed())
+		Expect(k8sClient.Create(ctx, ownedStatefulSet(owner, stale))).To(Succeed())
 
-		// ...a lookalike carrying the cluster label that this cluster does
-		// NOT control (adopted by hand, or another operator's): never ours
-		// to delete.
-		foreign := staleSS.DeepCopy()
-		foreign.ObjectMeta = metav1.ObjectMeta{
-			Name: name + "-foreign", Namespace: ns,
-			Labels: map[string]string{clusterLabel: name},
-		}
-		foreign.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"sts": foreign.Name}}
-		foreign.Spec.Template.Labels = map[string]string{"sts": foreign.Name}
+		// ...and a lookalike carrying the cluster label that this cluster
+		// does NOT control (adopted by hand, or another operator's): never
+		// ours to delete.
+		foreign := ownedStatefulSet(owner, name+"-foreign")
+		foreign.OwnerReferences = nil
 		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
 
 		// The pruned set's own PVC, plus a live set's PVC that must survive
@@ -356,6 +361,36 @@ var _ = Describe("ProxySQLCluster coreSatellite reconcile", func() {
 		}
 	})
 
+	It("does not prune a dropped zone while the cluster is paused", func() {
+		ctx := context.Background()
+		stale := name + "-core-us-east-1c"
+		owner := &proxysqlv1alpha1.ProxySQLCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, owner)).To(Succeed())
+		Expect(k8sClient.Create(ctx, ownedStatefulSet(owner, stale))).To(Succeed())
+
+		// Pause scales every role set to 0, which satisfies readiness
+		// vacuously — but pause promises Services, Secrets and PVCs are
+		// retained, so a stopped cluster must destroy nothing.
+		owner.Spec.Pause = true
+		Expect(k8sClient.Update(ctx, owner)).To(Succeed())
+		Expect(reconcileOnce(name)).To(Succeed())
+		Expect(*get(name + "-satellite").Spec.Replicas).To(Equal(int32(0)))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: stale, Namespace: ns}, &appsv1.StatefulSet{})).To(Succeed(),
+			"a paused cluster must not prune")
+
+		// Resuming puts the replicas back and the prune resumes with them.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, owner)).To(Succeed())
+		owner.Spec.Pause = false
+		Expect(k8sClient.Update(ctx, owner)).To(Succeed())
+		Expect(reconcileOnce(name)).To(Succeed())
+		for _, n := range roleSets {
+			markReady(n)
+		}
+		Expect(reconcileOnce(name)).To(Succeed())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: stale, Namespace: ns}, &appsv1.StatefulSet{}))).To(BeTrue())
+	})
+
 	It("degrades instead of creating pods when the image predates x.y.8", func() {
 		ctx := context.Background()
 		old := &proxysqlv1alpha1.ProxySQLCluster{
@@ -387,6 +422,74 @@ var _ = Describe("ProxySQLCluster coreSatellite reconcile", func() {
 		sec := &corev1.Secret{}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
 			types.NamespacedName{Name: "pxc-oldimg", Namespace: ns}, sec))).To(BeTrue())
+	})
+})
+
+var _ = Describe("ProxySQLCluster topology conversion markers", func() {
+	const ns = "default"
+	const name = "pxc-convert"
+
+	// The marker annotations (cnf checksum, vars/structural applied hashes,
+	// TLS rotation state) live on the StatefulSets. Mid-conversion the sets
+	// the NEW shape names do not exist yet, and reading a missing one hands
+	// the engines an empty marker set: the cnf checksum would reset to
+	// bootHash, and an empty tls-applied marker makes classifyTLSRotation
+	// ADOPT — marking an in-flight rotation applied though no pod ever
+	// reloaded the certificate. The read must therefore fall back to
+	// whichever set actually exists.
+	It("reads the markers off the pre-conversion StatefulSet before any role set exists", func() {
+		ctx := context.Background()
+		reconciler := &ProxySQLClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+		c := &proxysqlv1alpha1.ProxySQLCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       proxysqlv1alpha1.ProxySQLClusterSpec{Image: proxysqlv1alpha1.ImageSpec{Tag: "3.0.11"}},
+		}
+		Expect(k8sClient.Create(ctx, c)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, c)
+			for _, n := range []string{name, name + "-core-us-east-1a", name + "-satellite"} {
+				_ = k8sClient.Delete(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			_ = k8sClient.Delete(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}})
+			for _, n := range []string{name, name + "-cnf"} {
+				_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			for _, n := range []string{name, name + "-headless"} {
+				_ = k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+		})
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+		Expect(err).NotTo(HaveOccurred())
+
+		// The direct-mode set is the only one that exists. Stamp a sentinel
+		// TLS marker on it: an in-flight rotation the conversion must not
+		// lose sight of.
+		direct := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, direct)).To(Succeed())
+		direct.Annotations[annotationTLSAppliedHash] = "sentinel-rotation-hash"
+		Expect(k8sClient.Update(ctx, direct)).To(Succeed())
+		checksum := direct.Spec.Template.Annotations[annotationCnfChecksum]
+		Expect(checksum).NotTo(BeEmpty())
+
+		// Convert to coreSatellite. pxc-convert-core-us-east-1a does not
+		// exist yet — this reconcile is the one that creates it.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, c)).To(Succeed())
+		c.Spec.Topology = &proxysqlv1alpha1.TopologySpec{
+			Mode:       proxysqlv1alpha1.TopologyModeCoreSatellite,
+			Core:       proxysqlv1alpha1.CoreSpec{Zones: []proxysqlv1alpha1.CoreZone{{Zone: "us-east-1a", Replicas: 1}}},
+			Satellites: proxysqlv1alpha1.SatellitesSpec{Replicas: 1},
+		}
+		Expect(k8sClient.Update(ctx, c)).To(Succeed())
+
+		b := builders.New(c, k8sClient.Scheme(), builders.Passwords{})
+		cur, err := reconciler.currentStatefulSetAnnotations(ctx, b)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cur.tlsApplied).To(Equal("sentinel-rotation-hash"),
+			"an in-flight rotation must not be lost because the new shape's sets do not exist yet")
+		Expect(cur.cnfChecksum).To(Equal(checksum),
+			"the cnf checksum must not reset to bootHash mid-conversion")
 	})
 })
 
