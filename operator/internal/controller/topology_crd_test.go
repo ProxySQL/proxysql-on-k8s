@@ -491,6 +491,71 @@ var _ = Describe("ProxySQLCluster topology conversion markers", func() {
 		Expect(cur.cnfChecksum).To(Equal(checksum),
 			"the cnf checksum must not reset to bootHash mid-conversion")
 	})
+
+	It("reads the markers off the leftover role sets when converting BACK to direct", func() {
+		ctx := context.Background()
+		reconciler := &ProxySQLClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+		const rname = "pxc-revert"
+		c := &proxysqlv1alpha1.ProxySQLCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: rname, Namespace: ns},
+			Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+				Image: proxysqlv1alpha1.ImageSpec{Tag: "3.0.11"},
+				Topology: &proxysqlv1alpha1.TopologySpec{
+					Mode:       proxysqlv1alpha1.TopologyModeCoreSatellite,
+					Core:       proxysqlv1alpha1.CoreSpec{Zones: []proxysqlv1alpha1.CoreZone{{Zone: "us-east-1a", Replicas: 1}}},
+					Satellites: proxysqlv1alpha1.SatellitesSpec{Replicas: 1},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, c)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, c)
+			for _, n := range []string{rname, rname + "-core-us-east-1a", rname + "-satellite"} {
+				_ = k8sClient.Delete(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			for _, n := range []string{rname, rname + "-core", rname + "-satellite"} {
+				_ = k8sClient.Delete(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			for _, n := range []string{rname, rname + "-cnf"} {
+				_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			for _, n := range []string{rname, rname + "-headless"} {
+				_ = k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+		})
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: rname, Namespace: ns}})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Stamp a sentinel in-flight TLS rotation on a role set.
+		core := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: rname + "-core-us-east-1a", Namespace: ns}, core)).To(Succeed())
+		core.Annotations[annotationTLSAppliedHash] = "sentinel-reverse-hash"
+		Expect(k8sClient.Update(ctx, core)).To(Succeed())
+		checksum := core.Spec.Template.Annotations[annotationCnfChecksum]
+		Expect(checksum).NotTo(BeEmpty())
+
+		// Convert BACK to direct by dropping spec.topology entirely — the
+		// zone names are now unrecoverable from the spec, and <cluster>
+		// does not exist yet (the role sets are pruned only once it is
+		// Ready). A fixed-name lookup finds nothing and returns the zero
+		// value, which makes classifyTLSRotation ADOPT the open rotation.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: rname, Namespace: ns}, c)).To(Succeed())
+		c.Spec.Topology = nil
+		Expect(k8sClient.Update(ctx, c)).To(Succeed())
+		Expect(c.Spec.IsCoreSatellite()).To(BeFalse())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: rname, Namespace: ns},
+			&appsv1.StatefulSet{})).NotTo(Succeed(), "the bare set must not exist yet, or this spec proves nothing")
+
+		b := builders.New(c, k8sClient.Scheme(), builders.Passwords{})
+		cur, err := reconciler.currentStatefulSetAnnotations(ctx, b)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cur.tlsApplied).To(Equal("sentinel-reverse-hash"),
+			"an in-flight rotation must not be adopted because the direct-mode set does not exist yet")
+		Expect(cur.cnfChecksum).To(Equal(checksum),
+			"the cnf checksum must not reset to bootHash on the reverse conversion")
+	})
 })
 
 var _ = Describe("ProxySQLCluster direct-mode PDB regression", func() {

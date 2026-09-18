@@ -138,6 +138,10 @@ func TestGolden(t *testing.T) {
 // TestGoldenCoreSatellite pins the rendered bootstrap cnf for a
 // coreSatellite cluster, the same upgrade-stability contract TestGolden
 // gives direct mode. Regenerate with UPDATE_GOLDEN=1.
+//
+// It goes through CnfSecret() rather than calling BootstrapCnf(CorePodDNS())
+// directly: that shortcut pinned the peer list the test itself chose, so it
+// could not have caught CnfSecret picking a different derivation.
 func TestGoldenCoreSatellite(t *testing.T) {
 	cluster := goldenCluster()
 	cluster.Spec.Replicas = nil
@@ -153,11 +157,11 @@ func TestGoldenCoreSatellite(t *testing.T) {
 	}
 	b := New(cluster, newScheme(t), goldenPasswords)
 
-	cnf, err := b.BootstrapCnf(b.CorePodDNS())
+	sec, err := b.CnfSecret()
 	if err != nil {
-		t.Fatalf("BootstrapCnf: %v", err)
+		t.Fatalf("CnfSecret: %v", err)
 	}
-	checkGolden(t, "coresatellite-bootstrap.cnf", []byte(cnf))
+	checkGolden(t, "coresatellite-bootstrap.cnf", sec.Data["proxysql.cnf"])
 }
 
 // checkGolden compares got against testdata/golden/<name>. With

@@ -401,9 +401,24 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 	return strings.TrimRight(buf.String(), "\n") + "\n", nil
 }
 
-// ProxySQLServerDNS returns the stable per-pod DNS names for the StatefulSet
-// (used to populate proxysql_servers when replicas > 1).
+// ProxySQLServerDNS returns the stable per-pod DNS names that populate
+// proxysql_servers — the cluster's peer list. It is the ONE derivation:
+// both the bootstrap cnf (CnfSecret) and the runtime push
+// (autoPopulatedProxySQLServers -> syncProxySQLServers) read it, so a
+// config apply can never contradict what the pods booted with.
+//
+// In coreSatellite mode the peers are the CORE pods (CorePodDNS): cores
+// peer with each other, satellites pull from them and are deliberately
+// absent so no core ever syncs from a satellite. spec.replicas — which the
+// CRD defaults to 3 even when the user omits it — is ignored there, and the
+// `<cluster>-N` names it would produce do not exist: the bare StatefulSet
+// is pruned once the role sets are Ready.
+//
+// In direct mode: `<cluster>-{0..replicas-1}`, or nil when replicas <= 1.
 func (b *Builder) ProxySQLServerDNS() []string {
+	if b.Spec.IsCoreSatellite() {
+		return b.CorePodDNS()
+	}
 	if b.Spec.Replicas == nil || *b.Spec.Replicas <= 1 {
 		return nil
 	}

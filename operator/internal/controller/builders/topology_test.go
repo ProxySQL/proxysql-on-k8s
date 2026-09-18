@@ -278,6 +278,29 @@ func TestCnfSecret_CoreSatelliteSeedsCorePeers(t *testing.T) {
 	}
 }
 
+// ProxySQLServerDNS is the ONE peer derivation: the bootstrap cnf and the
+// runtime proxysql_servers push both read it, so it must already be the core
+// pods in coreSatellite mode. A parallel `<cluster>-N` derivation elsewhere
+// is what let the first ProxySQLConfig apply DELETE the real cores.
+func TestProxySQLServerDNS_CoreSatelliteIsCorePodDNS(t *testing.T) {
+	b := New(coreSatelliteCluster(), newScheme(t), goldenPasswords)
+	// spec.replicas is omitted above, so DefaultedSpec fills in 3 — the
+	// value the removed direct-mode derivation would have used.
+	if b.Spec.Replicas == nil || *b.Spec.Replicas != 3 {
+		t.Fatalf("test setup: defaulted spec.replicas = %v, want 3", b.Spec.Replicas)
+	}
+	got := b.ProxySQLServerDNS()
+	want := b.CorePodDNS()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ProxySQLServerDNS = %v, want CorePodDNS %v", got, want)
+	}
+	for _, h := range got {
+		if strings.HasPrefix(h, "pxc-0.") || strings.HasPrefix(h, "pxc-1.") || strings.HasPrefix(h, "pxc-2.") {
+			t.Errorf("peer %q is a direct-mode name: that pod does not exist in coreSatellite mode", h)
+		}
+	}
+}
+
 func TestClientServiceSelector(t *testing.T) {
 	b := New(coreSatelliteCluster(), newScheme(t), goldenPasswords)
 	// serveTraffic defaults true: the client Service selects every pod, so

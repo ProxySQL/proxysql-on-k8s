@@ -358,6 +358,11 @@ func topologyDesiredReplicas(b *builders.Builder) int32 {
 //     prepended to core.zones) has the OLD shape's sets and not yet the
 //     first-preference one.
 //
+// The REVERSE conversion (coreSatellite -> direct) is deliberately NOT
+// covered here: spec.topology is usually deleted outright, so the live core
+// sets' zone names are unrecoverable from the spec. currentStatefulSetAnnotations
+// falls back to a label-scoped List when none of these names exists.
+//
 // Reading a name that does not exist yet would hand the engines an empty
 // marker set, which reads as a fresh cluster: the cnf checksum would reset
 // to bootHash and, worse, an empty tls-applied marker makes

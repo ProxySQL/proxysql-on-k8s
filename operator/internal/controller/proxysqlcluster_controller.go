@@ -361,6 +361,16 @@ type stsMarkers struct {
 // applies carries the same markers, but which sets exist depends on where a
 // topology conversion has got to). Only a cluster with no StatefulSet at all
 // yields the zero value.
+//
+// The name list cannot cover the REVERSE conversion (coreSatellite ->
+// direct): spec.topology is typically removed outright, so the zone names of
+// the still-live core sets are no longer recoverable from the spec, while
+// <cluster> does not exist yet — this reconcile is the one creating it. So
+// when nothing named is found, fall back to a label-scoped List of this
+// cluster's operator-owned sets. Missing it would hand the engines a zero
+// marker set: classifyTLSRotation("") ADOPTS, marking an in-flight rotation
+// applied though no pod ever ran PROXYSQL RELOAD TLS, and the cnf checksum
+// resets to bootHash.
 func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Context, b *builders.Builder) (stsAnnotations, error) {
 	var ss appsv1.StatefulSet
 	found := false
@@ -376,6 +386,16 @@ func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Co
 		break
 	}
 	if !found {
+		leftover, listErr := r.leftoverMarkerStatefulSet(ctx, b)
+		if listErr != nil {
+			return stsAnnotations{}, listErr
+		}
+		if leftover != nil {
+			ss = *leftover
+			found = true
+		}
+	}
+	if !found {
 		return stsAnnotations{}, nil
 	}
 	return stsAnnotations{
@@ -386,6 +406,32 @@ func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Co
 		tlsRotationState:  ss.Annotations[annotationTLSRotationState],
 		tlsRestart:        ss.Spec.Template.Annotations[builders.TLSRestartAnnotation],
 	}, nil
+}
+
+// leftoverMarkerStatefulSet returns any operator-owned StatefulSet of this
+// cluster whose name markerStatefulSetNames could not predict — the role sets
+// of the shape being converted AWAY from. Selection is by name order so the
+// choice is deterministic; every set this operator applies carries the same
+// markers, so which one is picked does not change the values read back.
+// Returns nil when the cluster genuinely has no StatefulSet.
+func (r *ProxySQLClusterReconciler) leftoverMarkerStatefulSet(ctx context.Context, b *builders.Builder) (*appsv1.StatefulSet, error) {
+	var list appsv1.StatefulSetList
+	if err := r.List(ctx, &list,
+		client.InNamespace(b.Namespace()),
+		client.MatchingLabels(b.Labels()),
+	); err != nil {
+		return nil, fmt.Errorf("list statefulsets: %w", err)
+	}
+	if len(list.Items) == 0 {
+		return nil, nil
+	}
+	best := 0
+	for i := range list.Items {
+		if list.Items[i].Name < list.Items[best].Name {
+			best = i
+		}
+	}
+	return &list.Items[best], nil
 }
 
 // resolvePasswords reads the admin/radmin/monitor passwords from the auth Secret.
