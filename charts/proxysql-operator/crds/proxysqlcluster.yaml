@@ -2811,13 +2811,14 @@ spec:
                   rule: self.mode != 'coreSatellite' || (has(self.core) && has(self.core.zones)
                     && size(self.core.zones) > 0)
                 - message: core.zones entries must have unique zone values
-                  rule: '!has(self.core) || !has(self.core.zones) || self.core.zones.all(z,
-                    self.core.zones.exists_one(o, o.zone == z.zone))'
+                  rule: self.mode != 'coreSatellite' || !has(self.core) || !has(self.core.zones)
+                    || self.core.zones.all(z, self.core.zones.exists_one(o, o.zone
+                    == z.zone))
                 - message: core.serveTraffic=false with satellites.replicas=0 leaves
                     the cluster with no client endpoints
                   rule: self.mode != 'coreSatellite' || !has(self.core) || !has(self.core.serveTraffic)
-                    || self.core.serveTraffic || (has(self.satellites) && self.satellites.replicas
-                    > 0)
+                    || self.core.serveTraffic || (has(self.satellites) && has(self.satellites.replicas)
+                    && self.satellites.replicas > 0)
               topologySpreadConstraints:
                 description: |-
                   TopologySpreadConstraints describes how the pods of this cluster spread

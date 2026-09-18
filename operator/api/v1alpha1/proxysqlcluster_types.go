@@ -276,8 +276,8 @@ const (
 // TopologySpec selects the cluster's propagation shape.
 //
 // +kubebuilder:validation:XValidation:rule="self.mode != 'coreSatellite' || (has(self.core) && has(self.core.zones) && size(self.core.zones) > 0)",message="coreSatellite requires at least one core.zones entry"
-// +kubebuilder:validation:XValidation:rule="!has(self.core) || !has(self.core.zones) || self.core.zones.all(z, self.core.zones.exists_one(o, o.zone == z.zone))",message="core.zones entries must have unique zone values"
-// +kubebuilder:validation:XValidation:rule="self.mode != 'coreSatellite' || !has(self.core) || !has(self.core.serveTraffic) || self.core.serveTraffic || (has(self.satellites) && self.satellites.replicas > 0)",message="core.serveTraffic=false with satellites.replicas=0 leaves the cluster with no client endpoints"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'coreSatellite' || !has(self.core) || !has(self.core.zones) || self.core.zones.all(z, self.core.zones.exists_one(o, o.zone == z.zone))",message="core.zones entries must have unique zone values"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'coreSatellite' || !has(self.core) || !has(self.core.serveTraffic) || self.core.serveTraffic || (has(self.satellites) && has(self.satellites.replicas) && self.satellites.replicas > 0)",message="core.serveTraffic=false with satellites.replicas=0 leaves the cluster with no client endpoints"
 type TopologySpec struct {
 	// Mode is "direct" (default) or "coreSatellite".
 	// +optional

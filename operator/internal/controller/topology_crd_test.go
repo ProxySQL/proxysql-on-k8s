@@ -94,6 +94,21 @@ var _ = Describe("ProxySQLCluster topology validation", func() {
 		Expect(err.Error()).To(ContainSubstring("zone"))
 	})
 
+	It("accepts duplicate core zones in direct mode (topology.core is inert there)", func() {
+		ctx := context.Background()
+		c := mk("topo-dupzone-direct", &proxysqlv1alpha1.TopologySpec{
+			Core: proxysqlv1alpha1.CoreSpec{
+				Zones: []proxysqlv1alpha1.CoreZone{
+					{Zone: "us-east-1a", Replicas: 1},
+					{Zone: "us-east-1a", Replicas: 1},
+				},
+			},
+		})
+		Expect(k8sClient.Create(ctx, c)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, c) })
+		Expect(c.Spec.Topology.Mode).To(Equal(proxysqlv1alpha1.TopologyModeDirect))
+	})
+
 	It("refuses serveTraffic=false with zero satellites", func() {
 		ctx := context.Background()
 		c := mk("topo-noendpoints", coreSatellite(func(t *proxysqlv1alpha1.TopologySpec) {
