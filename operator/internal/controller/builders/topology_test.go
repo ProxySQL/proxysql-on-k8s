@@ -277,3 +277,74 @@ func TestCnfSecret_CoreSatelliteSeedsCorePeers(t *testing.T) {
 		t.Error("cnf Secret does not carry the core peer list")
 	}
 }
+
+func TestClientServiceSelector(t *testing.T) {
+	b := New(coreSatelliteCluster(), newScheme(t), goldenPasswords)
+	// serveTraffic defaults true: the client Service selects every pod, so
+	// it must NOT carry a role key.
+	if _, ok := b.Service().Spec.Selector["proxysql.com/role"]; ok {
+		t.Error("serveTraffic=true selector must not pin a role")
+	}
+
+	c := coreSatelliteCluster()
+	f := false
+	c.Spec.Topology.Core.ServeTraffic = &f
+	b2 := New(c, newScheme(t), goldenPasswords)
+	if got := b2.Service().Spec.Selector["proxysql.com/role"]; got != "satellite" {
+		t.Errorf("serveTraffic=false selector role = %q, want satellite", got)
+	}
+	// The headless Service always covers every pod: it is the StatefulSets'
+	// serviceName and the DNS cluster sync relies on.
+	if _, ok := b2.HeadlessService().Spec.Selector["proxysql.com/role"]; ok {
+		t.Error("headless Service must select every pod regardless of role")
+	}
+}
+
+func TestRolePDBs(t *testing.T) {
+	b := New(coreSatelliteCluster(), newScheme(t), goldenPasswords)
+
+	core := b.CorePDB()
+	if core == nil {
+		t.Fatal("CorePDB = nil, want a PDB for 3 core pods")
+	}
+	if core.Name != "pxc-core" {
+		t.Errorf("core PDB name = %q, want pxc-core", core.Name)
+	}
+	// Cluster-wide, not per zone: at most one core unavailable anywhere.
+	if core.Spec.MaxUnavailable == nil || core.Spec.MaxUnavailable.IntValue() != 1 {
+		t.Errorf("core PDB maxUnavailable = %v, want 1", core.Spec.MaxUnavailable)
+	}
+	if got := core.Spec.Selector.MatchLabels["proxysql.com/role"]; got != "core" {
+		t.Errorf("core PDB selects role %q, want core", got)
+	}
+	if _, ok := core.Spec.Selector.MatchLabels["proxysql.com/core-zone"]; ok {
+		t.Error("core PDB must span all zones, not one")
+	}
+
+	sat := b.SatellitePDB()
+	if sat == nil || sat.Name != "pxc-satellite" {
+		t.Fatalf("SatellitePDB = %v, want pxc-satellite", sat)
+	}
+	if sat.Spec.MinAvailable == nil || sat.Spec.MinAvailable.IntValue() != 3 {
+		t.Errorf("satellite PDB minAvailable = %v, want 3 (replicas-1)", sat.Spec.MinAvailable)
+	}
+
+	// The single-StatefulSet PDB must not also exist in this mode.
+	if b.PodDisruptionBudget() != nil {
+		t.Error("PodDisruptionBudget() must be nil in coreSatellite mode")
+	}
+}
+
+func TestRolePDBs_NilInDirectMode(t *testing.T) {
+	c := coreSatelliteCluster()
+	c.Spec.Topology = nil
+	three := int32(3)
+	c.Spec.Replicas = &three
+	b := New(c, newScheme(t), goldenPasswords)
+	if b.CorePDB() != nil || b.SatellitePDB() != nil {
+		t.Error("role PDBs must be nil in direct mode")
+	}
+	if b.PodDisruptionBudget() == nil {
+		t.Error("direct mode still needs its single PDB")
+	}
+}

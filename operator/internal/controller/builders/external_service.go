@@ -51,7 +51,7 @@ func (b *Builder) ExternalService() *corev1.Service {
 		},
 		Spec: corev1.ServiceSpec{
 			Type:                  externalServiceType(ext),
-			Selector:              b.SelectorLabels(),
+			Selector:              b.ClientServiceSelector(),
 			Ports:                 b.externalServicePorts(ext),
 			ExternalTrafficPolicy: ext.ExternalTrafficPolicy,
 			InternalTrafficPolicy: ext.InternalTrafficPolicy,

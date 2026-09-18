@@ -6,7 +6,9 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 )
@@ -179,4 +181,76 @@ func (b *Builder) coreZoneAffinity(zone string) *corev1.Affinity {
 			},
 		},
 	}
+}
+
+// ClientServiceSelector is the selector for the client-facing Services.
+// It is SelectorLabels() everywhere except a coreSatellite cluster with
+// core.serveTraffic=false, where only satellites take client traffic.
+//
+// The headless Service never uses this: it must resolve every pod, because
+// it is the StatefulSets' serviceName and the DNS ProxySQL Cluster sync
+// dials.
+func (b *Builder) ClientServiceSelector() map[string]string {
+	if !b.Spec.IsCoreSatellite() || b.ServeTrafficFromCore() {
+		return b.SelectorLabels()
+	}
+	return b.RoleSelectorLabels(RoleSatellite, "")
+}
+
+// CorePDB budgets the core tier as a whole: at most one core pod
+// unavailable across every zone, so a drain can never take out two config
+// sources at once. Nil outside coreSatellite mode, when the PDB is
+// disabled, or when there is only one core pod (nothing to budget).
+func (b *Builder) CorePDB() *policyv1.PodDisruptionBudget {
+	if !b.Spec.IsCoreSatellite() || !isTrue(b.Spec.PodDisruptionBudget.Enabled) {
+		return nil
+	}
+	if b.Spec.CoreTotal() <= 1 {
+		return nil
+	}
+	one := intstr.FromInt32(1)
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      b.Name() + "-core",
+			Namespace: b.Namespace(),
+			Labels:    b.Labels(),
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			Selector:       &metav1.LabelSelector{MatchLabels: b.roleOnlySelector(RoleCore)},
+			MaxUnavailable: &one,
+		},
+	}
+}
+
+// SatellitePDB keeps all but one satellite available, mirroring the
+// single-StatefulSet default. Nil outside coreSatellite mode, when the PDB
+// is disabled, or with <= 1 satellite.
+func (b *Builder) SatellitePDB() *policyv1.PodDisruptionBudget {
+	if !b.Spec.IsCoreSatellite() || !isTrue(b.Spec.PodDisruptionBudget.Enabled) {
+		return nil
+	}
+	n := b.Spec.Topology.Satellites.Replicas
+	if n <= 1 {
+		return nil
+	}
+	minAvail := intstr.FromInt32(n - 1)
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      b.SatelliteStatefulSetName(),
+			Namespace: b.Namespace(),
+			Labels:    b.Labels(),
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			Selector:     &metav1.LabelSelector{MatchLabels: b.roleOnlySelector(RoleSatellite)},
+			MinAvailable: &minAvail,
+		},
+	}
+}
+
+// roleOnlySelector selects a role across every zone (no core-zone key).
+func (b *Builder) roleOnlySelector(role Role) map[string]string {
+	l := make(map[string]string, 4)
+	maps.Copy(l, b.SelectorLabels())
+	l[RoleLabel] = string(role)
+	return l
 }
