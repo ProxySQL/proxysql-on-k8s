@@ -24,6 +24,12 @@ an auth Secret (created as `<name>` unless `spec.auth.secretName` references
 an existing one), an optional PodDisruptionBudget (`<name>`), and an optional
 ServiceMonitor (`<name>`).
 
+This is the **direct-mode** (default) object set. `spec.topology.mode:
+coreSatellite` replaces the single StatefulSet/PDB with one StatefulSet per
+core zone plus a satellite StatefulSet, and up to two role-scoped PDBs — see
+[Topology](#topology) and [Core/satellite
+topology](../architecture.md#coresatellite-topology).
+
 ## How defaults are applied
 
 Two layers of defaulting exist and the tables below distinguish them:
@@ -46,7 +52,8 @@ says which.
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `replicas` | `*int32` | `3` (CRD + operator) | min 1 | Number of ProxySQL control-plane pods. |
+| `replicas` | `*int32` | `3` (CRD + operator) | min 1 | Number of ProxySQL control-plane pods. **Ignored in coreSatellite mode** — see [Topology](#topology). |
+| `topology` | `*TopologySpec` | `nil` (direct mode) | CEL rules, see [Topology](#topology) | Selects between the default single-StatefulSet "direct" shape and the per-AZ "coreSatellite" shape. |
 | `pause` | `bool` | `false` | — | Scales the StatefulSet to 0 while retaining Services/Secrets/PVCs; never mutates `replicas`. See [Pausing a cluster](../user-guide/clusters.md#pausing-a-cluster). |
 | `image` | `ImageSpec` | see [Image](#image) | — | ProxySQL container image. |
 | `imagePullSecrets` | `[]LocalObjectReference` | `[]` | — | Pull secrets for the pod. |
@@ -78,6 +85,73 @@ says which.
 | `image.repository` | `string` | `proxysql/proxysql` (CRD + operator) | — | Image repository. |
 | `image.tag` | `string` | `"3.0"` (CRD + operator) | — | Image tag. |
 | `image.pullPolicy` | `corev1.PullPolicy` | `IfNotPresent` (CRD + operator) | `Always`, `IfNotPresent`, `Never` | Pull policy. |
+
+### Topology
+
+`spec.topology` (pointer; `nil` = direct mode) selects the cluster's pod
+layout and propagation shape. Direct mode — `nil`, or `mode: direct` — is
+the historical single-StatefulSet shape every cluster used before this
+field existed, and stays byte-identical when `topology` is absent.
+coreSatellite splits the cluster into per-AZ core StatefulSets plus one
+satellite StatefulSet. See [Core/satellite
+topology](../architecture.md#coresatellite-topology) for the full object
+layout and design rationale; this section is the field contract.
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `topology.mode` | `string` | `direct` (CRD) | `Enum: direct, coreSatellite` | Selects the shape. |
+| `topology.core` | `CoreSpec` | see below | — | The operator-written tier. Ignored in direct mode. |
+| `topology.satellites` | `SatellitesSpec` | see below | — | The tier that pulls configuration from the core via ProxySQL Cluster sync. Ignored in direct mode. |
+
+`CoreSpec`:
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `topology.core.zones` | `[]CoreZone` | `[]` | max 9 items | One entry per availability zone; each becomes its own hard-pinned StatefulSet. See [why one StatefulSet per zone](../architecture.md#coresatellite-topology) — a `topologySpreadConstraint` cannot express an exact per-zone count. |
+| `topology.core.serveTraffic` | `*bool` | `true` (CRD) | — | Puts core pods behind the client Services alongside satellites. Set `false` for a dedicated config tier isolated from client load — then only satellites serve client traffic. |
+
+`CoreZone` (`topology.core.zones[]`):
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `zone` | `string` | — | required, 1–63 chars, pattern `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` | The `topology.kubernetes.io/zone` value the core StatefulSet is `nodeAffinity`-pinned to, e.g. `us-east-1a`. |
+| `replicas` | `int32` | — | required, 1–9 | Core pod count for this zone. A pod that can't be scheduled in its zone stays `Pending` — the operator never relocates it. |
+
+`SatellitesSpec`:
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `topology.satellites.replicas` | `int32` | `0` | 0–1000 | Satellite pod count. In coreSatellite mode this replaces `spec.replicas` as the scaling target; placement follows `spec.affinity` / `spec.topologySpreadConstraints` like any direct-mode pod. |
+
+#### Admission rules (CEL)
+
+| Rule | Message |
+|---|---|
+| `mode: coreSatellite` requires at least one `core.zones` entry | `coreSatellite requires at least one core.zones entry` |
+| Every `core.zones[].zone` value must be unique | `core.zones entries must have unique zone values` |
+| `core.serveTraffic: false` with `satellites.replicas: 0` leaves the cluster with no client endpoint at all | `core.serveTraffic=false with satellites.replicas=0 leaves the cluster with no client endpoints` |
+
+All three rules are scoped to `mode: coreSatellite` — `topology.core` /
+`topology.satellites` are inert (unvalidated) in direct mode, so a
+direct-mode cluster can carry a leftover or template-supplied `topology`
+block with duplicate zones, for instance, without being rejected.
+
+#### Version floor
+
+coreSatellite requires ProxySQL **≥ x.y.8** in every supported series
+(3.0.8, 3.1.8, 4.0.8) — the patch release that first shipped PostgreSQL
+Cluster Sync (upstream ProxySQL #5297), which the satellite tier's pull
+path depends on. This is **not** a CEL rule (an image tag can't be parsed
+reliably at admission — digests, mirrors, vendor suffixes): the reconciler
+checks `spec.image.tag` against the floor on every reconcile of a
+coreSatellite cluster, and below it sets `Degraded=True`, reason
+`TopologyUnsupportedVersion`, creating no objects for the cluster at all
+(not even the auth Secret). A tag the operator cannot parse as
+`major.minor.patch` — a digest pin, `latest`, `3.0`, a private mirror's own
+tag, a calendar-style tag like `2026.04.1` — is allowed rather than
+refused; only a tag that positively parses as `major.minor.patch` (with a
+1–99 major, ruling out four-digit calendar tags) and reads below `x.y.8` is
+rejected. Direct-mode clusters never run this check.
 
 ### Auth
 
@@ -834,10 +908,37 @@ just landed.
 | `replicas` | `int32` | Desired replica count (from the defaulted spec). |
 | `readyReplicas` | `int32` | Ready replicas of the underlying StatefulSet. |
 | `updatedReplicas` | `int32` | Pods at the current StatefulSet revision. |
+| `topology` | `*TopologyStatus` | The reconciled core/satellite shape. `nil` for direct-mode clusters, so their status stays byte-identical to before this field existed. See [Topology status](#topology-status). |
 | `phase` | `string` | Coarse single-word projection for dashboards; see table below. Conditions remain the source of truth. |
 | `endpoints` | `*ClusterEndpoints` | In-cluster DNS `host:port` per enabled surface, pointing at the regular Service: `mysql`, `pgsql`, `admin`, `web`, `metrics`, plus `external` — see below. Empty field = surface disabled (`admin` is always set). Host form: `<name>.<namespace>.svc`. |
 | `adminSecretName` | `string` | The auth Secret the operator wired in (created or referenced). |
 | `conditions` | `[]metav1.Condition` | `Available`, `Progressing`, `Degraded`, `Paused`, `ServiceMonitorReady` — full reason inventory in the [status reference](status.md). |
+
+### Topology status
+
+Populated only for coreSatellite clusters (`spec.topology.mode:
+coreSatellite`); `nil` otherwise.
+
+| Field | Type | Description |
+|---|---|---|
+| `topology.mode` | `string` | The reconciled topology mode (`coreSatellite`). |
+| `topology.coreZones` | `[]CoreZoneStatus` | One entry per core StatefulSet, in `spec.topology.core.zones` order. |
+| `topology.satelliteReplicas` | `int32` | Desired satellite count (`spec.topology.satellites.replicas`). |
+| `topology.satelliteReadyReplicas` | `int32` | The satellite StatefulSet's ready replica count. |
+
+`CoreZoneStatus` (`topology.coreZones[]`):
+
+| Field | Type | Description |
+|---|---|---|
+| `zone` | `string` | The `topology.kubernetes.io/zone` value this core StatefulSet is pinned to. |
+| `desiredReplicas` | `int32` | Core pod count requested for this zone. |
+| `readyReplicas` | `int32` | This zone's core StatefulSet's ready count. `readyReplicas` staying below `desiredReplicas` with pods stuck `Pending` means the zone can't currently host them — by design the operator never relocates a pinned core pod to a different zone. |
+
+`status.replicas` in coreSatellite mode is the sum of every core zone's
+`replicas` plus `satellites.replicas` (`spec.replicas` is ignored, per
+[Topology](#topology)); `status.readyReplicas` /
+`status.updatedReplicas` are summed the same way across every role
+StatefulSet.
 
 ### `endpoints.external`
 

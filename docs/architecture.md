@@ -84,6 +84,98 @@ external pollers):
   regular Service. A field is empty when that surface is disabled, so a
   consumer never has to re-derive Service names and defaulted ports.
 
+### Core/satellite topology
+
+`spec.topology` (nil by default) selects between two shapes for how a
+`ProxySQLCluster`'s pods are laid out. Everything above this subsection
+describes **direct** mode, `spec.topology`'s default and the only mode
+before this release: a single StatefulSet, every pod written to directly,
+byte-identical to a cluster with no `topology` field at all.
+
+**coreSatellite** (`spec.topology.mode: coreSatellite`) splits the cluster
+into two tiers instead:
+
+- **Core** — `spec.topology.core.zones`, a list of `{zone, replicas}`
+  entries, each rendered as its own StatefulSet
+  (`<cluster>-core-<zone>`) hard-pinned to that zone via `nodeAffinity` on
+  `topology.kubernetes.io/zone`. **One StatefulSet per zone, not one
+  StatefulSet with a spread constraint, because a
+  `topologySpreadConstraint` only *bounds skew* between domains — it
+  cannot place an exact count in a *named* zone.** Wanting "2 in
+  us-east-1a, 1 in us-east-1b" needs two hard-pinned StatefulSets; a
+  spread constraint can only ask for "roughly even across whichever zones
+  the scheduler finds," which is a different guarantee. Within a zone, the
+  core StatefulSet also carries a `ScheduleAnyway` spread constraint on
+  `kubernetes.io/hostname` (`maxSkew: 1`) so replicas of the same zone
+  don't pile onto one node.
+- **Satellite** — `spec.topology.satellites.replicas`, one StatefulSet
+  (`<cluster>-satellite`). Placement is ordinary: whatever
+  `spec.affinity` / `spec.topologySpreadConstraints` say, the same fields
+  a direct-mode cluster uses.
+
+**A pinned core pod that cannot be scheduled in its zone stays `Pending` —
+the operator never relocates it.** This is deliberate: `topology.core.zones`
+is the buyer's chosen layout, and silently moving a pod to a different zone
+when the named one is full or cordoned would substitute the operator's
+judgment for a placement decision that was made explicitly. `status.topology
+.coreZones[].readyReplicas` below `desiredReplicas` with pods `Pending` is
+the signal that a zone can't currently host what was asked of it.
+
+**Objects shared across both tiers:**
+
+| Object | Scope | Notes |
+| --- | --- | --- |
+| Headless Service (`<cluster>-headless`) | every pod, core and satellite | Selector is unchanged (`SelectorLabels()`, no role narrowing) — it's the StatefulSets' `serviceName` (so every pod needs the DNS identity) and the peer-discovery Service ProxySQL Cluster sync dials, so it must resolve everyone regardless of role. |
+| Bootstrap cnf (`<cluster>-cnf`) | every pod | One shared cnf, same as direct mode. In coreSatellite mode, `proxysql_servers` is seeded from `CorePodDNS()` — **core pods only**, not satellites — so both tiers' `ProxySQL Cluster sync` converges toward the core as the source of truth. The admin section also gets the *full* `cluster_*_save_to_disk` / `cluster_*_diffs_before_sync` set (mysql/admin/pgsql variables, servers, users, query rules — 12 keys), on top of the pre-existing `clusterSync` block direct mode already renders when `replicas > 1`. |
+| `proxysql.com/role` label (`core` \| `satellite`), `proxysql.com/core-zone` label (core only) | every pod, core and satellite | Present **only** in coreSatellite mode — direct-mode objects gain neither label, keeping them byte-identical. These are also each role StatefulSet's pod-template labels and selector. |
+
+**Client-facing Services and PDBs become role-aware:**
+
+- The regular (`<cluster>`) and external (`<cluster>-external`) Services'
+  selector is core+satellite by default (`core.serveTraffic` defaults
+  `true`), but narrows to satellites only when `core.serveTraffic: false` —
+  a dedicated config tier isolated from client load.
+- In place of the single `<cluster>` PodDisruptionBudget, coreSatellite
+  mode creates up to two: `<cluster>-core` (selects the core role across
+  *every* zone, `maxUnavailable: 1` — a drain can never take out two config
+  sources cluster-wide) and `<cluster>-satellite` (selects the satellite
+  role, `minAvailable: replicas - 1`, mirroring direct mode's default
+  policy). Either is omitted under the same conditions as the direct-mode
+  PDB: disabled, or ≤ 1 pod in that tier to budget.
+
+**Version floor.** coreSatellite requires ProxySQL ≥ x.y.8 in every
+supported series (3.0.8, 3.1.8, 4.0.8) — the patch release that first
+shipped PostgreSQL Cluster Sync (upstream ProxySQL #5297), which the
+satellite tier's pull path depends on. Below that floor the reconciler sets
+`Degraded=True`, reason `TopologyUnsupportedVersion`, and creates **no**
+objects for the cluster at all (not even the auth Secret) rather than
+half-provisioning it. An image tag the operator cannot parse as
+`major.minor.patch` — a digest pin, `latest`, a private mirror's own
+scheme, a calendar-style tag — is deliberately **allowed**: refusing every
+unparseable tag would block legitimate mirrors on a check that can't tell
+them apart from a genuinely old release, and the SaaS platform validates
+the version up front where it knows the real image catalog.
+
+**Propagation is unchanged in this release.** Everything above is new
+*objects*: per-zone core StatefulSets, a satellite StatefulSet, role
+labels, role-aware Services and PDBs, and a cnf carrying the core peer
+list. What is **not** new is how configuration reaches a pod — see [Why
+write-to-all instead of letting ProxySQL Cluster sync handle
+it?](#why-write-to-all-instead-of-letting-proxysql-cluster-sync-handle-it)
+below: the operator still writes directly to every ready pod the cluster
+has, satellites included, exactly as it does in direct mode today. A
+follow-up (#2319) narrows that write path to the core tier only, with
+satellites relying exclusively on ProxySQL Cluster sync to pull what the
+core has — the change the object layout in this release is building
+toward, not one it makes yet.
+
+`status.topology` (nil for direct-mode clusters, so their status stays
+byte-identical) reports the reconciled shape: `mode`, one `coreZones[]`
+entry per zone (`zone`, `desiredReplicas`, `readyReplicas`), and
+`satelliteReplicas` / `satelliteReadyReplicas`. See the [CRD
+reference](reference/proxysqlcluster.md#topology) for the full field
+tables, CEL rules, and defaults.
+
 ### `ProxySQLConfig` — the declarative configuration
 
 What it represents: the set of `mysql_servers`, `mysql_users`,
@@ -288,6 +380,15 @@ directly**. Two reasons:
    sync tick to refill. The operator's pod-watch shortcut writes the
    config immediately. Cluster sync still operates as the
    belt-and-braces backup.
+
+This still holds for a coreSatellite cluster today: pod discovery selects
+every ready pod carrying `proxysql.com/cluster=<name>` with no role
+narrowing, so the operator writes to satellite pods exactly as it writes to
+core pods — see [Core/satellite topology](#coresatellite-topology). That is
+intentionally not yet the "core only" design the object layout is shaped
+for; #2319 is the follow-up that stops writing to satellites and leans on
+cluster sync — the mechanism described in this section — to get them their
+configuration instead.
 
 ### Why is the bootstrap `proxysql.cnf` rendered into a Secret?
 
