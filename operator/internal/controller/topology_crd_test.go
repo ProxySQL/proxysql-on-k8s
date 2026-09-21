@@ -556,6 +556,86 @@ var _ = Describe("ProxySQLCluster topology conversion markers", func() {
 		Expect(cur.cnfChecksum).To(Equal(checksum),
 			"the cnf checksum must not reset to bootHash on the reverse conversion")
 	})
+
+	// The leftover lookup is a List by label, and every label it matches on
+	// is attacker-supplyable: a tenant can create a StatefulSet wearing all
+	// of this cluster's labels. Selection is by lowest name, so a foreign
+	// set named ahead of the real role sets would be the one read, and its
+	// markers would drive the rollout decision for a cluster it has nothing
+	// to do with. Ownership, not labels, is what makes a set ours.
+	It("ignores a label-matching StatefulSet this cluster does not own", func() {
+		ctx := context.Background()
+		reconciler := &ProxySQLClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+		const iname = "pxc-impostor"
+		c := &proxysqlv1alpha1.ProxySQLCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: iname, Namespace: ns},
+			Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+				Image: proxysqlv1alpha1.ImageSpec{Tag: "3.0.11"},
+				Topology: &proxysqlv1alpha1.TopologySpec{
+					Mode:       proxysqlv1alpha1.TopologyModeCoreSatellite,
+					Core:       proxysqlv1alpha1.CoreSpec{Zones: []proxysqlv1alpha1.CoreZone{{Zone: "us-east-1a", Replicas: 1}}},
+					Satellites: proxysqlv1alpha1.SatellitesSpec{Replicas: 1},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, c)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, c)
+			for _, n := range []string{iname, iname + "-core-us-east-1a", iname + "-satellite", "aaa-impostor"} {
+				_ = k8sClient.Delete(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			for _, n := range []string{iname, iname + "-core", iname + "-satellite"} {
+				_ = k8sClient.Delete(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			for _, n := range []string{iname, iname + "-cnf"} {
+				_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			for _, n := range []string{iname, iname + "-headless"} {
+				_ = k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+		})
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: iname, Namespace: ns}})
+		Expect(err).NotTo(HaveOccurred())
+
+		core := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: iname + "-core-us-east-1a", Namespace: ns}, core)).To(Succeed())
+		core.Annotations[annotationTLSAppliedHash] = "real-hash"
+		Expect(k8sClient.Update(ctx, core)).To(Succeed())
+		realChecksum := core.Spec.Template.Annotations[annotationCnfChecksum]
+		Expect(realChecksum).NotTo(BeEmpty())
+
+		// "aaa-impostor" sorts ahead of every real role set, so lowest-name
+		// selection picks it if ownership is not checked.
+		b := builders.New(c, k8sClient.Scheme(), builders.Passwords{})
+		impostor := core.DeepCopy()
+		impostor.ObjectMeta = metav1.ObjectMeta{
+			Name:        "aaa-impostor",
+			Namespace:   ns,
+			Labels:      b.Labels(),
+			Annotations: map[string]string{annotationTLSAppliedHash: "impostor-hash"},
+		}
+		impostor.Spec.Template.Annotations[annotationCnfChecksum] = "impostor-checksum"
+		impostor.ResourceVersion = ""
+		Expect(k8sClient.Create(ctx, impostor)).To(Succeed())
+		Expect(impostor.Name < iname+"-core-us-east-1a").To(BeTrue(),
+			"the impostor must sort first, or this spec proves nothing")
+
+		// Drop topology so the fixed-name lookup misses and the leftover
+		// path runs — the same path the reverse conversion depends on.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: iname, Namespace: ns}, c)).To(Succeed())
+		c.Spec.Topology = nil
+		Expect(k8sClient.Update(ctx, c)).To(Succeed())
+
+		b = builders.New(c, k8sClient.Scheme(), builders.Passwords{})
+		cur, err := reconciler.currentStatefulSetAnnotations(ctx, b)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cur.tlsApplied).To(Equal("real-hash"),
+			"markers must come from a set this cluster owns, never from a label-matching impostor")
+		Expect(cur.cnfChecksum).To(Equal(realChecksum),
+			"an impostor's cnf checksum must not drive this cluster's rollout decision")
+	})
 })
 
 var _ = Describe("ProxySQLCluster direct-mode PDB regression", func() {

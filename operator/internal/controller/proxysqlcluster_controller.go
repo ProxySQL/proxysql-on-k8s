@@ -414,6 +414,11 @@ func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Co
 // choice is deterministic; every set this operator applies carries the same
 // markers, so which one is picked does not change the values read back.
 // Returns nil when the cluster genuinely has no StatefulSet.
+//
+// Labels alone do not establish that a set is ours: every label this lists on
+// is spec-derived, so anyone who can create a StatefulSet in the namespace can
+// wear them, and lowest-name selection would then read that set's markers.
+// The controller reference is the authority, as it is in ensurePDBNamed.
 func (r *ProxySQLClusterReconciler) leftoverMarkerStatefulSet(ctx context.Context, b *builders.Builder) (*appsv1.StatefulSet, error) {
 	var list appsv1.StatefulSetList
 	if err := r.List(ctx, &list,
@@ -422,14 +427,17 @@ func (r *ProxySQLClusterReconciler) leftoverMarkerStatefulSet(ctx context.Contex
 	); err != nil {
 		return nil, fmt.Errorf("list statefulsets: %w", err)
 	}
-	if len(list.Items) == 0 {
-		return nil, nil
-	}
-	best := 0
+	best := -1
 	for i := range list.Items {
-		if list.Items[i].Name < list.Items[best].Name {
+		if !metav1.IsControlledBy(&list.Items[i], b.Cluster) {
+			continue
+		}
+		if best < 0 || list.Items[i].Name < list.Items[best].Name {
 			best = i
 		}
+	}
+	if best < 0 {
+		return nil, nil
 	}
 	return &list.Items[best], nil
 }

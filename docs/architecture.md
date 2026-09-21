@@ -86,6 +86,12 @@ external pollers):
 
 ### Core/satellite topology
 
+> **Upgrading to get this?** `spec.topology` is a new CRD field, and
+> `helm upgrade` never updates CRDs. Apply them yourself or the API
+> server strips `spec.topology` at admission — the cluster then comes up
+> silently in direct mode, with no error to explain why. See
+> [CRD handling](user-guide/installation.md#crd-handling).
+
 `spec.topology` (nil by default) selects between two shapes for how a
 `ProxySQLCluster`'s pods are laid out. Everything above this subsection
 describes **direct** mode, `spec.topology`'s default and the only mode
