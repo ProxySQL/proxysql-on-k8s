@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
@@ -369,5 +370,82 @@ func TestRolePDBs_NilInDirectMode(t *testing.T) {
 	}
 	if b.PodDisruptionBudget() == nil {
 		t.Error("direct mode still needs its single PDB")
+	}
+}
+
+// A core StatefulSet must be pinned to its zone WITHOUT discarding the
+// placement the user asked for. Overwriting spec.affinity wholesale silently
+// drops pod anti-affinity — the rule that keeps two config sources off one
+// node — so a cluster following the docs' own hardening advice would lose it
+// on conversion and never be told.
+func TestCoreStatefulSets_PreservesUserPlacement(t *testing.T) {
+	c := coreSatelliteCluster()
+	c.Spec.Affinity = &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				TopologyKey:   "kubernetes.io/hostname",
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"proxysql.com/cluster": "pxc"}},
+			}},
+		},
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key:      "workload",
+						Operator: corev1.NodeSelectorOpIn,
+						Values:   []string{"database"},
+					}},
+				}},
+			},
+		},
+	}
+	c.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew:           1,
+		TopologyKey:       "kubernetes.io/hostname",
+		WhenUnsatisfiable: corev1.DoNotSchedule,
+	}}
+
+	sets := New(c, newScheme(t), goldenPasswords).CoreStatefulSets("chk123")
+	if len(sets) == 0 {
+		t.Fatal("no core StatefulSets")
+	}
+	spec := sets[0].Spec.Template.Spec
+
+	if spec.Affinity == nil || spec.Affinity.PodAntiAffinity == nil ||
+		len(spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 1 {
+		t.Fatalf("user podAntiAffinity was dropped: %+v", spec.Affinity)
+	}
+
+	// The zone pin is ANDed into the user's own node term, not swapped for
+	// it: node selector TERMS are ORed, expressions within one term ANDed.
+	terms := spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 {
+		t.Fatalf("got %d node selector terms, want 1 (user's, with the zone ANDed in)", len(terms))
+	}
+	var sawWorkload, sawZone bool
+	for _, e := range terms[0].MatchExpressions {
+		switch e.Key {
+		case "workload":
+			sawWorkload = true
+		case ZoneTopologyKey:
+			sawZone = true
+			if len(e.Values) != 1 || e.Values[0] != "us-east-1a" {
+				t.Errorf("zone requirement = %v, want [us-east-1a]", e.Values)
+			}
+		}
+	}
+	if !sawWorkload {
+		t.Error("user node requirement was dropped")
+	}
+	if !sawZone {
+		t.Error("zone pin is missing — the core tier is no longer pinned")
+	}
+
+	// The operator's in-zone hostname spread is ADDITIVE to the user's.
+	if len(spec.TopologySpreadConstraints) != 2 {
+		t.Fatalf("got %d spread constraints, want 2 (user's + the operator's)", len(spec.TopologySpreadConstraints))
+	}
+	if spec.TopologySpreadConstraints[0].WhenUnsatisfiable != corev1.DoNotSchedule {
+		t.Error("the user's DoNotSchedule constraint was replaced by the operator's ScheduleAnyway")
 	}
 }

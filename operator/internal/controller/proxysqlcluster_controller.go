@@ -778,6 +778,38 @@ func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner
 // make the second of two calls undo the first (a nil CorePDB() deleting the
 // direct-mode <cluster> PDB in the same reconcile that created it). Each
 // call may only ever delete its OWN name.
+// pdbStillHasPods reports whether any pod this cluster owns still matches the
+// PDB's own selector. It is the "is this tier still serving?" question asked
+// of the object that knows best — the PDB's selector — rather than of a
+// StatefulSet name, so it answers correctly for both conversion directions
+// and for a tier whose set was already pruned but whose pods are terminating.
+//
+// A selector that cannot be parsed, or one that matches everything, would
+// hold the PDB forever; both are treated as "not held" so a genuine disable
+// still converges.
+func (r *ProxySQLClusterReconciler) pdbStillHasPods(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, pdb *policyv1.PodDisruptionBudget) (bool, error) {
+	if pdb.Spec.Selector == nil || len(pdb.Spec.Selector.MatchLabels)+len(pdb.Spec.Selector.MatchExpressions) == 0 {
+		return false, nil
+	}
+	sel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
+	if err != nil {
+		return false, nil
+	}
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(owner.Namespace),
+		client.MatchingLabelsSelector{Selector: sel},
+	); err != nil {
+		return false, fmt.Errorf("list pods for PDB %s: %w", pdb.Name, err)
+	}
+	for i := range pods.Items {
+		if pods.Items[i].DeletionTimestamp == nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *ProxySQLClusterReconciler) ensurePDBNamed(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, name string, desired *policyv1.PodDisruptionBudget) error {
 	if desired == nil {
 		// Disabled or single-replica: ensure any previously created PDB is removed.
@@ -791,6 +823,18 @@ func (r *ProxySQLClusterReconciler) ensurePDBNamed(ctx context.Context, owner *p
 		}
 		// Only delete if we own it.
 		if !metav1.IsControlledBy(existing, owner) {
+			return nil
+		}
+		// A mode conversion makes the OUTGOING tier's builder return nil
+		// one reconcile before that tier stops serving: the old StatefulSet
+		// survives until the replacements are Ready, which can take minutes
+		// or never. Deleting its PDB now strips disruption protection from
+		// the only pods actually taking traffic, and the incoming role PDBs
+		// cannot cover them — they select proxysql.com/role, which the old
+		// pods do not carry. Hold the PDB while its own pods are still up.
+		if held, herr := r.pdbStillHasPods(ctx, owner, existing); herr != nil {
+			return herr
+		} else if held {
 			return nil
 		}
 		return client.IgnoreNotFound(r.Delete(ctx, existing))

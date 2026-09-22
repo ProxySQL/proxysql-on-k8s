@@ -19,6 +19,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"errors"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 )
@@ -199,8 +203,13 @@ var _ = Describe("ProxySQLCluster coreSatellite reconcile", func() {
 	// markReady stamps a StatefulSet's status as fully ready. envtest runs no
 	// kubelet and no StatefulSet controller, so readiness is only ever what a
 	// test writes to the status subresource.
+	// A real StatefulSet controller only reports these once it has acted on
+	// the CURRENT spec, so observedGeneration must track .metadata.generation
+	// too: a status left at an older generation describes the pods of the
+	// previous template, and readiness gates a PVC-deleting prune.
 	markReady := func(n string) {
 		ss := get(n)
+		ss.Status.ObservedGeneration = ss.Generation
 		ss.Status.Replicas = *ss.Spec.Replicas
 		ss.Status.ReadyReplicas = *ss.Spec.Replicas
 		ss.Status.UpdatedReplicas = *ss.Spec.Replicas
@@ -389,6 +398,102 @@ var _ = Describe("ProxySQLCluster coreSatellite reconcile", func() {
 		Expect(reconcileOnce(name)).To(Succeed())
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
 			types.NamespacedName{Name: stale, Namespace: ns}, &appsv1.StatefulSet{}))).To(BeTrue())
+	})
+
+	// One `kubectl apply` that BOTH drops a zone and changes the pod
+	// template is the dangerous shape: the survivors' status still
+	// describes the previous generation's pods, so a readiness check that
+	// reads only readyReplicas says "ready" while not one replacement has
+	// rolled — and the prune it gates deletes PVCs.
+	It("does not prune on a stale status when the same apply also changed the pod template", func() {
+		ctx := context.Background()
+		stale := name + "-core-us-east-1d"
+		owner := &proxysqlv1alpha1.ProxySQLCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, owner)).To(Succeed())
+		Expect(k8sClient.Create(ctx, ownedStatefulSet(owner, stale))).To(Succeed())
+		Expect(reconcileOnce(name)).To(Succeed())
+
+		// Fully rolled at the CURRENT generation.
+		for _, n := range roleSets {
+			markReady(n)
+		}
+
+		// Now change the pod template. The operator rewrites each role set,
+		// bumping .metadata.generation, while .status still reports the old
+		// pods as ready — exactly what a real StatefulSet controller shows
+		// in the instant before it starts the rollout.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, owner)).To(Succeed())
+		owner.Spec.PodLabels = map[string]string{"rollout": "v2"}
+		Expect(k8sClient.Update(ctx, owner)).To(Succeed())
+		Expect(reconcileOnce(name)).To(Succeed())
+
+		for _, n := range roleSets {
+			ss := get(n)
+			Expect(ss.Status.ObservedGeneration).To(BeNumerically("<", ss.Generation),
+				"the status must lag the spec, or this spec proves nothing")
+		}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: stale, Namespace: ns},
+			&appsv1.StatefulSet{})).To(Succeed(),
+			"a mid-rollout status must not authorise a prune that deletes PVCs")
+
+		// Once the rollout actually completes, the prune proceeds.
+		for _, n := range roleSets {
+			markReady(n)
+		}
+		Expect(reconcileOnce(name)).To(Succeed())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: stale, Namespace: ns}, &appsv1.StatefulSet{}))).To(BeTrue(),
+			"the prune must still happen once the replacements have genuinely rolled")
+	})
+
+	// A PVC's name is derivable only from its StatefulSet, and the prune is
+	// driven by LISTING StatefulSets — so if the set is deleted first, any
+	// failure before the claims are marked orphans them with no reconcile
+	// able to find them again. Order is only observable when something
+	// fails in between, so this spec makes the PVC delete fail and asserts
+	// the StatefulSet SURVIVES, leaving the next reconcile able to retry.
+	It("keeps the StatefulSet when its PVCs cannot be deleted, so the claims stay reachable", func() {
+		ctx := context.Background()
+		stale := name + "-core-us-east-1e"
+		owner := &proxysqlv1alpha1.ProxySQLCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, owner)).To(Succeed())
+		Expect(k8sClient.Create(ctx, ownedStatefulSet(owner, stale))).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: stale, Namespace: ns}})
+		})
+
+		// The label is what deleteStatefulSetPVCs lists on. A real cluster
+		// gets it for free: the StatefulSet controller copies the set's
+		// spec.selector.matchLabels onto every claim built from a
+		// volumeClaimTemplate (upstream getPersistentVolumeClaims). envtest
+		// runs no StatefulSet controller, so the test supplies it by hand —
+		// this spec pins the ORDER, not the label inheritance.
+		pvcName := "data-" + stale + "-0"
+		Expect(k8sClient.Create(ctx, &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: pvcName, Namespace: ns, Labels: map[string]string{clusterLabel: name}},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+				},
+			},
+		})).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: pvcName, Namespace: ns}})
+		})
+
+		failing := &pvcDeleteFailsClient{Client: k8sClient}
+		r := &ProxySQLClusterReconciler{Client: failing, Scheme: k8sClient.Scheme()}
+		err := r.pruneStaleStatefulSets(ctx, owner, map[string]bool{}, true)
+		Expect(err).To(HaveOccurred(), "the PVC failure must surface so the reconcile retries")
+		Expect(failing.pvcDeletes).To(BeNumerically(">", 0), "the PVC delete must be ATTEMPTED")
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: stale, Namespace: ns},
+			&appsv1.StatefulSet{})).To(Succeed(),
+			"the set must survive a failed PVC delete: it is the only way back to the claim names")
+		pvc := &corev1.PersistentVolumeClaim{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: ns}, pvc)).To(Succeed())
+		Expect(pvc.DeletionTimestamp).To(BeNil())
 	})
 
 	It("degrades instead of creating pods when the image predates x.y.8", func() {
@@ -680,5 +785,100 @@ var _ = Describe("ProxySQLCluster direct-mode PDB regression", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, got)).To(Succeed())
 		Expect(got.Status.Topology).To(BeNil())
 		Expect(got.Status.Replicas).To(Equal(int32(3)))
+	})
+})
+
+// pvcDeleteFailsClient fails every PersistentVolumeClaim delete and counts the
+// attempts, so a spec can distinguish "PVCs first" from "StatefulSet first":
+// the two orders differ only when the PVC step fails.
+type pvcDeleteFailsClient struct {
+	client.Client
+	pvcDeletes int
+}
+
+func (c *pvcDeleteFailsClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+		c.pvcDeletes++
+		return apierrors.NewForbidden(
+			schema.GroupResource{Resource: "persistentvolumeclaims"}, obj.GetName(),
+			errors.New("simulated RBAC drift"))
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+var _ = Describe("ProxySQLCluster conversion PDB continuity", func() {
+	const ns = "default"
+	const name = "pxc-pdbconv"
+
+	// A conversion makes the OUTGOING tier's PDB builder return nil one
+	// reconcile before that tier stops serving: the old StatefulSet survives
+	// until the replacements are Ready, which can take minutes. Deleting its
+	// PDB then strips disruption protection from the only pods actually
+	// taking traffic, and the incoming role PDBs cannot cover them — they
+	// select proxysql.com/role, which the old pods do not carry. A node
+	// drain in that window can take the whole cluster down at once.
+	It("keeps the direct-mode PDB while its pods are still running mid-conversion", func() {
+		ctx := context.Background()
+		reconciler := &ProxySQLClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+		c := &proxysqlv1alpha1.ProxySQLCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+				Image:    proxysqlv1alpha1.ImageSpec{Tag: "3.0.11"},
+				Replicas: ptr.To(int32(3)),
+			},
+		}
+		Expect(k8sClient.Create(ctx, c)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, c)
+			for _, n := range []string{name, name + "-core-us-east-1a", name + "-satellite"} {
+				_ = k8sClient.Delete(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+				_ = k8sClient.Delete(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			_ = k8sClient.Delete(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name + "-core", Namespace: ns}})
+			for _, n := range []string{name, name + "-cnf"} {
+				_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+			for _, n := range []string{name, name + "-headless"} {
+				_ = k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: ns}})
+			}
+		})
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+		Expect(err).NotTo(HaveOccurred())
+
+		pdb := &policyv1.PodDisruptionBudget{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, pdb)).To(Succeed(),
+			"direct mode must have its PDB before we convert")
+
+		// A pod of the outgoing tier, wearing the direct-mode selector but
+		// NOT proxysql.com/role — exactly what the surviving pods look like.
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name + "-0", Namespace: ns,
+				Labels: pdb.Spec.Selector.MatchLabels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "proxysql", Image: "busybox"}}},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pod) })
+
+		// Convert to coreSatellite. The role sets are not Ready, so the
+		// direct-mode StatefulSet and its pods survive this reconcile.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, c)).To(Succeed())
+		c.Spec.Topology = &proxysqlv1alpha1.TopologySpec{
+			Mode:       proxysqlv1alpha1.TopologyModeCoreSatellite,
+			Core:       proxysqlv1alpha1.CoreSpec{Zones: []proxysqlv1alpha1.CoreZone{{Zone: "us-east-1a", Replicas: 3}}},
+			Satellites: proxysqlv1alpha1.SatellitesSpec{Replicas: 2},
+		}
+		Expect(k8sClient.Update(ctx, c)).To(Succeed())
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns},
+			&policyv1.PodDisruptionBudget{})).To(Succeed(),
+			"the outgoing PDB must survive while its own pods are still running")
 	})
 })

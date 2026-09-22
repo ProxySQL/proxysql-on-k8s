@@ -118,13 +118,18 @@ func (b *Builder) CoreStatefulSets(cnfChecksum string) []*appsv1.StatefulSet {
 	out := make([]*appsv1.StatefulSet, 0, len(zones))
 	for _, z := range zones {
 		ss := b.roleStatefulSet(cnfChecksum, RoleCore, z.Zone, z.Replicas)
-		ss.Spec.Template.Spec.Affinity = b.coreZoneAffinity(z.Zone)
-		ss.Spec.Template.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
-			MaxSkew:           1,
-			TopologyKey:       "kubernetes.io/hostname",
-			WhenUnsatisfiable: corev1.ScheduleAnyway,
-			LabelSelector:     &metav1.LabelSelector{MatchLabels: b.RoleSelectorLabels(RoleCore, z.Zone)},
-		}}
+		ss.Spec.Template.Spec.Affinity = b.coreZoneAffinity(z.Zone, ss.Spec.Template.Spec.Affinity)
+		// APPEND, never replace: a user's own spread constraints are the
+		// only expression of intent the operator has no substitute for.
+		// The in-zone hostname spread is additive to them.
+		ss.Spec.Template.Spec.TopologySpreadConstraints = append(
+			ss.Spec.Template.Spec.TopologySpreadConstraints,
+			corev1.TopologySpreadConstraint{
+				MaxSkew:           1,
+				TopologyKey:       "kubernetes.io/hostname",
+				WhenUnsatisfiable: corev1.ScheduleAnyway,
+				LabelSelector:     &metav1.LabelSelector{MatchLabels: b.RoleSelectorLabels(RoleCore, z.Zone)},
+			})
 		out = append(out, ss)
 	}
 	return out
@@ -172,20 +177,48 @@ func (b *Builder) roleStatefulSet(cnfChecksum string, role Role, zone string, re
 // coreZoneAffinity is the hard pin. Placement failure leaves pods Pending
 // on purpose: the buyer's layout is what gets deployed, and the SaaS
 // refuses an unschedulable zone before it ever reaches the CR.
-func (b *Builder) coreZoneAffinity(zone string) *corev1.Affinity {
-	return &corev1.Affinity{
-		NodeAffinity: &corev1.NodeAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-					MatchExpressions: []corev1.NodeSelectorRequirement{{
-						Key:      ZoneTopologyKey,
-						Operator: corev1.NodeSelectorOpIn,
-						Values:   []string{zone},
-					}},
-				}},
-			},
-		},
+// coreZoneAffinity pins a core StatefulSet to one zone while PRESERVING the
+// placement the user asked for in spec.affinity. Overwriting it wholesale
+// silently drops pod anti-affinity — the rule that keeps two config sources
+// off one node — so a cluster following the docs' own hardening advice would
+// lose it on conversion and never be told.
+//
+// The zone pin is a node requirement, and pod (anti-)affinity is a different
+// field entirely, so those carry through untouched. A user's own REQUIRED
+// node terms are ANDed with the zone rather than replaced: node selector
+// TERMS are ORed, while the expressions inside one term are ANDed, so the
+// zone requirement is appended to each of the user's terms.
+func (b *Builder) coreZoneAffinity(zone string, base *corev1.Affinity) *corev1.Affinity {
+	zoneReq := corev1.NodeSelectorRequirement{
+		Key:      ZoneTopologyKey,
+		Operator: corev1.NodeSelectorOpIn,
+		Values:   []string{zone},
 	}
+
+	var out *corev1.Affinity
+	if base != nil {
+		out = base.DeepCopy()
+	} else {
+		out = &corev1.Affinity{}
+	}
+	if out.NodeAffinity == nil {
+		out.NodeAffinity = &corev1.NodeAffinity{}
+	}
+
+	req := out.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if req == nil || len(req.NodeSelectorTerms) == 0 {
+		out.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+				MatchExpressions: []corev1.NodeSelectorRequirement{zoneReq},
+			}},
+		}
+		return out
+	}
+	for i := range req.NodeSelectorTerms {
+		req.NodeSelectorTerms[i].MatchExpressions = append(
+			req.NodeSelectorTerms[i].MatchExpressions, zoneReq)
+	}
+	return out
 }
 
 // ClientServiceSelector is the selector for the client-facing Services.

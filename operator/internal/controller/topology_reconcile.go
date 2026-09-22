@@ -149,10 +149,23 @@ func (r *ProxySQLClusterReconciler) statefulSetReady(ctx context.Context, ns, na
 		}
 		return false, err
 	}
+	// A status that has not caught up with the current spec describes the
+	// PREVIOUS generation: right after an apply that both drops a zone and
+	// changes the pod template, the survivors still report the old pods as
+	// ready while none of the replacements have rolled. Readiness gates a
+	// prune that deletes PVCs, so believing a stale status destroys data
+	// that the new pods were never given a chance to replace.
+	if ss.Status.ObservedGeneration < ss.Generation {
+		return false, nil
+	}
 	if ss.Spec.Replicas == nil {
 		return ss.Status.ReadyReplicas > 0, nil
 	}
-	return ss.Status.ReadyReplicas >= *ss.Spec.Replicas, nil
+	// UpdatedReplicas counts pods at the CURRENT revision. Requiring it as
+	// well is what makes "ready" mean "the replacement is serving" rather
+	// than "something is serving" — a rollout in progress is not done.
+	return ss.Status.ReadyReplicas >= *ss.Spec.Replicas &&
+		ss.Status.UpdatedReplicas >= *ss.Spec.Replicas, nil
 }
 
 // pruneStaleStatefulSets deletes operator-owned StatefulSets for this
@@ -199,11 +212,24 @@ func (r *ProxySQLClusterReconciler) pruneStaleStatefulSets(
 		}
 		logf.FromContext(ctx).Info("pruning StatefulSet the topology no longer calls for",
 			"statefulset", ss.Name)
-		if err := r.Delete(ctx, ss); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("prune stale StatefulSet %s: %w", ss.Name, err)
-		}
+		// PVCs FIRST, and the order is load-bearing. A PVC's name is only
+		// derivable from its StatefulSet, and this prune is driven by
+		// LISTING StatefulSets — so once the set is gone, nothing can ever
+		// find its claims again. Deleting the set first means any failure
+		// in between (RBAC drift, eviction, operator restart) orphans the
+		// volumes permanently, with no reconcile able to recover them.
+		//
+		// Deleting them first is safe precisely because it is not
+		// immediate: kubernetes.io/pvc-protection holds a claim that a
+		// running pod still mounts, so the delete only marks it, and the
+		// reaping happens once the set below takes its pods away. A crash
+		// after this point leaves claims already marked for deletion and a
+		// set the next reconcile prunes again.
 		if err := r.deleteStatefulSetPVCs(ctx, cluster, ss); err != nil {
 			return err
+		}
+		if err := r.Delete(ctx, ss); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("prune stale StatefulSet %s: %w", ss.Name, err)
 		}
 	}
 	return nil
