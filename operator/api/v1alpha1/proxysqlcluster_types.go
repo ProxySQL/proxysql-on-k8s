@@ -33,6 +33,19 @@ type ProxySQLClusterSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// Topology selects how configuration reaches the pods. The default,
+	// "direct", is a single StatefulSet whose every pod the operator writes
+	// to. "coreSatellite" splits the cluster into per-AZ core StatefulSets
+	// (written by the operator) and one satellite StatefulSet that pulls
+	// config via ProxySQL's own Cluster sync and is never written to.
+	// Requires ProxySQL >= x.y.8 (PgSQL Cluster Sync); the reconciler
+	// degrades the cluster when the image is older.
+	//
+	// spec.replicas is ignored in coreSatellite mode: pod counts come from
+	// topology.core.zones and topology.satellites.replicas instead.
+	// +optional
+	Topology *TopologySpec `json:"topology,omitempty"`
+
 	// Pause stops the ProxySQL control-plane pods without deleting the
 	// cluster: the StatefulSet is scaled to 0 while the Services, Secrets,
 	// and PVCs are retained. Useful to cut compute cost during a
@@ -248,6 +261,99 @@ type VariablesSpec struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.startsWith('pgsql-'))",message="all keys must start with 'pgsql-'"
 	PostgreSQL map[string]string `json:"pgsql,omitempty"`
+}
+
+// Topology modes.
+const (
+	// TopologyModeDirect is the historical shape: one StatefulSet, every
+	// pod written by the operator.
+	TopologyModeDirect = "direct"
+	// TopologyModeCoreSatellite splits the cluster into per-AZ core
+	// StatefulSets and one satellite StatefulSet fed by ProxySQL Cluster sync.
+	TopologyModeCoreSatellite = "coreSatellite"
+)
+
+// TopologySpec selects the cluster's propagation shape.
+//
+// +kubebuilder:validation:XValidation:rule="self.mode != 'coreSatellite' || (has(self.core) && has(self.core.zones) && size(self.core.zones) > 0)",message="coreSatellite requires at least one core.zones entry"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'coreSatellite' || !has(self.core) || !has(self.core.zones) || self.core.zones.all(z, self.core.zones.exists_one(o, o.zone == z.zone))",message="core.zones entries must have unique zone values"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'coreSatellite' || !has(self.core) || !has(self.core.serveTraffic) || self.core.serveTraffic || (has(self.satellites) && has(self.satellites.replicas) && self.satellites.replicas > 0)",message="core.serveTraffic=false with satellites.replicas=0 leaves the cluster with no client endpoints"
+type TopologySpec struct {
+	// Mode is "direct" (default) or "coreSatellite".
+	// +optional
+	// +kubebuilder:default=direct
+	// +kubebuilder:validation:Enum=direct;coreSatellite
+	Mode string `json:"mode,omitempty"`
+
+	// Core describes the pods the operator writes configuration to.
+	// Ignored in "direct" mode.
+	// +optional
+	Core CoreSpec `json:"core,omitempty"`
+
+	// Satellites describes the tier that pulls configuration from the core
+	// via ProxySQL Cluster sync. Ignored in "direct" mode.
+	// +optional
+	Satellites SatellitesSpec `json:"satellites,omitempty"`
+}
+
+// CoreSpec is the operator-written tier, placed per availability zone.
+type CoreSpec struct {
+	// Zones places an exact number of core pods in each named zone, one
+	// StatefulSet per zone hard-pinned with nodeAffinity on
+	// topology.kubernetes.io/zone. A topologySpreadConstraint cannot
+	// express an exact per-zone count, which is why this is a list of
+	// StatefulSets rather than a spread rule.
+	// +optional
+	// +kubebuilder:validation:MaxItems=9
+	Zones []CoreZone `json:"zones,omitempty"`
+
+	// ServeTraffic puts core pods behind the client Services alongside the
+	// satellites. Defaults to true; set false for a dedicated config tier
+	// isolated from client load.
+	// +optional
+	// +kubebuilder:default=true
+	ServeTraffic *bool `json:"serveTraffic,omitempty"`
+}
+
+// CoreZone is an exact core pod count for one availability zone.
+type CoreZone struct {
+	// Zone is the topology.kubernetes.io/zone value, e.g. "us-east-1a".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Zone string `json:"zone"`
+
+	// Replicas is how many core pods run in this zone.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=9
+	Replicas int32 `json:"replicas"`
+}
+
+// SatellitesSpec is the tier that pulls configuration from the core.
+type SatellitesSpec struct {
+	// Replicas is the satellite pod count. In coreSatellite mode this
+	// replaces spec.replicas as the scaling target.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000
+	Replicas int32 `json:"replicas,omitempty"`
+}
+
+// IsCoreSatellite reports whether this spec runs the core/satellite topology.
+func (s *ProxySQLClusterSpec) IsCoreSatellite() bool {
+	return s.Topology != nil && s.Topology.Mode == TopologyModeCoreSatellite
+}
+
+// CoreTotal is the sum of core replicas across zones (0 in direct mode).
+func (s *ProxySQLClusterSpec) CoreTotal() int32 {
+	if !s.IsCoreSatellite() {
+		return 0
+	}
+	var n int32
+	for _, z := range s.Topology.Core.Zones {
+		n += z.Replicas
+	}
+	return n
 }
 
 // LoggingSpec configures the optional Fluent Bit log-shipping sidecar.
@@ -780,6 +886,11 @@ type ProxySQLClusterStatus struct {
 	// +optional
 	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
 
+	// Topology reports the shape actually reconciled. Nil for direct-mode
+	// clusters, which keeps their status byte-identical.
+	// +optional
+	Topology *TopologyStatus `json:"topology,omitempty"`
+
 	// Phase is a coarse, single-word projection of the conditions for
 	// dashboards and external pollers. Conditions remain the source of truth.
 	// One of: Pending, Creating, Running, Updating, Degraded, Failed,
@@ -805,6 +916,45 @@ type ProxySQLClusterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// TopologyStatus reports the reconciled core/satellite shape. It is only
+// populated for coreSatellite clusters; a direct-mode cluster leaves
+// status.topology absent, so its status stays exactly what it was before
+// this field existed.
+type TopologyStatus struct {
+	// Mode is the reconciled topology mode.
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// CoreZones is one entry per core StatefulSet, in spec order.
+	// +optional
+	CoreZones []CoreZoneStatus `json:"coreZones,omitempty"`
+
+	// SatelliteReplicas is the desired satellite count.
+	// +optional
+	SatelliteReplicas int32 `json:"satelliteReplicas,omitempty"`
+
+	// SatelliteReadyReplicas is the satellite StatefulSet's ready count.
+	// +optional
+	SatelliteReadyReplicas int32 `json:"satelliteReadyReplicas,omitempty"`
+}
+
+// CoreZoneStatus is one zone's core placement outcome. Ready below Desired
+// with pods Pending means the zone cannot host them — by design the
+// operator never relocates a pinned core pod.
+type CoreZoneStatus struct {
+	// Zone is the topology.kubernetes.io/zone value the core StatefulSet is
+	// pinned to.
+	Zone string `json:"zone"`
+
+	// DesiredReplicas is the core pod count requested for this zone.
+	// +optional
+	DesiredReplicas int32 `json:"desiredReplicas,omitempty"`
+
+	// ReadyReplicas is this zone's core StatefulSet's ready count.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 }
 
 // ClusterEndpoints lists in-cluster DNS endpoints (host:port) per surface,

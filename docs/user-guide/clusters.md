@@ -348,7 +348,11 @@ note that a constraint with a selector matching no pods silently does
 nothing.
 
 Pod anti-affinity remains available via `spec.affinity` for cases a
-spread constraint cannot express:
+spread constraint cannot express. One thing neither can express is an
+**exact** per-zone replica count (a spread constraint only bounds skew —
+it can't pin "2 in us-east-1a, 1 in us-east-1b"); for that, see
+`spec.topology`'s `coreSatellite` mode in [Core/satellite
+topology](../architecture.md#coresatellite-topology).
 
 ```yaml
 spec:

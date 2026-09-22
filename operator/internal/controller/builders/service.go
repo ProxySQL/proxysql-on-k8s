@@ -38,7 +38,7 @@ func (b *Builder) Service() *corev1.Service {
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     mainServiceType(b.Spec),
-			Selector: b.SelectorLabels(),
+			Selector: b.ClientServiceSelector(),
 			Ports:    b.servicePorts(false),
 		},
 	}

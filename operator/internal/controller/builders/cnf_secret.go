@@ -32,6 +32,9 @@ func (b *Builder) CnfSecretName() string { return b.Name() + "-cnf" }
 // passwords. Until v0.3.0 this lived in a ConfigMap named after the cluster;
 // the reconciler garbage-collects that leftover on upgrade.
 func (b *Builder) CnfSecret() (*corev1.Secret, error) {
+	// ProxySQLServerDNS is topology-aware: the core pods in coreSatellite
+	// mode, `<cluster>-N` in direct mode. Deriving the peer list anywhere
+	// else would let the first config apply push a different one.
 	cnf, err := b.BootstrapCnf(b.ProxySQLServerDNS())
 	if err != nil {
 		return nil, err

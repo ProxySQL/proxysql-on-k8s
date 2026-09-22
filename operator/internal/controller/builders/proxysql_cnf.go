@@ -286,6 +286,28 @@ func (b *Builder) adminDefaultVars(clusterSync bool) map[string]string {
 		d["cluster_mysql_users_diffs_before_sync"] = "3"
 		d["cluster_proxysql_servers_diffs_before_sync"] = "3"
 	}
+	if clusterSync && b.Spec.IsCoreSatellite() {
+		// In coreSatellite mode the operator writes ONE core and native
+		// sync carries everything else, so every module the operator
+		// manages must be synced — including the ones direct mode never
+		// needed. Gated on the mode on purpose: adding these keys
+		// unconditionally would change the cnf of every existing cluster
+		// and roll it once on upgrade (see TestGolden).
+		//
+		// pgsql_* sync requires ProxySQL >= x.y.8 (upstream #5297); the
+		// reconciler refuses the mode below that.
+		for _, k := range []string{
+			"cluster_mysql_variables",
+			"cluster_admin_variables",
+			"cluster_pgsql_servers",
+			"cluster_pgsql_users",
+			"cluster_pgsql_query_rules",
+			"cluster_pgsql_variables",
+		} {
+			d[k+"_save_to_disk"] = cnfTrue
+			d[k+"_diffs_before_sync"] = "3"
+		}
+	}
 	return d
 }
 
@@ -379,9 +401,24 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 	return strings.TrimRight(buf.String(), "\n") + "\n", nil
 }
 
-// ProxySQLServerDNS returns the stable per-pod DNS names for the StatefulSet
-// (used to populate proxysql_servers when replicas > 1).
+// ProxySQLServerDNS returns the stable per-pod DNS names that populate
+// proxysql_servers — the cluster's peer list. It is the ONE derivation:
+// both the bootstrap cnf (CnfSecret) and the runtime push
+// (autoPopulatedProxySQLServers -> syncProxySQLServers) read it, so a
+// config apply can never contradict what the pods booted with.
+//
+// In coreSatellite mode the peers are the CORE pods (CorePodDNS): cores
+// peer with each other, satellites pull from them and are deliberately
+// absent so no core ever syncs from a satellite. spec.replicas — which the
+// CRD defaults to 3 even when the user omits it — is ignored there, and the
+// `<cluster>-N` names it would produce do not exist: the bare StatefulSet
+// is pruned once the role sets are Ready.
+//
+// In direct mode: `<cluster>-{0..replicas-1}`, or nil when replicas <= 1.
 func (b *Builder) ProxySQLServerDNS() []string {
+	if b.Spec.IsCoreSatellite() {
+		return b.CorePodDNS()
+	}
 	if b.Spec.Replicas == nil || *b.Spec.Replicas <= 1 {
 		return nil
 	}

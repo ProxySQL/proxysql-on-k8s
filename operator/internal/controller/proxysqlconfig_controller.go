@@ -442,8 +442,11 @@ func (r *ProxySQLConfigReconciler) buildUnionedDesired(ctx context.Context, clus
 
 // autoPopulatedProxySQLServers derives the proxysql_servers peer rows the
 // operator manages on the target cluster's behalf: the stable per-pod DNS
-// names for the StatefulSet (the same names the bootstrap cnf seeds), or nil
-// when the defaulted replica count is <= 1 (Builder.ProxySQLServerDNS).
+// names the bootstrap cnf seeds — Builder.ProxySQLServerDNS, which is the
+// single topology-aware derivation (the core pods in coreSatellite mode,
+// `<cluster>-N` in direct mode) and nil when the defaulted direct-mode
+// replica count is <= 1. Deriving them here instead would let this push
+// DELETE the cnf's peers and insert pods that do not exist.
 // Shared by buildDesired (normal sync path) and cleanupDesired (deletion
 // finalizer, #42) so the derivation isn't duplicated.
 func autoPopulatedProxySQLServers(b *builders.Builder) []proxysqlclient.ProxySQLServer {

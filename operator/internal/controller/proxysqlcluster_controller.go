@@ -73,6 +73,11 @@ type ProxySQLClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// persistentvolumeclaims: read + delete only — the operator never creates a
+// PVC (the StatefulSet controller does, from the volumeClaimTemplate). The
+// delete is deleteStatefulSetPVCs, which reclaims the claims a pruned
+// StatefulSet leaves behind; nothing else garbage-collects them.
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
 // pods: get;list;watch only — needed by resolveRestartChecksum's and
 // resolveTLSRotation's discoverPodEndpoints calls to find ready replicas to
 // push runtime variable changes / PROXYSQL RELOAD TLS to.
@@ -126,6 +131,23 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		log.Error(err, "unable to fetch ProxySQLCluster")
 		return ctrl.Result{}, err
+	}
+
+	// 0) coreSatellite needs a ProxySQL that can actually sync (x.y.8+).
+	// This runs before ANY object is resolved or created — a cluster that
+	// asks for a mode its image cannot serve is degraded outright rather
+	// than half-provisioned into a tier that would never converge.
+	if cluster.Spec.IsCoreSatellite() {
+		if verr := checkTopologyVersion(builders.DefaultedSpec(&cluster).Image.Tag); verr != nil {
+			// ObservedGeneration too: a refusal IS an observation of this
+			// generation, and a poller that reads a stale one would wait
+			// forever for a verdict that has already been reached.
+			cluster.Status.ObservedGeneration = cluster.Generation
+			cluster.Status.Phase = proxysqlv1alpha1.PhaseDegraded
+			r.setCondition(&cluster, condTypeDegraded, metav1.ConditionTrue, "TopologyUnsupportedVersion", verr.Error())
+			_ = r.Status().Update(ctx, &cluster)
+			return ctrl.Result{}, verr
+		}
 	}
 
 	// 1) Resolve passwords (from existing Secret or mint + create).
@@ -258,12 +280,24 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		tlsApplied:        rot.applied,
 		tlsRotationState:  rot.state,
 	}
-	if err := r.ensureStatefulSet(ctx, &cluster, b.StatefulSet(annotation), markers); err != nil {
+	// One StatefulSet in direct mode; one per core zone plus the satellite
+	// set in coreSatellite mode, with the shape the topology no longer calls
+	// for pruned once the replacements are Ready.
+	if err := r.reconcileTopologyStatefulSets(ctx, &cluster, b, annotation, markers); err != nil {
 		return ctrl.Result{}, err
 	}
 	summary = mergeSummaries(summary, rot.summary)
 
-	if err := r.ensurePDB(ctx, &cluster, b.PodDisruptionBudget()); err != nil {
+	// Each builder returns nil for the modes it does not apply to, and each
+	// ensurePDBNamed only ever deletes the name it was given — so the
+	// direct-mode PDB and the two role PDBs cannot delete one another.
+	if err := r.ensurePDBNamed(ctx, &cluster, b.Name(), b.PodDisruptionBudget()); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensurePDBNamed(ctx, &cluster, b.CorePDBName(), b.CorePDB()); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensurePDBNamed(ctx, &cluster, b.SatelliteStatefulSetName(), b.SatellitePDB()); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -322,15 +356,47 @@ type stsMarkers struct {
 }
 
 // currentStatefulSetAnnotations reads the marker annotations as they stood
-// before this reconcile.
+// before this reconcile, from the first StatefulSet of this cluster that
+// actually EXISTS (see markerStatefulSetNames — every set this operator
+// applies carries the same markers, but which sets exist depends on where a
+// topology conversion has got to). Only a cluster with no StatefulSet at all
+// yields the zero value.
+//
+// The name list cannot cover the REVERSE conversion (coreSatellite ->
+// direct): spec.topology is typically removed outright, so the zone names of
+// the still-live core sets are no longer recoverable from the spec, while
+// <cluster> does not exist yet — this reconcile is the one creating it. So
+// when nothing named is found, fall back to a label-scoped List of this
+// cluster's operator-owned sets. Missing it would hand the engines a zero
+// marker set: classifyTLSRotation("") ADOPTS, marking an in-flight rotation
+// applied though no pod ever ran PROXYSQL RELOAD TLS, and the cnf checksum
+// resets to bootHash.
 func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Context, b *builders.Builder) (stsAnnotations, error) {
 	var ss appsv1.StatefulSet
-	getErr := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
-	if apierrors.IsNotFound(getErr) {
-		return stsAnnotations{}, nil
+	found := false
+	for _, name := range markerStatefulSetNames(b) {
+		getErr := r.Get(ctx, types.NamespacedName{Name: name, Namespace: b.Namespace()}, &ss)
+		if apierrors.IsNotFound(getErr) {
+			continue
+		}
+		if getErr != nil {
+			return stsAnnotations{}, fmt.Errorf("get statefulset: %w", getErr)
+		}
+		found = true
+		break
 	}
-	if getErr != nil {
-		return stsAnnotations{}, fmt.Errorf("get statefulset: %w", getErr)
+	if !found {
+		leftover, listErr := r.leftoverMarkerStatefulSet(ctx, b)
+		if listErr != nil {
+			return stsAnnotations{}, listErr
+		}
+		if leftover != nil {
+			ss = *leftover
+			found = true
+		}
+	}
+	if !found {
+		return stsAnnotations{}, nil
 	}
 	return stsAnnotations{
 		cnfChecksum:       ss.Spec.Template.Annotations[annotationCnfChecksum],
@@ -340,6 +406,40 @@ func (r *ProxySQLClusterReconciler) currentStatefulSetAnnotations(ctx context.Co
 		tlsRotationState:  ss.Annotations[annotationTLSRotationState],
 		tlsRestart:        ss.Spec.Template.Annotations[builders.TLSRestartAnnotation],
 	}, nil
+}
+
+// leftoverMarkerStatefulSet returns any operator-owned StatefulSet of this
+// cluster whose name markerStatefulSetNames could not predict — the role sets
+// of the shape being converted AWAY from. Selection is by name order so the
+// choice is deterministic; every set this operator applies carries the same
+// markers, so which one is picked does not change the values read back.
+// Returns nil when the cluster genuinely has no StatefulSet.
+//
+// Labels alone do not establish that a set is ours: every label this lists on
+// is spec-derived, so anyone who can create a StatefulSet in the namespace can
+// wear them, and lowest-name selection would then read that set's markers.
+// The controller reference is the authority, as it is in ensurePDBNamed.
+func (r *ProxySQLClusterReconciler) leftoverMarkerStatefulSet(ctx context.Context, b *builders.Builder) (*appsv1.StatefulSet, error) {
+	var list appsv1.StatefulSetList
+	if err := r.List(ctx, &list,
+		client.InNamespace(b.Namespace()),
+		client.MatchingLabels(b.Labels()),
+	); err != nil {
+		return nil, fmt.Errorf("list statefulsets: %w", err)
+	}
+	best := -1
+	for i := range list.Items {
+		if !metav1.IsControlledBy(&list.Items[i], b.Cluster) {
+			continue
+		}
+		if best < 0 || list.Items[i].Name < list.Items[best].Name {
+			best = i
+		}
+	}
+	if best < 0 {
+		return nil, nil
+	}
+	return &list.Items[best], nil
 }
 
 // resolvePasswords reads the admin/radmin/monitor passwords from the auth Secret.
@@ -614,7 +714,9 @@ func (r *ProxySQLClusterReconciler) handleRuntimeApplyError(
 	// so no path can ever create a StatefulSet with an empty checksum
 	// annotation.
 	if prev != "" {
-		if err := r.ensureStatefulSet(ctx, cluster, b.StatefulSet(prev), markers); err != nil {
+		// Same fan-out as the happy path: in coreSatellite mode this must
+		// re-ensure the ROLE sets, never a bare <cluster> StatefulSet.
+		if err := r.reconcileTopologyStatefulSets(ctx, cluster, b, prev, markers); err != nil {
 			return fmt.Errorf("ensure statefulset after runtime-apply failure: %w (runtime apply: %v)", err, pushErr)
 		}
 	}
@@ -667,11 +769,52 @@ func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner
 	return err
 }
 
-func (r *ProxySQLClusterReconciler) ensurePDB(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *policyv1.PodDisruptionBudget) error {
+// ensurePDBNamed applies one PDB, or — when desired is nil (this mode does
+// not want that PDB, the budget is disabled, or there is nothing to budget)
+// — deletes the operator-owned PDB called `name`.
+//
+// The name argument is load-bearing: a nil desired carries no name of its
+// own, and deleting "the PDB named after the cluster" on every nil would
+// make the second of two calls undo the first (a nil CorePDB() deleting the
+// direct-mode <cluster> PDB in the same reconcile that created it). Each
+// call may only ever delete its OWN name.
+// pdbStillHasPods reports whether any pod this cluster owns still matches the
+// PDB's own selector. It is the "is this tier still serving?" question asked
+// of the object that knows best — the PDB's selector — rather than of a
+// StatefulSet name, so it answers correctly for both conversion directions
+// and for a tier whose set was already pruned but whose pods are terminating.
+//
+// A selector that cannot be parsed, or one that matches everything, would
+// hold the PDB forever; both are treated as "not held" so a genuine disable
+// still converges.
+func (r *ProxySQLClusterReconciler) pdbStillHasPods(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, pdb *policyv1.PodDisruptionBudget) (bool, error) {
+	if pdb.Spec.Selector == nil || len(pdb.Spec.Selector.MatchLabels)+len(pdb.Spec.Selector.MatchExpressions) == 0 {
+		return false, nil
+	}
+	sel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
+	if err != nil {
+		return false, nil
+	}
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(owner.Namespace),
+		client.MatchingLabelsSelector{Selector: sel},
+	); err != nil {
+		return false, fmt.Errorf("list pods for PDB %s: %w", pdb.Name, err)
+	}
+	for i := range pods.Items {
+		if pods.Items[i].DeletionTimestamp == nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *ProxySQLClusterReconciler) ensurePDBNamed(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, name string, desired *policyv1.PodDisruptionBudget) error {
 	if desired == nil {
 		// Disabled or single-replica: ensure any previously created PDB is removed.
 		existing := &policyv1.PodDisruptionBudget{}
-		err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: owner.Namespace}, existing)
+		err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: owner.Namespace}, existing)
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -680,6 +823,18 @@ func (r *ProxySQLClusterReconciler) ensurePDB(ctx context.Context, owner *proxys
 		}
 		// Only delete if we own it.
 		if !metav1.IsControlledBy(existing, owner) {
+			return nil
+		}
+		// A mode conversion makes the OUTGOING tier's builder return nil
+		// one reconcile before that tier stops serving: the old StatefulSet
+		// survives until the replacements are Ready, which can take minutes
+		// or never. Deleting its PDB now strips disruption protection from
+		// the only pods actually taking traffic, and the incoming role PDBs
+		// cannot cover them — they select proxysql.com/role, which the old
+		// pods do not carry. Hold the PDB while its own pods are still up.
+		if held, herr := r.pdbStillHasPods(ctx, owner, existing); herr != nil {
+			return herr
+		} else if held {
 			return nil
 		}
 		return client.IgnoreNotFound(r.Delete(ctx, existing))
@@ -768,17 +923,32 @@ func (r *ProxySQLClusterReconciler) ensureServiceMonitor(ctx context.Context, ow
 // Degraded — the same end-of-updateStatus clearing that removes a stale
 // RuntimeApplyError once a reconcile completes cleanly.
 func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *proxysqlv1alpha1.ProxySQLCluster, b *builders.Builder, summary string, extSvcErr, tlsErr, rotErr error) error {
+	// Direct mode reads the single StatefulSet, exactly as it always has.
+	// coreSatellite mode reads every role set and folds them into the same
+	// two inputs (an aggregate StatefulSet and a desired total), so the
+	// condition/phase logic below is identical for both shapes — plus the
+	// per-role status.topology block, which stays nil in direct mode.
 	var ss appsv1.StatefulSet
-	err := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
-	notFound := apierrors.IsNotFound(err)
-	if err != nil && !notFound {
-		return err
+	var notFound bool
+	if b.Spec.IsCoreSatellite() {
+		topo, agg, missing, terr := r.topologyStatus(ctx, b)
+		if terr != nil {
+			return terr
+		}
+		ss, notFound = agg, missing
+		cluster.Status.Topology = topo
+	} else {
+		err := r.Get(ctx, types.NamespacedName{Name: b.Name(), Namespace: b.Namespace()}, &ss)
+		notFound = apierrors.IsNotFound(err)
+		if err != nil && !notFound {
+			return err
+		}
+		// A cluster converted back to direct mode must not keep reporting a
+		// topology it no longer runs.
+		cluster.Status.Topology = nil
 	}
 
-	desired := int32(0)
-	if b.Spec.Replicas != nil {
-		desired = *b.Spec.Replicas
-	}
+	desired := topologyDesiredReplicas(b)
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.Replicas = desired
 	cluster.Status.ReadyReplicas = ss.Status.ReadyReplicas

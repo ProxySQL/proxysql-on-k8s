@@ -18,6 +18,7 @@ package controller
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -147,5 +148,93 @@ func TestAutoPopulatedProxySQLServers_MatchesCleanupDesired(t *testing.T) {
 	if !reflect.DeepEqual(built, cleanup.ProxySQLServers) {
 		t.Errorf("autoPopulatedProxySQLServers = %v, cleanupDesired.ProxySQLServers = %v, want equal",
 			built, cleanup.ProxySQLServers)
+	}
+}
+
+// The peer list the operator PUSHES must be the same one the bootstrap cnf
+// SEEDS. In coreSatellite mode that is the core pods — never `<cluster>-N`.
+//
+// This is the regression for the first ProxySQLConfig apply destroying the
+// core peer list: autoPopulatedProxySQLServers used to derive the direct-mode
+// names from spec.replicas, which the CRD defaults to 3 even when the user
+// omits it (as every coreSatellite cluster does). syncProxySQLServers DELETEs
+// the table before inserting, so a single apply replaced the real cores with
+// three pods that do not exist — the bare StatefulSet is pruned at conversion
+// — and cluster_proxysql_servers_save_to_disk made it permanent.
+func TestAutoPopulatedProxySQLServers_CoreSatellite_UsesCorePods(t *testing.T) {
+	c := &proxysqlv1alpha1.ProxySQLCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-test", Namespace: "default"},
+		Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+			// replicas deliberately omitted: DefaultedSpec fills in 3.
+			Topology: &proxysqlv1alpha1.TopologySpec{
+				Mode: proxysqlv1alpha1.TopologyModeCoreSatellite,
+				Core: proxysqlv1alpha1.CoreSpec{Zones: []proxysqlv1alpha1.CoreZone{
+					{Zone: "us-east-1a", Replicas: 2},
+					{Zone: "us-east-1b", Replicas: 1},
+				}},
+				Satellites: proxysqlv1alpha1.SatellitesSpec{Replicas: 6},
+			},
+		},
+	}
+	b := builders.New(c, nil, defaultPw)
+	if b.Spec.Replicas == nil || *b.Spec.Replicas != 3 {
+		t.Fatalf("test setup: defaulted spec.replicas = %v, want the CRD default 3 so the bug is reachable", b.Spec.Replicas)
+	}
+
+	got := autoPopulatedProxySQLServers(b)
+
+	want := []string{
+		"cleanup-test-core-us-east-1a-0.cleanup-test-headless.default.svc",
+		"cleanup-test-core-us-east-1a-1.cleanup-test-headless.default.svc",
+		"cleanup-test-core-us-east-1b-0.cleanup-test-headless.default.svc",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("autoPopulatedProxySQLServers = %v, want the %d core pods %v", got, len(want), want)
+	}
+	for i, host := range want {
+		if got[i].Hostname != host {
+			t.Errorf("ProxySQLServers[%d].Hostname = %q, want %q", i, got[i].Hostname, host)
+		}
+		if got[i].Port != b.Spec.Protocols.Admin.Port {
+			t.Errorf("ProxySQLServers[%d].Port = %d, want %d", i, got[i].Port, b.Spec.Protocols.Admin.Port)
+		}
+		if got[i].Comment != autoPopulatedPeerComment {
+			t.Errorf("ProxySQLServers[%d].Comment = %q, want %q", i, got[i].Comment, autoPopulatedPeerComment)
+		}
+	}
+	for _, g := range got {
+		if strings.HasPrefix(g.Hostname, "cleanup-test-0.") ||
+			strings.HasPrefix(g.Hostname, "cleanup-test-1.") ||
+			strings.HasPrefix(g.Hostname, "cleanup-test-2.") {
+			t.Errorf("peer %q is a direct-mode `<cluster>-N` name: that pod does not exist in coreSatellite mode", g.Hostname)
+		}
+		if strings.Contains(g.Hostname, "-satellite-") {
+			t.Errorf("peer %q is a satellite: no core may ever sync from a satellite", g.Hostname)
+		}
+	}
+}
+
+// cleanupDesired shares the derivation, so a coreSatellite cluster keeps its
+// core peers when a ProxySQLConfig is deleted.
+func TestCleanupDesired_CoreSatellite_PreservesCorePeers(t *testing.T) {
+	c := &proxysqlv1alpha1.ProxySQLCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-test", Namespace: "default"},
+		Spec: proxysqlv1alpha1.ProxySQLClusterSpec{
+			Topology: &proxysqlv1alpha1.TopologySpec{
+				Mode: proxysqlv1alpha1.TopologyModeCoreSatellite,
+				Core: proxysqlv1alpha1.CoreSpec{Zones: []proxysqlv1alpha1.CoreZone{
+					{Zone: "us-east-1a", Replicas: 1},
+				}},
+				Satellites: proxysqlv1alpha1.SatellitesSpec{Replicas: 2},
+			},
+		},
+	}
+	b := builders.New(c, nil, defaultPw)
+
+	d := cleanupDesired(b, true)
+
+	want := "cleanup-test-core-us-east-1a-0.cleanup-test-headless.default.svc"
+	if len(d.ProxySQLServers) != 1 || d.ProxySQLServers[0].Hostname != want {
+		t.Errorf("ProxySQLServers = %v, want the single core pod %q", d.ProxySQLServers, want)
 	}
 }

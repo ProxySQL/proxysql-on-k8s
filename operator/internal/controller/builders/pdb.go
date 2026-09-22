@@ -30,6 +30,10 @@ import (
 //	replicas = 2 → minAvailable=1
 //	replicas ≥ 3 → minAvailable=replicas-1
 func (b *Builder) PodDisruptionBudget() *policyv1.PodDisruptionBudget {
+	// coreSatellite clusters are budgeted per role (CorePDB/SatellitePDB).
+	if b.Spec.IsCoreSatellite() {
+		return nil
+	}
 	if !isTrue(b.Spec.PodDisruptionBudget.Enabled) {
 		return nil
 	}

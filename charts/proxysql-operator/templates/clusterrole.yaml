@@ -29,6 +29,13 @@ rules:
   - apiGroups: [""]
     resources: [services]
     verbs: [create, delete, get, list, patch, update, watch]
+  # persistentvolumeclaims: read + delete only. The operator never creates a
+  # PVC (the StatefulSet controller does, from the volumeClaimTemplate); it
+  # deletes the claims a StatefulSet it prunes leaves behind, which nothing
+  # else garbage-collects.
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [delete, get, list, watch]
   - apiGroups: [apps]
     resources: [statefulsets]
     verbs: [create, delete, get, list, patch, update, watch]
