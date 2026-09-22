@@ -121,8 +121,15 @@ func (b *Builder) CoreStatefulSets(cnfChecksum string) []*appsv1.StatefulSet {
 		ss.Spec.Template.Spec.Affinity = b.coreZoneAffinity(z.Zone, ss.Spec.Template.Spec.Affinity)
 		// APPEND, never replace: a user's own spread constraints are the
 		// only expression of intent the operator has no substitute for.
-		// The in-zone hostname spread is additive to them.
-		ss.Spec.Template.Spec.TopologySpreadConstraints = append(
+		// The in-zone hostname spread is additive to them — EXCEPT when
+		// the user already declares the same (topologyKey,
+		// whenUnsatisfiable) pair. Kubernetes rejects a duplicate pair
+		// outright ("Duplicate value: {kubernetes.io/hostname,
+		// ScheduleAnyway}"), which would fail the StatefulSet apply and
+		// wedge the reconcile — strictly worse than the dropped constraint
+		// this append exists to fix. Their constraint already expresses
+		// the same intent, so defer to it.
+		ss.Spec.Template.Spec.TopologySpreadConstraints = appendSpreadUnlessPairExists(
 			ss.Spec.Template.Spec.TopologySpreadConstraints,
 			corev1.TopologySpreadConstraint{
 				MaxSkew:           1,
@@ -174,10 +181,24 @@ func (b *Builder) roleStatefulSet(cnfChecksum string, role Role, zone string, re
 	return ss
 }
 
+// appendSpreadUnlessPairExists adds one spread constraint unless the list
+// already carries its (topologyKey, whenUnsatisfiable) pair. Kubernetes
+// validates that pair as unique per pod spec, so appending a duplicate makes
+// the whole pod template invalid and the StatefulSet apply fail.
+func appendSpreadUnlessPairExists(existing []corev1.TopologySpreadConstraint, add corev1.TopologySpreadConstraint) []corev1.TopologySpreadConstraint {
+	for _, c := range existing {
+		if c.TopologyKey == add.TopologyKey && c.WhenUnsatisfiable == add.WhenUnsatisfiable {
+			return existing
+		}
+	}
+	return append(existing, add)
+}
+
 // coreZoneAffinity is the hard pin. Placement failure leaves pods Pending
 // on purpose: the buyer's layout is what gets deployed, and the SaaS
 // refuses an unschedulable zone before it ever reaches the CR.
-// coreZoneAffinity pins a core StatefulSet to one zone while PRESERVING the
+//
+// It pins a core StatefulSet to one zone while PRESERVING the
 // placement the user asked for in spec.affinity. Overwriting it wholesale
 // silently drops pod anti-affinity — the rule that keeps two config sources
 // off one node — so a cluster following the docs' own hardening advice would

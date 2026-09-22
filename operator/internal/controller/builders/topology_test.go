@@ -449,3 +449,39 @@ func TestCoreStatefulSets_PreservesUserPlacement(t *testing.T) {
 		t.Error("the user's DoNotSchedule constraint was replaced by the operator's ScheduleAnyway")
 	}
 }
+
+// Kubernetes validates (topologyKey, whenUnsatisfiable) as unique per pod
+// spec. Appending the operator's in-zone hostname spread on top of a user
+// constraint that already declares that exact pair makes the pod template
+// invalid, so the StatefulSet apply is REJECTED and the reconcile wedges --
+// strictly worse than the dropped constraint the append exists to prevent.
+func TestCoreStatefulSets_NoDuplicateSpreadPair(t *testing.T) {
+	c := coreSatelliteCluster()
+	c.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew:           2,
+		TopologyKey:       "kubernetes.io/hostname",
+		WhenUnsatisfiable: corev1.ScheduleAnyway,
+	}}
+
+	sets := New(c, newScheme(t), goldenPasswords).CoreStatefulSets("chk123")
+	if len(sets) == 0 {
+		t.Fatal("no core StatefulSets")
+	}
+	got := sets[0].Spec.Template.Spec.TopologySpreadConstraints
+
+	seen := map[string]int{}
+	for _, cs := range got {
+		seen[cs.TopologyKey+"/"+string(cs.WhenUnsatisfiable)]++
+	}
+	for pair, n := range seen {
+		if n > 1 {
+			t.Errorf("pair %s appears %d times; the apiserver rejects duplicates", pair, n)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d constraints, want 1 (the user's, deferred to)", len(got))
+	}
+	if got[0].MaxSkew != 2 {
+		t.Errorf("maxSkew = %d, want the user's 2", got[0].MaxSkew)
+	}
+}
