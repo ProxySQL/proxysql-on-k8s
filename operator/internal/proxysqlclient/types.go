@@ -27,6 +27,7 @@ type Desired struct {
 	MySQLUsers                 []MySQLUser
 	MySQLQueryRules            []MySQLQueryRule
 	MySQLReplicationHostgroups []MySQLReplicationHostgroup
+	MySQLGaleraHostgroups      []MySQLGaleraHostgroup
 	MySQLHostgroupAttributes   []MySQLHostgroupAttributes
 
 	PostgreSQLServers    []PostgreSQLServer
@@ -99,6 +100,21 @@ type MySQLReplicationHostgroup struct {
 	ReaderHostgroup int32
 	CheckType       string
 	Comment         string
+}
+
+// MySQLGaleraHostgroup is the resolved form of a mysql_galera_hostgroups row.
+// Every column except comment is NOT NULL with a default, so unset pointer
+// fields render the column default rather than NULL.
+type MySQLGaleraHostgroup struct {
+	WriterHostgroup       int32
+	BackupWriterHostgroup int32
+	ReaderHostgroup       int32
+	OfflineHostgroup      int32
+	Active                *bool
+	MaxWriters            *int32
+	WriterIsAlsoReader    *int32
+	MaxTransactionsBehind *int32
+	Comment               string
 }
 
 // MySQLHostgroupAttributes is the resolved form of a mysql_hostgroup_attributes

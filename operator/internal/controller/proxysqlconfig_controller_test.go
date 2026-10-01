@@ -491,6 +491,73 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			Expect(k8sClient.Create(ctx, cfg)).NotTo(Succeed(),
 				"two mysqlServers rows with the same server identity must be rejected at admission")
 		})
+
+		// mysql_galera_hostgroups CHECK constraints, enforced at admission so a
+		// bad row fails once here instead of on every replica's sync.
+		galeraCfg := func(name string, rows ...proxysqlv1alpha1.MySQLGaleraHostgroup) *proxysqlv1alpha1.ProxySQLConfig {
+			return &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef:            corev1.LocalObjectReference{Name: "adm-cluster"},
+					MySQLGaleraHostgroups: rows,
+				},
+			}
+		}
+
+		It("accepts a well-formed mysqlGaleraHostgroups row", func() {
+			cfg := galeraCfg("adm-galera-ok", proxysqlv1alpha1.MySQLGaleraHostgroup{
+				WriterHostgroup: 10, BackupWriterHostgroup: 12,
+				ReaderHostgroup: 11, OfflineHostgroup: 13,
+				MaxWriters: int32Ptr(1), WriterIsAlsoReader: int32Ptr(2),
+			})
+			Expect(k8sClient.Create(context.Background(), cfg)).To(Succeed())
+		})
+
+		It("rejects a mysqlGaleraHostgroups row whose hostgroups are not all distinct", func() {
+			// reader == backupWriter violates ProxySQL's CHECK.
+			cfg := galeraCfg("adm-galera-same-hg", proxysqlv1alpha1.MySQLGaleraHostgroup{
+				WriterHostgroup: 10, BackupWriterHostgroup: 11,
+				ReaderHostgroup: 11, OfflineHostgroup: 13,
+			})
+			Expect(k8sClient.Create(context.Background(), cfg)).NotTo(Succeed(),
+				"the four galera hostgroups must be pairwise distinct")
+		})
+
+		It("rejects readerHostgroup 0 in mysqlGaleraHostgroups", func() {
+			// ProxySQL requires reader_hostgroup > 0.
+			cfg := galeraCfg("adm-galera-reader-zero", proxysqlv1alpha1.MySQLGaleraHostgroup{
+				WriterHostgroup: 10, BackupWriterHostgroup: 12,
+				ReaderHostgroup: 0, OfflineHostgroup: 13,
+			})
+			Expect(k8sClient.Create(context.Background(), cfg)).NotTo(Succeed(),
+				"readerHostgroup must be greater than 0")
+		})
+
+		It("rejects writerIsAlsoReader outside 0/1/2", func() {
+			cfg := galeraCfg("adm-galera-wiar", proxysqlv1alpha1.MySQLGaleraHostgroup{
+				WriterHostgroup: 10, BackupWriterHostgroup: 12,
+				ReaderHostgroup: 11, OfflineHostgroup: 13,
+				WriterIsAlsoReader: int32Ptr(3),
+			})
+			Expect(k8sClient.Create(context.Background(), cfg)).NotTo(Succeed(),
+				"writerIsAlsoReader accepts only 0, 1 or 2")
+		})
+
+		It("rejects a readerHostgroup reused across mysqlGaleraHostgroups rows", func() {
+			// ProxySQL declares UNIQUE (reader_hostgroup) across the table.
+			cfg := galeraCfg("adm-galera-dup-reader",
+				proxysqlv1alpha1.MySQLGaleraHostgroup{
+					WriterHostgroup: 10, BackupWriterHostgroup: 12,
+					ReaderHostgroup: 11, OfflineHostgroup: 13,
+				},
+				proxysqlv1alpha1.MySQLGaleraHostgroup{
+					WriterHostgroup: 20, BackupWriterHostgroup: 22,
+					ReaderHostgroup: 11, OfflineHostgroup: 23,
+				},
+			)
+			Expect(k8sClient.Create(context.Background(), cfg)).NotTo(Succeed(),
+				"readerHostgroup must be unique across galera rows")
+		})
 	})
 
 	Context("pgsql mismatch condition", func() {

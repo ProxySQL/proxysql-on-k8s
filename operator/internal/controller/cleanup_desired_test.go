@@ -118,6 +118,9 @@ func TestCleanupDesired_ClearsEverythingElse(t *testing.T) {
 	if len(d.MySQLReplicationHostgroups) != 0 {
 		t.Errorf("MySQLReplicationHostgroups = %v, want empty", d.MySQLReplicationHostgroups)
 	}
+	if len(d.MySQLGaleraHostgroups) != 0 {
+		t.Errorf("MySQLGaleraHostgroups = %v, want empty", d.MySQLGaleraHostgroups)
+	}
 	if len(d.MySQLHostgroupAttributes) != 0 {
 		t.Errorf("MySQLHostgroupAttributes = %v, want empty", d.MySQLHostgroupAttributes)
 	}

@@ -37,14 +37,16 @@ import (
 // flap between reconciles. Empty sections stay nil (not empty slices/maps).
 //
 // Merge keys: mysql/pgsql servers by "hostgroup:hostname:port"; users by username; query
-// rules by rule id; replication hostgroups by writer hostgroup; hostgroup attributes by
-// hostgroup; proxysql servers by "hostname:port"; the three variable maps by variable name.
+// rules by rule id; replication hostgroups and galera hostgroups by writer hostgroup;
+// hostgroup attributes by hostgroup; proxysql servers by "hostname:port"; the three variable
+// maps by variable name.
 // sqlStatements are concatenated in input order (opaque, idempotent).
 func Union(desireds []*Desired) *Desired {
 	msrv := map[string]MySQLServer{}
 	musr := map[string]MySQLUser{}
 	mrule := map[int32]MySQLQueryRule{}
 	mrepl := map[int32]MySQLReplicationHostgroup{}
+	mgalera := map[int32]MySQLGaleraHostgroup{}
 	mattr := map[int32]MySQLHostgroupAttributes{}
 	pgsrv := map[string]PostgreSQLServer{}
 	pgusr := map[string]PostgreSQLUser{}
@@ -70,6 +72,9 @@ func Union(desireds []*Desired) *Desired {
 		}
 		for _, h := range d.MySQLReplicationHostgroups {
 			mrepl[h.WriterHostgroup] = h
+		}
+		for _, h := range d.MySQLGaleraHostgroups {
+			mgalera[h.WriterHostgroup] = h
 		}
 		for _, a := range d.MySQLHostgroupAttributes {
 			mattr[a.Hostgroup] = a
@@ -104,6 +109,9 @@ func Union(desireds []*Desired) *Desired {
 	}
 	for _, k := range sortedInt32Keys(mrepl) {
 		out.MySQLReplicationHostgroups = append(out.MySQLReplicationHostgroups, mrepl[k])
+	}
+	for _, k := range sortedInt32Keys(mgalera) {
+		out.MySQLGaleraHostgroups = append(out.MySQLGaleraHostgroups, mgalera[k])
 	}
 	for _, k := range sortedInt32Keys(mattr) {
 		out.MySQLHostgroupAttributes = append(out.MySQLHostgroupAttributes, mattr[k])

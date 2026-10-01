@@ -176,7 +176,7 @@ The drift check respects those moves: within a replication-hostgroup
 pair it enforces membership only, so a monitor-driven writer/reader move
 never registers as drift and the resync leaves the runtime placement
 alone — details in
-[Backends](./backends.md#drift-detection-and-replication-hostgroups).
+[Backends](./backends.md#drift-detection-and-hostgroup-topologies).
 This mechanism requires the **monitor user** to exist on the backends —
 see [Backends](./backends.md#the-monitor-user).
 

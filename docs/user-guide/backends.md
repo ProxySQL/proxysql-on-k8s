@@ -151,33 +151,97 @@ A misconfigured monitor is the classic silent failure: backends get
 `ProxySQLConfig.status.shunnedBackends` climbs. Diagnosis steps in
 [Operations](./operations.md#troubleshooting).
 
-## Drift detection and replication hostgroups
+## Galera clusters
+
+Galera-based backends — Galera itself, Percona XtraDB Cluster, MariaDB
+Cluster — have no `read_only` writer flag to follow, so
+`mysqlReplicationHostgroups` does not apply to them.
+`mysqlGaleraHostgroups` does: one row wires **four** hostgroups together
+and ProxySQL's Galera monitor places each node among them from its wsrep
+state.
+
+```yaml
+spec:
+  # Declare every node in the WRITER hostgroup. The monitor does the rest.
+  mysqlServers:
+    - {hostgroup: 10, hostname: pxc-0.pxc, port: 3306}
+    - {hostgroup: 10, hostname: pxc-1.pxc, port: 3306}
+    - {hostgroup: 10, hostname: pxc-2.pxc, port: 3306}
+  mysqlGaleraHostgroups:
+    - writerHostgroup: 10
+      backupWriterHostgroup: 12
+      readerHostgroup: 11
+      offlineHostgroup: 13
+      maxWriters: 1          # single-writer routing
+      writerIsAlsoReader: 2  # only the backup writers serve reads
+```
+
+- **writer** holds up to `maxWriters` nodes. `maxWriters: 1` routes all
+  writes to one node, which avoids Galera certification conflicts —
+  concurrent conflicting transactions on different nodes fail
+  certification at `COMMIT`. Raise it for multi-writer.
+- **backup writer** holds the remaining Synced nodes, promoted when the
+  writer leaves.
+- **reader** holds any healthy node reporting `read_only=1`, plus whichever
+  writable tiers `writerIsAlsoReader` mirrors in: `0` neither, `1` writers and
+  backup writers, `2` only backup writers. With `0` the hostgroup is therefore
+  empty only while no node is read-only.
+- **offline** is where the monitor parks a node that is not Synced, is
+  desynced, has `wsrep_reject_queries` set, or has exceeded
+  `maxTransactionsBehind` (its `wsrep_local_recv_queue` backlog).
+
+The [follow-never-manage stance](#the-failover-stance-follow-never-manage)
+applies in full: the operator syncs the table and tolerates the monitor's
+moves. It never probes a node's wsrep state itself, never promotes and
+never writes to a backend. Field-by-field details are in the
+[`mysqlGaleraHostgroups` reference](../reference/proxysqlconfig.md#mysqlgalerahostgroups);
+`examples/mysql/percona-pxc/` is a working cookbook entry.
+
+Group replication (`mysql_group_replication_hostgroups`) and Aurora are
+not modelled yet — use `sqlStatements` for those, with the drift caveat
+below.
+
+## Drift detection and hostgroup topologies
 
 The operator's drift detection enforces **membership, not placement**.
-For every hostgroup covered by a `mysqlReplicationHostgroups` pair, a
-listed server counts as converged when runtime holds it in *either*
-hostgroup of the pair — so the monitor demoting a writer to the reader
-hostgroup on a `read_only` flip, promoting a replica during failover, or
-mirroring the writer into the reader hostgroup
-(`mysql-monitor_writer_is_also_reader`) is ProxySQL doing its job, never
+For every hostgroup covered by a declared topology, a listed server
+counts as converged when runtime holds it in *any* hostgroup of that
+topology's equivalence class:
+
+| Declared by | Equivalence class |
+|---|---|
+| `mysqlReplicationHostgroups` row | writer + reader |
+| `mysqlGaleraHostgroups` row | writer + backup writer + reader + offline |
+
+So the read-only monitor demoting a writer on a `read_only` flip,
+promoting a replica during failover, or mirroring the writer into the
+reader hostgroup (`mysql-monitor_writer_is_also_reader`) is ProxySQL
+doing its job, never drift — and equally, the Galera monitor electing a
+writer under `maxWriters`, mirroring backup writers into the reader
+hostgroup, or parking an unusable node in the offline hostgroup. A node
+in the offline hostgroup is still a declared member of its topology, not
 drift. The same goes for health status: a `SHUNNED` backend is present,
 not drifted. What *is* drift: a listed server missing from every
-hostgroup of its pair, or an unknown server appearing in one — both
-trigger a re-push. Hostgroups not covered by any pair keep exact
-placement enforcement (without a pair, nothing may legitimately move a
+hostgroup of its class, or an unknown server appearing in one — both
+trigger a re-push. Topologies sharing a hostgroup chain into one class.
+Hostgroups not covered by any pair or row keep exact placement
+enforcement (with nothing declared, nothing may legitimately move a
 server), and `pgsqlServers` are always exact — this operator exposes no
-PostgreSQL replication-hostgroup field. If you configure pgsql
-replication hostgroups out-of-band via `sqlStatements`, pgsql drift
-detection will fight the monitor's placement moves exactly as described
-in [#34](https://github.com/ProxySQL/proxysql-on-k8s/issues/34) — don't.
+PostgreSQL cluster-hostgroup field. If you configure pgsql replication
+hostgroups out-of-band via `sqlStatements`, pgsql drift detection will
+fight the monitor's placement moves exactly as described in
+[#34](https://github.com/ProxySQL/proxysql-on-k8s/issues/34) — don't. The
+same warning applied to Galera hostgroups pushed through `sqlStatements`
+before `mysqlGaleraHostgroups` existed.
 
 One transient to know about: when a re-push *does* happen on a config
-with replication hostgroups — a spec change, or healing real drift — the
-full table write momentarily resets servers to the spec's static
-placement. The monitor re-places them within one
-`mysql-monitor_read_only_interval` (1.5 s by default). That window only
-opens on actual changes, not on the periodic resync of a converged
-cluster.
+with replication or Galera hostgroups — a spec change, or healing real
+drift — the full table write momentarily resets servers to the spec's
+static placement. The monitor re-places them within one
+`mysql-monitor_read_only_interval` (1.5 s by default), or one
+`mysql-monitor_galera_healthcheck_interval` (5 s by default) for Galera.
+That window only opens on actual changes, not on the periodic resync of a
+converged cluster.
 
 ## What's coming: backend auto-discovery
 

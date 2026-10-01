@@ -24,9 +24,9 @@ import (
 // ProxySQLConfigSpec is the declarative ProxySQL configuration the operator
 // pushes to a target ProxySQLCluster via its admin port. Fields map 1:1 to
 // the ProxySQL admin tables: mysql_servers, mysql_users, mysql_query_rules,
-// mysql_replication_hostgroups, mysql_hostgroup_attributes, pgsql_servers,
-// pgsql_users, pgsql_query_rules, proxysql_servers, plus admin/mysql/pgsql
-// variables.
+// mysql_replication_hostgroups, mysql_galera_hostgroups,
+// mysql_hostgroup_attributes, pgsql_servers, pgsql_users, pgsql_query_rules,
+// proxysql_servers, plus admin/mysql/pgsql variables.
 type ProxySQLConfigSpec struct {
 	// ClusterRef points to the ProxySQLCluster this config applies to.
 	// Must exist in the same namespace.
@@ -52,6 +52,22 @@ type ProxySQLConfigSpec struct {
 	// +listType=map
 	// +listMapKey=writerHostgroup
 	MySQLReplicationHostgroups []MySQLReplicationHostgroup `json:"mysqlReplicationHostgroups,omitempty"`
+	// MySQLGaleraHostgroups declares Galera-based topologies (Galera itself,
+	// Percona XtraDB Cluster, MariaDB Cluster) so ProxySQL's Galera monitor
+	// can place each node in the right hostgroup. Maps to
+	// mysql_galera_hostgroups. Declare the backend nodes in
+	// mysqlServers under the writer hostgroup; the monitor distributes them
+	// across the writer, backup-writer, reader and offline hostgroups from
+	// each row's wsrep state. The operator follows those moves and never
+	// promotes, fences or probes a backend itself.
+	// +optional
+	// +listType=map
+	// +listMapKey=writerHostgroup
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.readerHostgroup == x.readerHostgroup))",message="readerHostgroup must be unique across mysqlGaleraHostgroups entries"
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.offlineHostgroup == x.offlineHostgroup))",message="offlineHostgroup must be unique across mysqlGaleraHostgroups entries"
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.backupWriterHostgroup == x.backupWriterHostgroup))",message="backupWriterHostgroup must be unique across mysqlGaleraHostgroups entries"
+	MySQLGaleraHostgroups []MySQLGaleraHostgroup `json:"mysqlGaleraHostgroups,omitempty"`
 	// +optional
 	// +listType=map
 	// +listMapKey=hostgroup
@@ -226,6 +242,66 @@ type MySQLReplicationHostgroup struct {
 	// +kubebuilder:default=read_only
 	// +kubebuilder:validation:Enum=read_only;innodb_read_only;super_read_only;read_only|innodb_read_only;read_only&innodb_read_only
 	CheckType string `json:"checkType,omitempty"`
+	// +optional
+	Comment string `json:"comment,omitempty"`
+}
+
+// MySQLGaleraHostgroup maps to a row in mysql_galera_hostgroups: one Galera
+// cluster's four hostgroups plus the monitor's placement policy. ProxySQL's
+// Galera monitor reads each node's wsrep state and keeps the hostgroups in
+// sync with it, so the operator treats all four hostgroups of a row as one
+// topology and tolerates the monitor's moves instead of re-asserting static
+// placement. Unset optional fields fall back to ProxySQL's column defaults.
+//
+// All four hostgroups must differ from each other, mirroring the CHECK
+// constraints on the ProxySQL table.
+// +kubebuilder:validation:XValidation:rule="self.writerHostgroup != self.backupWriterHostgroup && self.writerHostgroup != self.readerHostgroup && self.writerHostgroup != self.offlineHostgroup && self.backupWriterHostgroup != self.readerHostgroup && self.backupWriterHostgroup != self.offlineHostgroup && self.readerHostgroup != self.offlineHostgroup",message="writerHostgroup, backupWriterHostgroup, readerHostgroup and offlineHostgroup must all differ"
+type MySQLGaleraHostgroup struct {
+	// WriterHostgroup holds the node (or nodes, up to maxWriters) accepting
+	// writes. Maps to writer_hostgroup, the table's primary key.
+	// +kubebuilder:validation:Minimum=0
+	WriterHostgroup int32 `json:"writerHostgroup"`
+	// BackupWriterHostgroup holds Synced nodes eligible to become writers but
+	// held back by maxWriters. The monitor promotes one of them when the
+	// current writer leaves the cluster. Maps to backup_writer_hostgroup.
+	// +kubebuilder:validation:Minimum=0
+	BackupWriterHostgroup int32 `json:"backupWriterHostgroup"`
+	// ReaderHostgroup holds nodes serving reads. Maps to reader_hostgroup;
+	// ProxySQL requires it to be greater than 0.
+	// +kubebuilder:validation:Minimum=1
+	ReaderHostgroup int32 `json:"readerHostgroup"`
+	// OfflineHostgroup is where the monitor parks nodes that are not usable:
+	// not Synced/Donor, desynced, rejecting queries, or lagging past
+	// maxTransactionsBehind. Maps to offline_hostgroup.
+	// +kubebuilder:validation:Minimum=0
+	OfflineHostgroup int32 `json:"offlineHostgroup"`
+	// Active enables monitoring and hostgroup management for this row. When
+	// false the four hostgroups keep whatever placement they have and the
+	// monitor leaves them alone. Maps to active; ProxySQL default true.
+	// +optional
+	Active *bool `json:"active,omitempty"`
+	// MaxWriters caps how many nodes the monitor keeps in the writer
+	// hostgroup; the remaining Synced nodes go to the backup-writer
+	// hostgroup. 1 gives single-writer routing, which avoids Galera
+	// certification conflicts; raise it for multi-writer. Maps to
+	// max_writers; ProxySQL default 1.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxWriters *int32 `json:"maxWriters,omitempty"`
+	// WriterIsAlsoReader controls which tiers are mirrored into the reader
+	// hostgroup: 0 = neither writers nor backup writers are placed there,
+	// 1 = both are, 2 = only backup writers are, so the writer stays
+	// write-only. Maps to writer_is_also_reader; ProxySQL default 0.
+	// +optional
+	// +kubebuilder:validation:Enum=0;1;2
+	WriterIsAlsoReader *int32 `json:"writerIsAlsoReader,omitempty"`
+	// MaxTransactionsBehind is the Galera flow-control lag threshold: a node
+	// whose wsrep_local_recv_queue exceeds it is moved to the offline
+	// hostgroup until it catches up. Maps to max_transactions_behind;
+	// ProxySQL default 0, which tolerates no queued writesets.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxTransactionsBehind *int32 `json:"maxTransactionsBehind,omitempty"`
 	// +optional
 	Comment string `json:"comment,omitempty"`
 }

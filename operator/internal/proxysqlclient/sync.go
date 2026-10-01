@@ -48,11 +48,12 @@ func Sync(ctx context.Context, c Executor, d *Desired) error {
 	steps := []syncStep{
 		{name: "mysql_servers", run: func() error { return syncMySQLServers(ctx, c, d) }},
 		{name: "mysql_replication_hostgroups", run: func() error { return syncMySQLReplicationHostgroups(ctx, c, d) }},
+		{name: "mysql_galera_hostgroups", run: func() error { return syncMySQLGaleraHostgroups(ctx, c, d) }},
 		{name: "mysql_hostgroup_attributes", run: func() error { return syncMySQLHostgroupAttributes(ctx, c, d) }},
-		// mysql_replication_hostgroups and mysql_hostgroup_attributes are
-		// loaded with mysql_servers (verified live: runtime rows appear only
-		// after LOAD MYSQL SERVERS TO RUNTIME); apply the LOAD/SAVE only once
-		// after all three tables are written.
+		// mysql_replication_hostgroups, mysql_galera_hostgroups and
+		// mysql_hostgroup_attributes are loaded with mysql_servers (verified
+		// live: runtime rows appear only after LOAD MYSQL SERVERS TO RUNTIME);
+		// apply the LOAD/SAVE only once after all four tables are written.
 		{name: "mysql_servers_apply", run: func() error { return loadSave(ctx, c, "MYSQL SERVERS") }},
 
 		{name: "mysql_users", run: func() error { return syncMySQLUsers(ctx, c, d) }},
@@ -151,6 +152,40 @@ func syncMySQLReplicationHostgroups(ctx context.Context, c Executor, d *Desired)
 			check = "read_only"
 		}
 		fmt.Fprintf(&b, "(%d,%d,%s,%s)", h.WriterHostgroup, h.ReaderHostgroup, quote(check), quote(h.Comment))
+	}
+	return c.Exec(ctx, b.String())
+}
+
+// ---- mysql_galera_hostgroups ----
+
+func syncMySQLGaleraHostgroups(ctx context.Context, c Executor, d *Desired) error {
+	if err := c.Exec(ctx, "DELETE FROM mysql_galera_hostgroups"); err != nil {
+		return err
+	}
+	if len(d.MySQLGaleraHostgroups) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("INSERT INTO mysql_galera_hostgroups (writer_hostgroup,backup_writer_hostgroup," +
+		"reader_hostgroup,offline_hostgroup,active,max_writers,writer_is_also_reader," +
+		"max_transactions_behind,comment) VALUES ")
+	for i, h := range d.MySQLGaleraHostgroups {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		// Every column but comment is NOT NULL with a ProxySQL default —
+		// render the column default for unset fields, never NULL.
+		fmt.Fprintf(&b, "(%d,%d,%d,%d,%s,%s,%s,%s,%s)",
+			h.WriterHostgroup,
+			h.BackupWriterHostgroup,
+			h.ReaderHostgroup,
+			h.OfflineHostgroup,
+			defBoolAsInt(h.Active, true),         // NOT NULL DEFAULT 1
+			defInt32(h.MaxWriters, 1),            // NOT NULL DEFAULT 1
+			defInt32(h.WriterIsAlsoReader, 0),    // 0|1|2, NOT NULL DEFAULT 0
+			defInt32(h.MaxTransactionsBehind, 0), // NOT NULL DEFAULT 0
+			quote(h.Comment),
+		)
 	}
 	return c.Exec(ctx, b.String())
 }

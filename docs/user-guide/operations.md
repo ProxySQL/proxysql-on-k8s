@@ -101,7 +101,7 @@ Within a `mysqlReplicationHostgroups` pair the drift check enforces
 membership only — a server the `read_only` monitor moved between the
 pair's writer and reader hostgroups, or a `SHUNNED` backend, never
 triggers a re-push (see
-[Backends](./backends.md#drift-detection-and-replication-hostgroups)).
+[Backends](./backends.md#drift-detection-and-hostgroup-topologies)).
 
 What is *not* self-healed: variables you set out-of-band that the spec
 doesn't mention (the operator only writes declared variables), tables
@@ -429,8 +429,9 @@ SELECT * FROM monitor.mysql_server_connect_log
 
 **The danger of out-of-band writes:** any write to a managed table
 (`mysql_servers`, `mysql_users`, `mysql_query_rules`,
-`mysql_replication_hostgroups`, `mysql_hostgroup_attributes`, the
-`pgsql_*` equivalents, `proxysql_servers`) will be **reverted** at the
+`mysql_replication_hostgroups`, `mysql_galera_hostgroups`,
+`mysql_hostgroup_attributes`, the `pgsql_*` equivalents,
+`proxysql_servers`) will be **reverted** at the
 next push or within the resync interval — each sync replaces those
 tables wholesale. Worse, a manual "fix" can mask a real problem until
 the resync removes it, typically mid-incident. If runtime needs to

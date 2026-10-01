@@ -36,6 +36,7 @@ admission (and server-side apply merges per-key):
 | `mysqlUsers` | `username` |
 | `mysqlQueryRules` | `ruleId` |
 | `mysqlReplicationHostgroups` | `writerHostgroup` |
+| `mysqlGaleraHostgroups` | `writerHostgroup` |
 | `mysqlHostgroupAttributes` | `hostgroup` |
 | `pgsqlServers` | `hostgroup`, `hostname`, `port` |
 | `pgsqlUsers` | `username` |
@@ -128,6 +129,60 @@ based on the backend's read-only state.
 | `readerHostgroup` | `int32` | — | required | Hostgroup for read-only servers. |
 | `checkType` | `string` | `read_only` (CRD; sync also falls back to `read_only`) | enum: `read_only`, `innodb_read_only`, `super_read_only`, `read_only\|innodb_read_only`, `read_only&innodb_read_only` | Which backend variable(s) the monitor checks. |
 | `comment` | `string` | `''` | — | Free text. |
+
+### mysqlGaleraHostgroups
+
+Maps to `mysql_galera_hostgroups` — automatic placement across four hostgroups
+for a Galera-based cluster (Galera, Percona XtraDB Cluster, MariaDB Cluster),
+driven by each node's wsrep state. Declare the nodes in `mysqlServers` under
+the **writer** hostgroup; ProxySQL's Galera monitor distributes them from
+there. Every column except `comment` is NOT NULL with a ProxySQL default;
+unset fields emit the column default (shown in the Default column).
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `writerHostgroup` | `int32` | — | required (map key), min 0 | Hostgroup for the node(s) accepting writes. |
+| `backupWriterHostgroup` | `int32` | — | required, min 0 | Synced nodes eligible for promotion but held back by `maxWriters`. |
+| `readerHostgroup` | `int32` | — | required, **min 1** (ProxySQL requires > 0) | Hostgroup serving reads. |
+| `offlineHostgroup` | `int32` | — | required, min 0 | Where the monitor parks nodes that are not usable. |
+| `active` | `*bool` | unset → SQL `1` | — | Monitor and manage this row's hostgroups. `false` freezes current placement. |
+| `maxWriters` | `*int32` | unset → SQL `1` | min 0 | How many nodes stay in the writer hostgroup; the rest go to the backup-writer hostgroup. |
+| `writerIsAlsoReader` | `*int32` | unset → SQL `0` | enum: 0, 1, 2 | Which tiers are mirrored into the reader hostgroup: 0 = neither writers nor backup writers; 1 = both; 2 = only backup writers, so the writer stays write-only. |
+| `maxTransactionsBehind` | `*int32` | unset → SQL `0` | min 0 | Flow-control lag threshold: a node whose `wsrep_local_recv_queue` exceeds it is moved offline. The default 0 tolerates no queued writesets. |
+| `comment` | `string` | `''` | — | Free text. |
+
+Admission mirrors the ProxySQL table's constraints: the four hostgroups of a
+row must be pairwise distinct, and `readerHostgroup`, `offlineHostgroup` and
+`backupWriterHostgroup` are each unique across rows. At most 64 rows.
+
+A node moves to the offline hostgroup when it is not Synced (or a Donor with
+`wsrep_sst_donor_rejects_queries` off), is desynced, has
+`wsrep_reject_queries` set, or exceeds `maxTransactionsBehind`. A node with
+`read_only=1` is treated as a reader.
+
+**The operator follows the monitor, it never drives it.** All four hostgroups
+of a row form one drift equivalence class, so a writer election, a promotion
+after a node leaves, `writerIsAlsoReader` mirroring and a node parked offline
+are all *not* drift and are never reverted by a resync. The operator does not
+probe, promote or fence backends. See
+[admin-tables.md](admin-tables.md#drift-detection-coverage) for the drift table and
+[the design spec](../superpowers/specs/2026-09-29-galera-hostgroups-design.md)
+for the rationale.
+
+```yaml
+spec:
+  mysqlServers:
+    - {hostgroup: 10, hostname: pxc-0.pxc, port: 3306}
+    - {hostgroup: 10, hostname: pxc-1.pxc, port: 3306}
+    - {hostgroup: 10, hostname: pxc-2.pxc, port: 3306}
+  mysqlGaleraHostgroups:
+    - writerHostgroup: 10        # the elected writer
+      backupWriterHostgroup: 12  # the other Synced nodes
+      readerHostgroup: 11        # reads
+      offlineHostgroup: 13       # not Synced / desynced / lagging
+      maxWriters: 1              # single-writer routing
+      writerIsAlsoReader: 2      # only the backup writers serve reads
+```
 
 ### mysqlHostgroupAttributes
 

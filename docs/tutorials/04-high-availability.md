@@ -189,7 +189,7 @@ status:
 steady-state heartbeat: the operator keeps *verifying*, and only rewrites
 what actually diverged.
 
-## 5. Backend failover: replication hostgroups
+## 5. Backend failover: replication and Galera hostgroups
 
 So far HA covered the *proxy* layer. For the *backend* layer, ProxySQL can
 react to primary failover on its own — declare a writer/reader hostgroup
@@ -209,8 +209,28 @@ A backend reporting `read_only=0` lands in hostgroup 0 (writes),
 promotes a replica, traffic follows within seconds, with no Kubernetes-level
 change at all. This needs a working `monitor` user on the backends (which
 our demo pods don't have — it's disabled in this namespace), so it's not run
-here. The full stance per backend operator — who owns failover, which
-`checkType` to use, monitor-user setup — is in
+here.
+
+Galera-based clusters (Galera, Percona XtraDB Cluster, MariaDB Cluster) have
+no `read_only` writer flag, so they use `mysqlGaleraHostgroups` instead —
+**four** hostgroups per row, with ProxySQL's Galera monitor placing each node
+from its wsrep state:
+
+```yaml
+spec:
+  mysqlGaleraHostgroups:
+    - writerHostgroup: 0
+      backupWriterHostgroup: 2
+      readerHostgroup: 10
+      offlineHostgroup: 3
+      maxWriters: 1          # route writes to one node
+      writerIsAlsoReader: 2  # backup writers serve reads
+```
+
+Either way the operator only *follows* the monitor: placement moves within a
+declared pair or row are never treated as config drift and never reverted.
+The full stance per backend operator — who owns failover, which `checkType`
+to use, monitor-user setup, Galera hostgroups — is in
 [user-guide/backends.md](../user-guide/backends.md).
 
 ## Clean up

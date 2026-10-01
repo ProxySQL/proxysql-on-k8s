@@ -148,15 +148,17 @@ the reconciler performs an **informed resync** instead of a blind re-push:
 Drift comparison is keys-only (server `hostgroup:hostname:port`, usernames,
 rule IDs); attribute-level changes are carried by the spec-hash path. A
 `SHUNNED` backend is *present*, not drifted. Server keys are additionally
-**membership-aware**: hostgroups joined by a `mysqlReplicationHostgroups`
-pair compare as one equivalence class, so the `read_only` monitor moving a
-server between the pair's writer and reader hostgroups is not drift — only
-a server missing from every hostgroup of its pair, or an unknown extra
-server, triggers a re-push
-(see [Backends](../user-guide/backends.md#drift-detection-and-replication-hostgroups)).
+**membership-aware**: hostgroups joined by a declared topology compare as one
+equivalence class — writer + reader for a `mysqlReplicationHostgroups` pair,
+writer + backup writer + reader + offline for a `mysqlGaleraHostgroups` row —
+so a monitor moving a server within that set (`read_only` demotion, Galera
+writer election, a node parked offline) is not drift; only a server missing
+from every hostgroup of its class, or an unknown extra server, triggers a
+re-push
+(see [Backends](../user-guide/backends.md#drift-detection-and-hostgroup-topologies)).
 Tables excluded from drift
-detection (`mysql_replication_hostgroups`, `mysql_hostgroup_attributes`,
-`proxysql_servers`, variables) are still re-asserted whenever any drift
+detection (`mysql_replication_hostgroups`, `mysql_galera_hostgroups`,
+`mysql_hostgroup_attributes`, `proxysql_servers`, variables) are still re-asserted whenever any drift
 triggers a push, because Sync always writes every table — see
 [admin-tables.md](admin-tables.md#drift-detection-coverage).
 

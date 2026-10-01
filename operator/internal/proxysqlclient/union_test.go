@@ -73,6 +73,46 @@ func TestUnion_SameKey_LastWriterWins(t *testing.T) {
 	}
 }
 
+// Galera hostgroups merge by writer hostgroup, like replication hostgroups:
+// distinct rows from separate configs combine, and a collision on the writer
+// hostgroup resolves last-writer-wins.
+func TestUnion_GaleraHostgroups_MergeByWriterHostgroup(t *testing.T) {
+	a := &Desired{MySQLGaleraHostgroups: []MySQLGaleraHostgroup{{
+		WriterHostgroup: 10, BackupWriterHostgroup: 12, ReaderHostgroup: 11, OfflineHostgroup: 13,
+	}}}
+	b := &Desired{MySQLGaleraHostgroups: []MySQLGaleraHostgroup{{
+		WriterHostgroup: 20, BackupWriterHostgroup: 22, ReaderHostgroup: 21, OfflineHostgroup: 23,
+	}}}
+	got := Union([]*Desired{b, a}) // reversed input: output must still be key-sorted
+	if len(got.MySQLGaleraHostgroups) != 2 {
+		t.Fatalf("want 2 galera rows, got %d: %+v", len(got.MySQLGaleraHostgroups), got.MySQLGaleraHostgroups)
+	}
+	if got.MySQLGaleraHostgroups[0].WriterHostgroup != 10 || got.MySQLGaleraHostgroups[1].WriterHostgroup != 20 {
+		t.Errorf("galera rows not sorted by writer hostgroup: %+v", got.MySQLGaleraHostgroups)
+	}
+
+	first := &Desired{MySQLGaleraHostgroups: []MySQLGaleraHostgroup{{
+		WriterHostgroup: 10, BackupWriterHostgroup: 12, ReaderHostgroup: 11,
+		OfflineHostgroup: 13, Comment: "first",
+	}}}
+	last := &Desired{MySQLGaleraHostgroups: []MySQLGaleraHostgroup{{
+		WriterHostgroup: 10, BackupWriterHostgroup: 12, ReaderHostgroup: 11,
+		OfflineHostgroup: 13, Comment: "last",
+	}}}
+	got = Union([]*Desired{first, last})
+	if len(got.MySQLGaleraHostgroups) != 1 {
+		t.Fatalf("same writer hostgroup must collapse to 1 row, got %d", len(got.MySQLGaleraHostgroups))
+	}
+	if got.MySQLGaleraHostgroups[0].Comment != "last" {
+		t.Errorf("last-writer-wins failed: got comment %q", got.MySQLGaleraHostgroups[0].Comment)
+	}
+
+	// No galera rows anywhere in the input must stay nil, not an empty slice.
+	if got := Union([]*Desired{{}}); got.MySQLGaleraHostgroups != nil {
+		t.Errorf("empty galera section must stay nil, got %v", got.MySQLGaleraHostgroups)
+	}
+}
+
 // TestUnion_Deterministic verifies the union is stable regardless of nothing-changed
 // re-runs (a flapping fingerprint would cause needless re-pushes / connection drops).
 func TestUnion_Deterministic(t *testing.T) {

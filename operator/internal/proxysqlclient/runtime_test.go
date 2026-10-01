@@ -370,6 +370,165 @@ func TestDrift_PgSQLKeepsExactPlacement(t *testing.T) {
 	}
 }
 
+// galeraDesired declares three Galera nodes in the writer hostgroup of one
+// mysql_galera_hostgroups row (10/12/11/13, single-writer). The Galera
+// monitor is what distributes them across the four hostgroups.
+func galeraDesired() *Desired {
+	return &Desired{
+		MySQLServers: []MySQLServer{
+			{Hostgroup: 10, Hostname: "pxc-0", Port: 3306},
+			{Hostgroup: 10, Hostname: "pxc-1", Port: 3306},
+			{Hostgroup: 10, Hostname: "pxc-2", Port: 3306},
+		},
+		MySQLGaleraHostgroups: []MySQLGaleraHostgroup{{
+			WriterHostgroup: 10, BackupWriterHostgroup: 12,
+			ReaderHostgroup: 11, OfflineHostgroup: 13,
+			MaxWriters: ptr32(1),
+		}},
+	}
+}
+
+// max_writers=1 means the monitor elects ONE writer and parks the other
+// Synced nodes in the backup-writer hostgroup. That is the normal steady
+// state of a single-writer Galera cluster, not drift.
+func TestDrift_GaleraBackupWriterPlacementIsNotDrift(t *testing.T) {
+	d := galeraDesired()
+	rs := &RuntimeState{
+		MySQLServers: map[string]string{
+			"10:pxc-0:3306": "ONLINE", // elected writer
+			"12:pxc-1:3306": "ONLINE", // held back by max_writers=1
+			"12:pxc-2:3306": "ONLINE",
+		},
+	}
+	if diffs := d.Drift(rs); len(diffs) != 0 {
+		t.Errorf("Drift = %v, want none (backup-writer placement is monitor policy)", diffs)
+	}
+}
+
+// writer_is_also_reader=2 mirrors the backup writers into the reader
+// hostgroup, so one node legitimately appears in two hostgroups of the row.
+func TestDrift_GaleraWriterIsAlsoReaderIsNotDrift(t *testing.T) {
+	d := galeraDesired()
+	d.MySQLGaleraHostgroups[0].WriterIsAlsoReader = ptr32(2)
+	rs := &RuntimeState{
+		MySQLServers: map[string]string{
+			"10:pxc-0:3306": "ONLINE",
+			"12:pxc-1:3306": "ONLINE",
+			"11:pxc-1:3306": "ONLINE", // mirrored into the reader hostgroup
+			"12:pxc-2:3306": "ONLINE",
+			"11:pxc-2:3306": "ONLINE",
+		},
+	}
+	if diffs := d.Drift(rs); len(diffs) != 0 {
+		t.Errorf("Drift = %v, want none (writer_is_also_reader mirrors backup writers)", diffs)
+	}
+}
+
+// A node the Galera monitor parked in the offline hostgroup (not Synced,
+// desynced, rejecting queries, or lagging past max_transactions_behind) is
+// still a declared member of the topology — re-pushing static placement
+// against that move would fight the monitor.
+func TestDrift_GaleraOfflineHostgroupIsNotDrift(t *testing.T) {
+	d := galeraDesired()
+	rs := &RuntimeState{
+		MySQLServers: map[string]string{
+			"10:pxc-0:3306": "ONLINE",
+			"12:pxc-1:3306": "ONLINE",
+			"13:pxc-2:3306": "ONLINE", // parked offline by the monitor
+		},
+	}
+	if diffs := d.Drift(rs); len(diffs) != 0 {
+		t.Errorf("Drift = %v, want none (offline hostgroup is a declared member)", diffs)
+	}
+}
+
+// Gone from ALL FOUR hostgroups of the row is real drift; the message names
+// the spec placement.
+func TestDrift_GaleraMissingFromAllFourIsDrift(t *testing.T) {
+	d := galeraDesired()
+	rs := &RuntimeState{
+		MySQLServers: map[string]string{
+			"10:pxc-0:3306": "ONLINE",
+			"12:pxc-1:3306": "ONLINE",
+			// pxc-2 wiped out-of-band
+		},
+	}
+	diffs := d.Drift(rs)
+	want := []string{"mysql_servers: missing 10:pxc-2:3306"}
+	if len(diffs) != 1 || diffs[0] != want[0] {
+		t.Errorf("Drift = %v, want %v", diffs, want)
+	}
+}
+
+// An unknown node inside one of the row's hostgroups is real drift; the
+// message names the runtime row.
+func TestDrift_GaleraExtraServerIsDrift(t *testing.T) {
+	d := galeraDesired()
+	rs := &RuntimeState{
+		MySQLServers: map[string]string{
+			"10:pxc-0:3306": "ONLINE",
+			"12:pxc-1:3306": "ONLINE",
+			"12:pxc-2:3306": "ONLINE",
+			"12:ghost:3306": "ONLINE",
+		},
+	}
+	diffs := d.Drift(rs)
+	want := []string{"mysql_servers: extra 12:ghost:3306"}
+	if len(diffs) != 1 || diffs[0] != want[0] {
+		t.Errorf("Drift = %v, want %v", diffs, want)
+	}
+}
+
+// A Galera row and a replication pair sharing a hostgroup chain into ONE
+// equivalence class, the same way two overlapping pairs do: the union is
+// over group members, not over pair kinds.
+func TestDrift_GaleraAndReplicationPairChain(t *testing.T) {
+	d := galeraDesired()
+	// The pair's writer is the Galera row's reader hostgroup, chaining hg 20
+	// into the row's class {10,11,12,13}.
+	d.MySQLReplicationHostgroups = []MySQLReplicationHostgroup{
+		{WriterHostgroup: 11, ReaderHostgroup: 20},
+	}
+	rs := &RuntimeState{
+		MySQLServers: map[string]string{
+			"10:pxc-0:3306": "ONLINE",
+			"13:pxc-1:3306": "ONLINE", // offline hostgroup of the Galera row
+			"20:pxc-2:3306": "ONLINE", // reader hostgroup of the chained pair
+		},
+	}
+	if diffs := d.Drift(rs); len(diffs) != 0 {
+		t.Errorf("Drift = %v, want none (hg 20 chains to the Galera row via hg 11)", diffs)
+	}
+}
+
+// Hostgroups named by no Galera row and no replication pair keep exact
+// placement: with no declared topology there is no legitimate mover.
+func TestDrift_GaleraUnrelatedHostgroupKeepsExactPlacement(t *testing.T) {
+	d := galeraDesired()
+	d.MySQLServers = append(d.MySQLServers, MySQLServer{Hostgroup: 30, Hostname: "analytics", Port: 3306})
+	rs := &RuntimeState{
+		MySQLServers: map[string]string{
+			"10:pxc-0:3306":     "ONLINE",
+			"12:pxc-1:3306":     "ONLINE",
+			"12:pxc-2:3306":     "ONLINE",
+			"31:analytics:3306": "ONLINE", // moved out of hg 30 — nothing may do that
+		},
+	}
+	diffs := d.Drift(rs)
+	want := []string{
+		"mysql_servers: extra 31:analytics:3306",
+		"mysql_servers: missing 30:analytics:3306",
+	}
+	if len(diffs) != len(want) {
+		t.Fatalf("Drift = %v, want %v", diffs, want)
+	}
+	for i := range want {
+		if diffs[i] != want[i] {
+			t.Errorf("Drift[%d] = %q, want %q", i, diffs[i], want[i])
+		}
+	}
+}
+
 type recordingQuerier struct {
 	query string
 }

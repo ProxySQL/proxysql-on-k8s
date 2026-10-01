@@ -53,6 +53,7 @@ func TestSync_EmptyDesired_StillIssuesDeletesAndLoadSaves(t *testing.T) {
 	mustSee := []string{
 		"DELETE FROM mysql_servers",
 		"DELETE FROM mysql_replication_hostgroups",
+		"DELETE FROM mysql_galera_hostgroups",
 		"DELETE FROM mysql_hostgroup_attributes",
 		"DELETE FROM mysql_users",
 		"DELETE FROM mysql_query_rules",
@@ -399,6 +400,71 @@ func TestSync_MySQLHostgroupAttributes_WrittenBeforeMySQLServersLoad(t *testing.
 	}
 	if insertIdx > loadIdx {
 		t.Errorf("mysql_hostgroup_attributes INSERT (idx %d) must precede LOAD MYSQL SERVERS TO RUNTIME (idx %d)", insertIdx, loadIdx)
+	}
+}
+
+func TestSync_MySQLGaleraHostgroups_FullRow_RendersAllColumns(t *testing.T) {
+	rec := &recorder{}
+	maxWriters, alsoReader, behind := int32(3), int32(2), int32(100)
+	active := false
+	d := &Desired{MySQLGaleraHostgroups: []MySQLGaleraHostgroup{{
+		WriterHostgroup: 10, BackupWriterHostgroup: 12,
+		ReaderHostgroup: 11, OfflineHostgroup: 13,
+		Active: &active, MaxWriters: &maxWriters,
+		WriterIsAlsoReader: &alsoReader, MaxTransactionsBehind: &behind,
+		Comment: "pxc",
+	}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insert := findInsert(t, rec, "mysql_galera_hostgroups")
+	want := "INSERT INTO mysql_galera_hostgroups (writer_hostgroup,backup_writer_hostgroup," +
+		"reader_hostgroup,offline_hostgroup,active,max_writers,writer_is_also_reader," +
+		"max_transactions_behind,comment) VALUES " +
+		"(10,12,11,13,0,3,2,100,'pxc')"
+	if insert != want {
+		t.Errorf("mysql_galera_hostgroups INSERT mismatch:\n got: %s\nwant: %s", insert, want)
+	}
+}
+
+func TestSync_MySQLGaleraHostgroups_DefaultsOnly_RendersColumnDefaults(t *testing.T) {
+	rec := &recorder{}
+	d := &Desired{MySQLGaleraHostgroups: []MySQLGaleraHostgroup{{
+		WriterHostgroup: 0, BackupWriterHostgroup: 2,
+		ReaderHostgroup: 1, OfflineHostgroup: 3,
+	}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insert := findInsert(t, rec, "mysql_galera_hostgroups")
+	// Every column but comment is NOT NULL with a ProxySQL default; unset
+	// fields must emit those defaults (active=1, max_writers=1,
+	// writer_is_also_reader=0, max_transactions_behind=0), never NULL.
+	want := "(0,2,1,3,1,1,0,0,'')"
+	if !strings.HasSuffix(insert, want) {
+		t.Errorf("mysql_galera_hostgroups defaults mismatch:\n got: %s\nwant suffix: %s", insert, want)
+	}
+}
+
+func TestSync_MySQLGaleraHostgroups_WrittenBeforeMySQLServersLoad(t *testing.T) {
+	// mysql_galera_hostgroups is part of the MYSQL SERVERS load/save family
+	// (MySQL_HostGroups_Manager commits it with the servers table), so the
+	// write must land before the shared mysql_servers_apply step.
+	rec := &recorder{}
+	d := &Desired{MySQLGaleraHostgroups: []MySQLGaleraHostgroup{{
+		WriterHostgroup: 10, BackupWriterHostgroup: 12,
+		ReaderHostgroup: 11, OfflineHostgroup: 13,
+	}}}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	insertIdx := indexOf(rec.queries, "INSERT INTO mysql_galera_hostgroups ")
+	loadIdx := indexOf(rec.queries, "LOAD MYSQL SERVERS TO RUNTIME")
+	if insertIdx < 0 || loadIdx < 0 {
+		t.Fatalf("missing insert (%d) or load (%d); queries=%v", insertIdx, loadIdx, rec.queries)
+	}
+	if insertIdx > loadIdx {
+		t.Errorf("mysql_galera_hostgroups INSERT (idx %d) must precede LOAD MYSQL SERVERS TO RUNTIME (idx %d)", insertIdx, loadIdx)
 	}
 }
 

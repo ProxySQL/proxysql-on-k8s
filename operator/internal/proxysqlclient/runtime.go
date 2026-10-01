@@ -147,26 +147,30 @@ func (rs *RuntimeState) ShunnedCount() int32 {
 // config divergence.
 //
 // Servers are compared as MEMBERSHIP, not placement: for every hostgroup
-// covered by a mysql_replication_hostgroups pair, a desired server counts as
-// present when runtime holds it in ANY hostgroup of that pair's equivalence
-// class. ProxySQL's read_only monitor legitimately moves servers between the
-// writer and reader hostgroups of a pair (demotion, failover promotion,
-// writer_is_also_reader mirroring) — re-pushing the spec's static placement
-// against those moves would demote a just-promoted writer every resync
-// (issue #34). A server absent from every hostgroup of its class, or an
-// unknown server present in one, is real drift. Hostgroups outside every
-// pair keep exact placement: with no pair there is no legitimate mover.
-// pgsql_servers always use exact placement — this operator carries no
-// PostgreSQL replication-hostgroup concept.
+// covered by a declared topology, a desired server counts as present when
+// runtime holds it in ANY hostgroup of that topology's equivalence class. A
+// mysql_replication_hostgroups pair contributes {writer, reader}; a
+// mysql_galera_hostgroups row contributes {writer, backupWriter, reader,
+// offline}. ProxySQL's monitors legitimately move servers within those sets —
+// read_only demotion and failover promotion, Galera writer election under
+// max_writers, writer_is_also_reader mirroring, and parking an unusable node
+// in the Galera offline hostgroup — and re-pushing the spec's static
+// placement against those moves would demote a just-promoted writer every
+// resync (issue #34). A server absent from every hostgroup of its class, or
+// an unknown server present in one, is real drift. Hostgroups outside every
+// declared topology keep exact placement: with no pair or row there is no
+// legitimate mover. pgsql_servers always use exact placement — this operator
+// carries no PostgreSQL cluster-hostgroup concept.
 //
-// mysql_replication_hostgroups, mysql_hostgroup_attributes and
-// proxysql_servers are deliberately outside drift detection: the first two are
-// loaded/saved together with mysql_servers (so external wipes of servers — the
-// realistic mutation — are already caught), and the latter is peer topology
-// that ProxySQL Cluster sync self-heals. All are still re-asserted whenever
-// any drift triggers a push, since Sync always writes every table.
+// mysql_replication_hostgroups, mysql_galera_hostgroups,
+// mysql_hostgroup_attributes and proxysql_servers are deliberately outside
+// drift detection: the first three are loaded/saved together with
+// mysql_servers (so external wipes of servers — the realistic mutation — are
+// already caught), and the latter is peer topology that ProxySQL Cluster sync
+// self-heals. All are still re-asserted whenever any drift triggers a push,
+// since Sync always writes every table.
 func (d *Desired) Drift(rs *RuntimeState) []string {
-	classes := replicationClasses(d.MySQLReplicationHostgroups)
+	classes := d.hostgroupClasses()
 	diffs := make([]string, 0, 8)
 	diffs = append(diffs, diffServers("mysql_servers", mysqlServerKeys(d.MySQLServers, classes), runtimeServerKeys(rs.MySQLServers, classes))...)
 	diffs = append(diffs, diffKeys("mysql_users", userKeys(mysqlUsernames(d.MySQLUsers)), rs.MySQLUsers)...)
@@ -178,16 +182,36 @@ func (d *Desired) Drift(rs *RuntimeState) []string {
 	return diffs
 }
 
-// ---- replication-hostgroup equivalence ----
+// ---- hostgroup equivalence ----
 
-// replicationClasses maps every hostgroup covered by a
-// mysql_replication_hostgroups pair to a canonical class representative (the
-// smallest hostgroup id in its class). Pairs sharing a hostgroup chain into
-// one class via union-find — ProxySQL treats hostgroups reachable through
-// shared pairs as one replication topology. Returns nil when no pairs are
-// configured, which keeps server comparison exact.
-func replicationClasses(pairs []MySQLReplicationHostgroup) map[int32]int32 {
-	if len(pairs) == 0 {
+// hostgroupClasses returns the equivalence classes of this desired state's
+// declared topologies: the hostgroups ProxySQL's monitors may legitimately
+// move a server between. Each mysql_replication_hostgroups pair contributes
+// {writer, reader}; each mysql_galera_hostgroups row contributes the full
+// {writer, backupWriter, reader, offline} quad, because the Galera monitor
+// distributes nodes across all four (and writer_is_also_reader puts one node
+// in two of them at once).
+func (d *Desired) hostgroupClasses() map[int32]int32 {
+	groups := make([][]int32, 0, len(d.MySQLReplicationHostgroups)+len(d.MySQLGaleraHostgroups))
+	for _, p := range d.MySQLReplicationHostgroups {
+		groups = append(groups, []int32{p.WriterHostgroup, p.ReaderHostgroup})
+	}
+	for _, g := range d.MySQLGaleraHostgroups {
+		groups = append(groups, []int32{
+			g.WriterHostgroup, g.BackupWriterHostgroup, g.ReaderHostgroup, g.OfflineHostgroup,
+		})
+	}
+	return equivalenceClasses(groups)
+}
+
+// equivalenceClasses maps every hostgroup named by one of groups to a
+// canonical class representative (the smallest hostgroup id in its class).
+// All members of a group are unioned together, and groups sharing a hostgroup
+// chain into one class via union-find — ProxySQL treats hostgroups reachable
+// through shared pairs or rows as one topology. Returns nil when no groups
+// are configured, which keeps server comparison exact.
+func equivalenceClasses(groups [][]int32) map[int32]int32 {
+	if len(groups) == 0 {
 		return nil
 	}
 	parent := map[int32]int32{}
@@ -205,13 +229,16 @@ func replicationClasses(pairs []MySQLReplicationHostgroup) map[int32]int32 {
 		parent[x] = root
 		return root
 	}
-	for _, p := range pairs {
-		rw, rr := find(p.WriterHostgroup), find(p.ReaderHostgroup)
-		if rw != rr {
-			if rr < rw {
-				rw, rr = rr, rw
+	for _, g := range groups {
+		for _, hg := range g[1:] {
+			ra, rb := find(g[0]), find(hg)
+			if ra == rb {
+				continue
 			}
-			parent[rr] = rw // smaller id becomes the representative
+			if rb < ra {
+				ra, rb = rb, ra
+			}
+			parent[rb] = ra // smaller id becomes the representative
 		}
 	}
 	classes := make(map[int32]int32, len(parent))
@@ -221,8 +248,8 @@ func replicationClasses(pairs []MySQLReplicationHostgroup) map[int32]int32 {
 	return classes
 }
 
-// canonServerKey returns the comparison key for a server row: hostgroups in a
-// replication class compare by the class representative ("rhg<rep>:host:port",
+// canonServerKey returns the comparison key for a server row: hostgroups in an
+// equivalence class compare by the class representative ("rhg<rep>:host:port",
 // a prefix no literal hostgroup id can produce), everything else by the exact
 // "hg:host:port" identity.
 func canonServerKey(hg int32, hostPort string, classes map[int32]int32) string {

@@ -22,3 +22,17 @@ func TestSyncFingerprint_ChangesWithSQLStatements(t *testing.T) {
 		t.Fatal("editing a statement must change the sync fingerprint")
 	}
 }
+
+func TestSyncFingerprint_ChangesWithGaleraHostgroups(t *testing.T) {
+	addrs := []string{"10.0.0.1:6032"}
+	base := syncFingerprint(&proxysqlclient.Desired{}, addrs)
+	withRow := syncFingerprint(&proxysqlclient.Desired{
+		MySQLGaleraHostgroups: []proxysqlclient.MySQLGaleraHostgroup{{
+			WriterHostgroup: 10, BackupWriterHostgroup: 12,
+			ReaderHostgroup: 11, OfflineHostgroup: 13,
+		}},
+	}, addrs)
+	if base == withRow {
+		t.Fatal("adding a galera hostgroup row must change the sync fingerprint")
+	}
+}

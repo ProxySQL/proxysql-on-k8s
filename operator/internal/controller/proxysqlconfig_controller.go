@@ -325,6 +325,16 @@ func (r *ProxySQLConfigReconciler) configToDesired(ctx context.Context, cfg *pro
 			CheckType: h.CheckType, Comment: h.Comment,
 		})
 	}
+	for _, h := range cfg.Spec.MySQLGaleraHostgroups {
+		d.MySQLGaleraHostgroups = append(d.MySQLGaleraHostgroups, proxysqlclient.MySQLGaleraHostgroup{
+			WriterHostgroup: h.WriterHostgroup, BackupWriterHostgroup: h.BackupWriterHostgroup,
+			ReaderHostgroup: h.ReaderHostgroup, OfflineHostgroup: h.OfflineHostgroup,
+			Active: h.Active, MaxWriters: h.MaxWriters,
+			WriterIsAlsoReader:    h.WriterIsAlsoReader,
+			MaxTransactionsBehind: h.MaxTransactionsBehind,
+			Comment:               h.Comment,
+		})
+	}
 	for _, a := range cfg.Spec.MySQLHostgroupAttributes {
 		d.MySQLHostgroupAttributes = append(d.MySQLHostgroupAttributes, proxysqlclient.MySQLHostgroupAttributes{
 			Hostgroup:           a.Hostgroup,

@@ -28,11 +28,12 @@ Properties:
   remaining sections are still attempted; previously applied sections stay
   applied. The first error is what surfaces in the `Degraded`/`SyncErrors`
   condition message (per-replica errors are aggregated).
-- **Shared LOAD for the servers group**: `mysql_replication_hostgroups` and
-  `mysql_hostgroup_attributes` are loaded to runtime together with
-  `mysql_servers` — all three tables are written first, then a single
-  `LOAD MYSQL SERVERS TO RUNTIME; SAVE MYSQL SERVERS TO DISK` applies them
-  (verified live: runtime rows appear only after LOAD MYSQL SERVERS).
+- **Shared LOAD for the servers group**: `mysql_replication_hostgroups`,
+  `mysql_galera_hostgroups` and `mysql_hostgroup_attributes` are loaded to
+  runtime together with `mysql_servers` — all four tables are written first,
+  then a single `LOAD MYSQL SERVERS TO RUNTIME; SAVE MYSQL SERVERS TO DISK`
+  applies them (verified live: runtime rows appear only after LOAD MYSQL
+  SERVERS).
 - Query-rule rows are inserted in ascending `rule_id` order (deterministic
   diffs); other lists keep spec order.
 - Variables use `UPDATE global_variables` + `LOAD/SAVE <DOMAIN> VARIABLES`
@@ -42,7 +43,7 @@ Properties:
 
 | Section | Tables written before it |
 |---|---|
-| `MYSQL SERVERS` | `mysql_servers`, `mysql_replication_hostgroups`, `mysql_hostgroup_attributes` |
+| `MYSQL SERVERS` | `mysql_servers`, `mysql_replication_hostgroups`, `mysql_galera_hostgroups`, `mysql_hostgroup_attributes` |
 | `MYSQL USERS` | `mysql_users` |
 | `MYSQL QUERY RULES` | `mysql_query_rules` |
 | `PGSQL SERVERS` | `pgsql_servers` |
@@ -88,6 +89,26 @@ spec field.
 | `writerHostgroup` | `writer_hostgroup` | required |
 | `readerHostgroup` | `reader_hostgroup` | required |
 | `checkType` | `check_type` | `'read_only'` |
+| `comment` | `comment` | `''` |
+
+### mysql_galera_hostgroups
+
+Every column except `comment` is NOT NULL with a ProxySQL default; unset
+always renders the column default, never NULL. The four hostgroups of a row
+must be pairwise distinct, `reader_hostgroup` must be > 0, and
+`reader_hostgroup`/`offline_hostgroup`/`backup_writer_hostgroup` are each
+UNIQUE across the table — all enforced at admission by CEL.
+
+| API field (`mysqlGaleraHostgroups[]`) | Column | SQL when unset |
+|---|---|---|
+| `writerHostgroup` | `writer_hostgroup` | required |
+| `backupWriterHostgroup` | `backup_writer_hostgroup` | required |
+| `readerHostgroup` | `reader_hostgroup` | required |
+| `offlineHostgroup` | `offline_hostgroup` | required |
+| `active` | `active` | `1` |
+| `maxWriters` | `max_writers` | `1` |
+| `writerIsAlsoReader` | `writer_is_also_reader` | `0` |
+| `maxTransactionsBehind` | `max_transactions_behind` | `0` |
 | `comment` | `comment` | `''` |
 
 ### mysql_hostgroup_attributes
@@ -231,13 +252,14 @@ back **identity keys only** from the `runtime_*` tables and compares:
 
 | Table | In drift detection | Compared key |
 |---|---|---|
-| `runtime_mysql_servers` | yes | `hostgroup_id:hostname:port` — membership-aware: hostgroups joined by a `mysqlReplicationHostgroups` pair compare as one equivalence class, so a server in either hostgroup of its pair is present (status read but ignored for drift; counted for `shunnedBackends`) |
+| `runtime_mysql_servers` | yes | `hostgroup_id:hostname:port` — membership-aware: hostgroups joined by a declared topology compare as one equivalence class (a `mysqlReplicationHostgroups` pair contributes `{writer, reader}`, a `mysqlGaleraHostgroups` row all four of `{writer, backupWriter, reader, offline}`), so a server in any hostgroup of its class is present (status read but ignored for drift; counted for `shunnedBackends`) |
 | `runtime_mysql_users` | yes | `username` (DISTINCT — runtime holds frontend + backend rows per user) |
 | `runtime_mysql_query_rules` | yes | `rule_id` |
 | `runtime_pgsql_servers` | yes | `hostgroup_id:hostname:port` |
 | `runtime_pgsql_users` | yes | `username` (DISTINCT) |
 | `runtime_pgsql_query_rules` | yes | `rule_id` |
 | `mysql_replication_hostgroups` | **no** | loaded/saved with mysql_servers, so the realistic external mutation (a wiped servers table) is already caught |
+| `mysql_galera_hostgroups` | **no** | same reasoning |
 | `mysql_hostgroup_attributes` | **no** | same reasoning |
 | `proxysql_servers` | **no** | peer topology; re-asserted on every push (auto-populated when the spec list is empty) and self-healed by ProxySQL Cluster sync |
 | `global_variables` | **no** | re-asserted on every actual push |
@@ -251,12 +273,18 @@ Notes:
 - A `SHUNNED` server is *present*, therefore **not** drifted — shunning is
   ProxySQL's own health reaction, surfaced separately as
   `status.shunnedBackends`.
-- Server comparison enforces **membership, not placement** (#34): within
-  the hostgroups of a `mysqlReplicationHostgroups` pair, monitor-driven
-  moves (`read_only` demotion, failover promotion, writer-is-also-reader
-  mirroring) are not drift; a server missing from every hostgroup of its
-  pair, or an unknown server, is. Pairs sharing a hostgroup chain into one
-  equivalence class. Hostgroups outside every pair — and all
+- Server comparison enforces **membership, not placement** (#34): within the
+  hostgroups of a declared topology, monitor-driven moves are not drift; a
+  server missing from every hostgroup of its class, or an unknown server, is.
+  For a `mysqlReplicationHostgroups` pair those moves are `read_only`
+  demotion, failover promotion and writer-is-also-reader mirroring across
+  `{writer, reader}`. For a `mysqlGaleraHostgroups` row the class is all four
+  of `{writer, backupWriter, reader, offline}`: the Galera monitor elects
+  writers under `maxWriters`, mirrors backup writers into the reader
+  hostgroup with `writerIsAlsoReader`, and parks unusable nodes in the
+  offline hostgroup — a node parked there is still a declared member, not
+  drift. Pairs and rows sharing a hostgroup chain into one equivalence
+  class. Hostgroups outside every declared topology — and all
   `pgsql_servers` — keep exact-placement comparison.
 - Passwords are never read back; the read-back queries select identity
   columns only.

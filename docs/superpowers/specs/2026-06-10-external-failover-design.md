@@ -131,6 +131,9 @@ capability.
   `mysql_galera_hostgroups` / Aurora hostgroup tables are the same sync pattern
   (new columns in `sync.go` + `Desired` fields) if demand appears — same
   follow-only semantics, cluster-aware checks instead of read_only.
+  *(Update: `mysql_galera_hostgroups` is implemented — see
+  [2026-09-29-galera-hostgroups-design.md](2026-09-29-galera-hostgroups-design.md).
+  Group replication and Aurora remain candidates.)*
 
 ## Non-goals
 
