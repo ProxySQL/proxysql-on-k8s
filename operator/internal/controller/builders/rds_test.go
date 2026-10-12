@@ -32,6 +32,12 @@ func TestRDSClusterRendersPluginRuntime(t *testing.T) {
 	if !strings.Contains(cnf, "\naws_managed=true;\n") {
 		t.Fatalf("bootstrap cnf does not enable managed service:\n%s", cnf)
 	}
+	if !strings.Contains(cnf, "\nplugins=(\"/usr/lib/proxysql/ProxySQL_Aws_Plugin.so\");\n") {
+		t.Fatalf("bootstrap cnf does not load the AWS plugin bundle:\n%s", cnf)
+	}
+	if !strings.Contains(cnf, "\nweb_interface_plugin=\"/usr/lib/proxysql/Web_Interface_plugin.so\";\n") {
+		t.Fatalf("bootstrap cnf does not load the Web plugin:\n%s", cnf)
+	}
 
 	statefulSet := builder.StatefulSet("checksum")
 	pod := statefulSet.Spec.Template.Spec

@@ -160,6 +160,8 @@ const bootstrapCnfTemplate = `# Operator-managed bootstrap config for ProxySQLCl
 # Backends, users, query rules, and runtime tuning are pushed via ProxySQLConfig.
 datadir="/var/lib/proxysql"
 {{- if .AWSManaged }}
+plugins=("/usr/lib/proxysql/ProxySQL_Aws_Plugin.so");
+web_interface_plugin="/usr/lib/proxysql/Web_Interface_plugin.so";
 aws_managed=true;
 {{- end }}
 
