@@ -44,8 +44,8 @@ import (
 	"github.com/ProxySQL/kubernetes/operator/internal/proxysqlclient"
 )
 
-// ProxySQLConfigReconciler translates a declarative ProxySQLConfig into SQL
-// writes on the target ProxySQLCluster's admin port.
+// ProxySQLConfigReconciler applies native configuration through Admin SQL and
+// RDS-compatible configuration through the plugin API.
 type ProxySQLConfigReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -103,7 +103,7 @@ const (
 	defaultDriftResyncInterval = 2 * time.Minute
 )
 
-// Reconcile pushes ProxySQLConfig to the target cluster.
+// Reconcile applies one complete ProxySQLConfig to the target cluster.
 //
 // Order of operations:
 //  1. Fetch the CR.
@@ -111,17 +111,17 @@ const (
 //  3. Read the cluster's admin Secret to obtain the admin password.
 //  4. Resolve each MySQL/PostgreSQL user's password from its referenced Secret.
 //  5. Discover ready ProxySQL pods via label selector.
-//  6. Compute a SHA-256 over the resolved Desired; short-circuit if it matches
+//  6. Compute a SHA-256 over the native and RDS desired state; short-circuit if it matches
 //     status.LastAppliedHash AND every ready pod was synced AND the drift
 //     resync interval hasn't elapsed. When only the interval elapsed, read
 //     runtime state back from each replica and narrow the push to the
 //     replicas that actually drifted (read-back failure counts as drift).
-//  7. For each target pod, open a SQL connection to its admin port and run
-//     the full Sync (DELETE/INSERT/LOAD/SAVE per table + variables).
+//  7. For each target pod, clear RDS state through the plugin API, sync native
+//     tables through Admin SQL, reapply RDS state, and verify both domains.
 //  8. Update status (LastAppliedHash, LastSyncTime, SyncedReplicas,
 //     DriftedReplicas, ShunnedBackends, LastRuntimeCheckTime, Conditions).
 //
-// Write strategy: write-to-all. ProxySQL Cluster sync would also propagate
+// Write strategy: write-to-all. ProxySQL Cluster sync also propagates
 // changes, but explicitly writing to every replica makes SyncedReplicas
 // accurate and surfaces unreachable pods immediately.
 func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -207,9 +207,16 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		_ = r.Status().Update(ctx, &cfg)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
+	rdsState, err := r.buildRDSReconcileState(ctx, &cfg, &cluster)
+	if err != nil {
+		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "RDSConfigError", err.Error())
+		r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "RDSConfigError", err.Error())
+		_ = r.Status().Update(ctx, &cfg)
+		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
 
 	// 4) Discover ready ProxySQL pods plus the TLS dial config.
-	addrs, dialTLS, done, err := r.resolveDialTargets(ctx, &cfg, &cluster, adminPort)
+	endpoints, addrs, dialTLS, done, err := r.resolveDialTargets(ctx, &cfg, &cluster, adminPort)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -226,10 +233,11 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// level-based: without it, runtime drift that doesn't change the spec/
 	// replica-set/generation (e.g. an externally-mutated admin table) would be
 	// skipped forever, since the hash and replica count still match.
-	hash := syncFingerprint(desired, addrs)
+	hash := combinedSyncFingerprint(desired, rdsState, cfg.Spec.Version, addrs)
 	unchanged := cfg.Status.LastAppliedHash == hash &&
 		cfg.Status.SyncedReplicas == int32(len(addrs)) &&
-		cfg.Status.ObservedGeneration == cfg.Generation
+		cfg.Status.ObservedGeneration == cfg.Generation &&
+		cfg.Status.ObservedVersion == cfg.Spec.Version
 	dueForResync := resyncDue(cfg.Status.LastSyncTime, time.Now(), r.resyncInterval())
 
 	if unchanged && !dueForResync {
@@ -237,38 +245,82 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: requeueAfterSuccess}, nil
 	}
 
-	pushAddrs := addrs
+	pushEndpoints := endpoints
 	if unchanged && dueForResync {
-		// Informed resync: nothing about the spec or replica set changed, so
-		// instead of blind-pushing everything, read runtime state back and
-		// re-push only the replicas that actually drifted.
-		drifted, shunned := r.verifyReplicas(ctx, addrs, radminPassword, desired, dialTLS)
+		// Informed resync: observe both configuration domains and reapply only
+		// replicas whose complete state cannot be proven converged.
+		observations := make([]replicaObservation, 0, len(endpoints))
+		pushEndpoints = nil
+		for _, endpoint := range endpoints {
+			observation := r.observeReplica(ctx, endpoint, radminPassword, desired, rdsState, dialTLS, cfg.Spec.Version)
+			observations = append(observations, observation)
+			if observation.drifted {
+				pushEndpoints = append(pushEndpoints, endpoint)
+			}
+		}
+		statuses, synced, drifted, shunned := summarizeReplicas(observations)
 		now := metav1.NewTime(time.Now())
 		cfg.Status.LastRuntimeCheckTime = &now
 		cfg.Status.ShunnedBackends = shunned
-		cfg.Status.DriftedReplicas = int32(len(drifted))
-		if len(drifted) == 0 {
+		cfg.Status.Replicas = statuses
+		cfg.Status.SyncedReplicas = synced
+		cfg.Status.DriftedReplicas = drifted
+		if len(pushEndpoints) == 0 {
 			// Converged everywhere: verification counts as asserting desired
 			// state, so advance the resync clock.
 			cfg.Status.LastSyncTime = &now
+			cfg.Status.ObservedVersion = cfg.Spec.Version
 			if err := r.Status().Update(ctx, &cfg); err != nil {
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{RequeueAfter: requeueAfterSuccess}, nil
 		}
-		pushAddrs = drifted
 	}
 
-	// 6) Fan out writes.
-	synced, syncErrs := r.applyToReplicas(ctx, pushAddrs, radminPassword, desired, dialTLS)
+	// 6) Apply the one ordered native/RDS cycle to each target replica, then
+	// verify the complete state before counting it as synced.
+	resultsByPod := make(map[string]replicaObservation, len(endpoints))
+	if len(pushEndpoints) != len(endpoints) {
+		for _, endpoint := range endpoints {
+			selected := false
+			for _, candidate := range pushEndpoints {
+				if endpoint.Pod == candidate.Pod {
+					selected = true
+					break
+				}
+			}
+			if !selected {
+				resultsByPod[endpoint.Pod] = r.observeReplica(ctx, endpoint, radminPassword, desired, rdsState, dialTLS, cfg.Spec.Version)
+			}
+		}
+	}
+	for _, endpoint := range pushEndpoints {
+		resultsByPod[endpoint.Pod] = r.applyReplica(ctx, endpoint, radminPassword, desired, rdsState, dialTLS, cfg.Spec.Version)
+	}
+	observations := make([]replicaObservation, 0, len(endpoints))
+	var syncErrs []error
+	for _, endpoint := range endpoints {
+		observation := resultsByPod[endpoint.Pod]
+		observations = append(observations, observation)
+		if !observation.status.Converged {
+			syncErrs = append(syncErrs, fmt.Errorf("%s: %s", endpoint.Pod, observation.status.Reason))
+		}
+	}
+	statuses, synced, drifted, shunned := summarizeReplicas(observations)
+	now := metav1.NewTime(time.Now())
+	cfg.Status.Replicas = statuses
+	cfg.Status.SyncedReplicas = synced
+	cfg.Status.DriftedReplicas = drifted
+	cfg.Status.ShunnedBackends = shunned
+	cfg.Status.LastRuntimeCheckTime = &now
 
 	// 7) Status.
 	cfg.Status.ObservedGeneration = cfg.Generation
-	if synced == len(pushAddrs) && len(syncErrs) == 0 {
+	if synced == int32(len(endpoints)) && len(syncErrs) == 0 {
 		cfg.Status.SyncedReplicas = int32(len(addrs))
 		cfg.Status.DriftedReplicas = 0
 		cfg.Status.LastAppliedHash = hash
-		now := metav1.NewTime(time.Now())
+		cfg.Status.ObservedVersion = cfg.Spec.Version
 		cfg.Status.LastSyncTime = &now
 		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionTrue, "Synced",
 			fmt.Sprintf("config applied to %d/%d replicas", len(addrs), len(addrs)))
@@ -285,10 +337,8 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// Partial or full failure.
-	cfg.Status.SyncedReplicas = int32(len(addrs) - len(pushAddrs) + synced)
 	r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "PartialSync",
-		fmt.Sprintf("synced %d/%d replicas (%d re-push targets, %d succeeded)",
-			len(addrs)-len(pushAddrs)+synced, len(addrs), len(pushAddrs), synced))
+		fmt.Sprintf("complete config converged on %d/%d replicas", synced, len(addrs)))
 	// Degraded is a single condition: when a pgsql mismatch coexists with sync
 	// errors, fold the warning into the message so it isn't silently dropped.
 	degradedMsg := joinErrs(syncErrs)
@@ -527,10 +577,10 @@ func (r *ProxySQLConfigReconciler) resolveDialTargets(
 	cfg *proxysqlv1alpha1.ProxySQLConfig,
 	cluster *proxysqlv1alpha1.ProxySQLCluster,
 	adminPort int32,
-) (addrs []string, dialTLS *adminTLS, done *ctrl.Result, err error) {
-	endpoints, err := discoverPodEndpoints(ctx, r.Client, cluster, adminPort)
+) (endpoints []podEndpoint, addrs []string, dialTLS *adminTLS, done *ctrl.Result, err error) {
+	endpoints, err = discoverPodEndpoints(ctx, r.Client, cluster, adminPort)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	dialTLS, dialErr := adminDialTLS(ctx, r.Client, cluster, endpoints)
 	if dialErr != nil {
@@ -540,7 +590,7 @@ func (r *ProxySQLConfigReconciler) resolveDialTargets(
 		// trust-configure.
 		r.setCfgCondition(cfg, cfgCondReady, metav1.ConditionFalse, "TLSDialConfigError", dialErr.Error())
 		_ = r.Status().Update(ctx, cfg)
-		return nil, nil, &ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+		return nil, nil, nil, &ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
 	addrs = make([]string, 0, len(endpoints))
 	for _, ep := range endpoints {
@@ -557,9 +607,9 @@ func (r *ProxySQLConfigReconciler) resolveDialTargets(
 		}
 		r.setCfgCondition(cfg, cfgCondReady, metav1.ConditionFalse, reason, msg)
 		_ = r.Status().Update(ctx, cfg)
-		return nil, nil, &ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+		return nil, nil, nil, &ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
-	return addrs, dialTLS, nil, nil
+	return endpoints, addrs, dialTLS, nil, nil
 }
 
 // applyToReplicas opens a connection to each addr and runs Sync. Returns the
@@ -679,6 +729,27 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 			"cluster", cluster.Name, "escapeHatch", skipCleanupAnnotation)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
+	if cfg.Spec.RDS != nil {
+		rdsState, err := r.buildRDSReconcileState(ctx, cfg, &cluster)
+		if err != nil {
+			log.Info("RDS cleanup pending; retrying", "cluster", cluster.Name, "error", err.Error())
+			return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+		}
+		for _, endpoint := range endpoints {
+			api, err := rdsState.client(endpoint, dialTLS)
+			if err != nil {
+				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+			}
+			observed, err := api.Describe(ctx, rdsState.desired.Proxy.ARN)
+			if err != nil {
+				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+			}
+			if err := api.ClearMutable(ctx, observed); err != nil {
+				log.Info("RDS cleanup incomplete; retrying", "pod", endpoint.Pod, "error", err.Error())
+				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+			}
+		}
+	}
 
 	// Push the runtime the cluster should have WITHOUT this config: the union of the
 	// remaining ProxySQLConfigs (#956). If sibling configs still target the cluster, deleting
@@ -747,6 +818,28 @@ func syncFingerprint(d *proxysqlclient.Desired, addrs []string) string {
 	for _, a := range addrs {
 		h.Write([]byte{0})
 		h.Write([]byte(a))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func combinedSyncFingerprint(d *proxysqlclient.Desired, rdsState *rdsReconcileState, version int64, addrs []string) string {
+	value := struct {
+		Native  *proxysqlclient.Desired
+		RDS     any
+		Version int64
+	}{Native: d, Version: version}
+	if rdsState != nil {
+		value.RDS = rdsState.desired
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		return "marshal-error"
+	}
+	h := sha256.New()
+	h.Write(b)
+	for _, addr := range addrs {
+		h.Write([]byte{0})
+		h.Write([]byte(addr))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

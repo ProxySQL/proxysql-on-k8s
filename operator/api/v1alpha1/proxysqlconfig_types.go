@@ -432,13 +432,14 @@ type ProxySQLConfigStatus struct {
 	// +optional
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 
-	// SyncedReplicas is the number of ProxySQL pods that received the latest config.
+	// SyncedReplicas is the number of ready pods whose complete native and RDS
+	// state matches the current version.
 	// +optional
 	SyncedReplicas int32 `json:"syncedReplicas,omitempty"`
 
-	// DriftedReplicas is the number of ready replicas whose runtime tables
-	// diverged from the desired config at the last runtime check. 0 when
-	// everything converged.
+	// DriftedReplicas is the number of ready replicas whose native or RDS state
+	// diverged from the desired config, or could not be verified. 0 when all
+	// ready replicas converged.
 	// +optional
 	DriftedReplicas int32 `json:"driftedReplicas,omitempty"`
 

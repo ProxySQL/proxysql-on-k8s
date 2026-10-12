@@ -693,9 +693,9 @@ spec:
                 x-kubernetes-list-type: map
               driftedReplicas:
                 description: |-
-                  DriftedReplicas is the number of ready replicas whose runtime tables
-                  diverged from the desired config at the last runtime check. 0 when
-                  everything converged.
+                  DriftedReplicas is the number of ready replicas whose native or RDS state
+                  diverged from the desired config, or could not be verified. 0 when all
+                  ready replicas converged.
                 format: int32
                 type: integer
               lastAppliedHash:
@@ -760,8 +760,9 @@ spec:
                 format: int32
                 type: integer
               syncedReplicas:
-                description: SyncedReplicas is the number of ProxySQL pods that received
-                  the latest config.
+                description: |-
+                  SyncedReplicas is the number of ready pods whose complete native and RDS
+                  state matches the current version.
                 format: int32
                 type: integer
             type: object

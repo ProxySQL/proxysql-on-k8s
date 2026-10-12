@@ -45,7 +45,10 @@ type RuntimeState struct {
 	// (ONLINE, SHUNNED, OFFLINE_SOFT, ...).
 	MySQLServers map[string]string
 	MySQLUsers   map[string]bool
-	MySQLRules   map[string]bool
+	// MySQLUserHostgroups carries the default_hostgroup needed to classify
+	// plugin-owned users without changing the existing username drift model.
+	MySQLUserHostgroups map[string]int32
+	MySQLRules          map[string]bool
 
 	// PgSQLServers maps "hostgroup:hostname:port" to the runtime status.
 	PgSQLServers map[string]string
@@ -61,18 +64,19 @@ type RuntimeState struct {
 // SELECT DISTINCT. Password columns are never selected.
 func ReadRuntime(ctx context.Context, q Querier) (*RuntimeState, error) {
 	rs := &RuntimeState{
-		MySQLServers: map[string]string{},
-		MySQLUsers:   map[string]bool{},
-		MySQLRules:   map[string]bool{},
-		PgSQLServers: map[string]string{},
-		PgSQLUsers:   map[string]bool{},
-		PgSQLRules:   map[string]bool{},
+		MySQLServers:        map[string]string{},
+		MySQLUsers:          map[string]bool{},
+		MySQLUserHostgroups: map[string]int32{},
+		MySQLRules:          map[string]bool{},
+		PgSQLServers:        map[string]string{},
+		PgSQLUsers:          map[string]bool{},
+		PgSQLRules:          map[string]bool{},
 	}
 
 	if err := readServers(ctx, q, "runtime_mysql_servers", rs.MySQLServers); err != nil {
 		return nil, err
 	}
-	if err := readKeys(ctx, q, "SELECT DISTINCT username FROM runtime_mysql_users", rs.MySQLUsers); err != nil {
+	if err := readMySQLUsers(ctx, q, rs.MySQLUsers, rs.MySQLUserHostgroups); err != nil {
 		return nil, err
 	}
 	if err := readKeys(ctx, q, "SELECT rule_id FROM runtime_mysql_query_rules", rs.MySQLRules); err != nil {
@@ -90,6 +94,79 @@ func ReadRuntime(ctx context.Context, q Querier) (*RuntimeState, error) {
 	}
 
 	return rs, nil
+}
+
+func readMySQLUsers(ctx context.Context, q Querier, users map[string]bool, hostgroups map[string]int32) error {
+	rows, err := q.Query(ctx, "SELECT DISTINCT username, default_hostgroup FROM runtime_mysql_users")
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+		users[row[0]] = true
+		if len(row) > 1 {
+			if hostgroup, err := strconv.ParseInt(row[1], 10, 32); err == nil {
+				hostgroups[row[0]] = int32(hostgroup)
+			}
+		}
+	}
+	return nil
+}
+
+// NativeRuntime removes RDS-owned runtime rows before native drift comparison.
+// Server ownership is hostgroup-based. An extra user is plugin-owned only when
+// it is absent from the native desired set and its default hostgroup is claimed.
+func NativeRuntime(rs *RuntimeState, desired *Desired, claimedHostgroups map[int32]bool) *RuntimeState {
+	if rs == nil || len(claimedHostgroups) == 0 {
+		return rs
+	}
+	filtered := &RuntimeState{
+		MySQLServers: copyStringMap(rs.MySQLServers), MySQLUsers: copyBoolMap(rs.MySQLUsers),
+		MySQLUserHostgroups: copyInt32Map(rs.MySQLUserHostgroups), MySQLRules: copyBoolMap(rs.MySQLRules),
+		PgSQLServers: copyStringMap(rs.PgSQLServers), PgSQLUsers: copyBoolMap(rs.PgSQLUsers), PgSQLRules: copyBoolMap(rs.PgSQLRules),
+	}
+	for key := range filtered.MySQLServers {
+		if separator := strings.IndexByte(key, ':'); separator > 0 {
+			if hostgroup, err := strconv.ParseInt(key[:separator], 10, 32); err == nil && claimedHostgroups[int32(hostgroup)] {
+				delete(filtered.MySQLServers, key)
+			}
+		}
+	}
+	nativeUsers := map[string]bool{}
+	for _, user := range desired.MySQLUsers {
+		nativeUsers[user.Username] = true
+	}
+	for username, hostgroup := range filtered.MySQLUserHostgroups {
+		if !nativeUsers[username] && claimedHostgroups[hostgroup] {
+			delete(filtered.MySQLUsers, username)
+			delete(filtered.MySQLUserHostgroups, username)
+		}
+	}
+	return filtered
+}
+
+func copyStringMap(source map[string]string) map[string]string {
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+func copyBoolMap(source map[string]bool) map[string]bool {
+	result := make(map[string]bool, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+func copyInt32Map(source map[string]int32) map[string]int32 {
+	result := make(map[string]int32, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
 }
 
 // readServers fills dst with "hostgroup:hostname:port" → status from a

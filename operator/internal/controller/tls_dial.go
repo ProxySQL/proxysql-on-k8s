@@ -21,6 +21,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net/http"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -65,6 +67,17 @@ func (t *adminTLS) dial(addr, user, pass string) (*proxysqlclient.Client, error)
 	return proxysqlclient.NewWithTLS(addr, user, pass, t.configFor(addr))
 }
 
+// httpClient returns a client that dials a pod IP while verifying the stable
+// pod DNS name covered by the operator-managed serving certificate.
+func (t *adminTLS) httpClient(serverName string) (*http.Client, error) {
+	if t == nil || t.base == nil {
+		return nil, fmt.Errorf("RDS API TLS trust is not available")
+	}
+	cfg := t.base.Clone()
+	cfg.ServerName = serverName
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}, Timeout: 20 * time.Second}, nil
+}
+
 // adminDialTLS builds the adminTLS trust bundle for a cluster, or nil
 // (plaintext) when its PODS are not TLS-wired. "Wired" is read from the
 // LIVE StatefulSet's tls volume — not from spec.tls — because the dials
@@ -83,7 +96,7 @@ func (t *adminTLS) dial(addr, user, pass string) (*proxysqlclient.Client, error)
 //     fingerprint-pinned rather than pool-verified) reloads the pod, and
 //     the failed routine dial's requeue retries against the new cert.
 func adminDialTLS(ctx context.Context, c client.Client, cluster *proxysqlv1alpha1.ProxySQLCluster, endpoints []podEndpoint) (*adminTLS, error) {
-	if !cluster.Spec.TLSEnabled() {
+	if !cluster.Spec.TLSEnabled() && cluster.Spec.RDS == nil {
 		return nil, nil
 	}
 

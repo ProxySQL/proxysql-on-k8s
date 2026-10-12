@@ -68,6 +68,12 @@ it in `<cluster>-rds-api`. The derived bootstrap document is stored in
 `<cluster>-rds-bootstrap`. Neither Secret is a customer AWS credential, and
 neither value appears in status.
 
+The same controller reconciles native and RDS-compatible state as one config.
+It uses Admin SQL for native tables and the plugin's signed HTTPS RDS API for
+the RDS section. Status advances `observedVersion` only after both domains are
+verified on every ready replica. `status.replicas` reports a safe per-pod reason
+without credentials, passwords, signed requests, or fetched secret values.
+
 ### mysqlServers
 
 Maps to `mysql_servers`. CRD-level defaults below; unset optional fields are
