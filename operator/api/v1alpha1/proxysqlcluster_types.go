@@ -27,6 +27,15 @@ import (
 // cluster. The operator reconciles this into a StatefulSet, headless+regular
 // Services, an admin Secret, and an optional PodDisruptionBudget.
 type ProxySQLClusterSpec struct {
+	// ServiceAccountName is copied to the ProxySQL pod template. When empty,
+	// Kubernetes uses the namespace's default ServiceAccount.
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// RDS enables the RDS-compatible plugin runtime for this cluster.
+	// +optional
+	RDS *RDSRuntimeSpec `json:"rds,omitempty"`
+
 	// Replicas is the number of ProxySQL control-plane pods.
 	// +optional
 	// +kubebuilder:default=3
@@ -171,6 +180,22 @@ type ProxySQLClusterSpec struct {
 	// precedence.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
+}
+
+// RDSRuntimeSpec contains the customer AWS role inputs used by the plugin
+// workload. Long-lived AWS credentials are never stored in this resource.
+type RDSRuntimeSpec struct {
+	// Region is the SigV4 and AWS SDK region for this RDS-compatible cluster.
+	// +kubebuilder:validation:MinLength=1
+	Region string `json:"region"`
+
+	// AssumeRoleARN is the customer role the plugin workload assumes.
+	// +kubebuilder:validation:MinLength=1
+	AssumeRoleARN string `json:"assumeRoleARN"`
+
+	// ExternalID is supplied to STS when the customer role is assumed.
+	// +kubebuilder:validation:MinLength=1
+	ExternalID string `json:"externalID"`
 }
 
 // TLSEnabled reports whether TLS is configured and turned on. Safe to call

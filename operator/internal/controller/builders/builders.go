@@ -50,6 +50,13 @@ const (
 	userRadmin = "radmin"
 )
 
+const (
+	RDSBootstrapSecretSuffix = "-rds-bootstrap"
+	RDSBootstrapVolumeName   = "rds-bootstrap"
+	RDSBootstrapMountPath    = "/etc/proxysql/rds"
+	RDSBootstrapFileName     = "bootstrap.json"
+)
+
 // Default ProxySQL secret key names. Match the AuthKeys defaults on the CRD.
 const (
 	SecretKeyAdminPassword   = "admin-password"
@@ -235,6 +242,12 @@ func (b *Builder) Namespace() string { return b.Cluster.Namespace }
 // StatefulSet's serviceName.
 func (b *Builder) HeadlessName() string { return b.Cluster.Name + "-headless" }
 
+// RDSBootstrapSecretName returns the Secret mounted for the plugin's one-shot
+// managed bootstrap.
+func (b *Builder) RDSBootstrapSecretName() string {
+	return b.Cluster.Name + RDSBootstrapSecretSuffix
+}
+
 // TLSSecretName returns the name of the operator-managed serving-cert
 // Secret (kubernetes.io/tls shape: tls.crt/tls.key, plus ca.crt). Used by
 // tiers 2 (cert-manager writes into it) and 3 (the operator issues into
@@ -375,6 +388,21 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 	}
 	if spec.Protocols.Web.IsEnabled() && spec.Protocols.Web.Port == 0 {
 		spec.Protocols.Web.Port = DefaultWebPort
+	}
+	// The RDS-compatible API is served by the web plugin. RDS-enabled clusters
+	// always need that internal listener even when the caller did not set the
+	// generic web protocol block.
+	if spec.RDS != nil {
+		spec.Protocols.Web.Enabled = boolPtr(true)
+		if spec.Protocols.Web.Port == 0 {
+			spec.Protocols.Web.Port = DefaultWebPort
+		}
+		// The RDS API is HTTPS. Use the operator's existing self-signed serving
+		// certificate fallback when the caller did not supply a TLS policy, so
+		// the config reconciler can verify every pod certificate.
+		if spec.TLS == nil || !spec.TLS.Enabled {
+			spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
+		}
 	}
 
 	// Persistence default: enabled, 1Gi.

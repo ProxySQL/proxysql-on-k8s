@@ -18,10 +18,12 @@ For task-oriented guidance see the
 | Subresources | `status` |
 | Printer columns | `Cluster`, `Synced`, `Drifted`, `Last-Sync`, `Age` |
 
-A `ProxySQLConfig` owns **no** Kubernetes objects; reconciling it produces
+A `ProxySQLConfig` normally owns no Kubernetes objects; reconciling it produces
 SQL writes (DELETE/INSERT/LOAD/SAVE per table, UPDATE for variables) on every
 ready replica of the referenced cluster, connecting as `radmin` (ProxySQL
-restricts the `admin` account to localhost). A finalizer
+restricts the `admin` account to localhost). When `spec.rds` is present, the
+same reconciler also maintains operator-owned internal credential and bootstrap
+Secrets controlled by the referenced cluster. A finalizer
 (`proxysql.com/config-cleanup`) clears the managed tables on deletion — see
 the [annotations & finalizers reference](annotations.md).
 
@@ -53,6 +55,18 @@ explicit-vs-defaulted port are still distinct rows.
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `clusterRef.name` | `string` | — | required | Name of the target `ProxySQLCluster` in the **same namespace**. A missing cluster sets `ClusterFound=False` and retries every 5s. |
+
+### version and RDS-compatible config
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `version` | `int64` | `0` | min 0 | Product configuration version shared by native and RDS-compatible state. |
+| `rds.config` | arbitrary JSON object | none | preserved unknown fields | Complete versioned RDS-compatible document delivered by the SaaS. The operator adapts it to the plugin bootstrap and API contracts. |
+
+The operator generates one internal SigV4 credential per cluster and preserves
+it in `<cluster>-rds-api`. The derived bootstrap document is stored in
+`<cluster>-rds-bootstrap`. Neither Secret is a customer AWS credential, and
+neither value appears in status.
 
 ### mysqlServers
 

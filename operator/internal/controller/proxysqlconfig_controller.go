@@ -68,7 +68,7 @@ func (r *ProxySQLConfigReconciler) resyncInterval() time.Duration {
 // +kubebuilder:rbac:groups=proxysql.com,resources=proxysqlconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=proxysql.com,resources=proxysqlconfigs/finalizers,verbs=update
 // +kubebuilder:rbac:groups=proxysql.com,resources=proxysqlclusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -160,6 +160,12 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	r.setCfgCondition(&cfg, cfgCondClusterFound, metav1.ConditionTrue, "Found", "ProxySQLCluster resolved")
 
 	b := builders.New(&cluster, r.Scheme, builders.Passwords{})
+	if err := r.ensureRDSBootstrap(ctx, &cfg, &cluster, b); err != nil {
+		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "RDSBootstrapError", err.Error())
+		r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "RDSBootstrapError", err.Error())
+		_ = r.Status().Update(ctx, &cfg)
+		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
 	keys := b.SecretKeys()
 	adminPort := b.Spec.Protocols.Admin.Port
 

@@ -159,6 +159,9 @@ func validateCnfVars(vars map[string]string, prefix string) error {
 const bootstrapCnfTemplate = `# Operator-managed bootstrap config for ProxySQLCluster {{ .ClusterName }}.
 # Backends, users, query rules, and runtime tuning are pushed via ProxySQLConfig.
 datadir="/var/lib/proxysql"
+{{- if .AWSManaged }}
+aws_managed=true;
+{{- end }}
 
 admin_variables=
 {
@@ -214,6 +217,7 @@ proxysql_servers=
 // cnfData is the input to bootstrapCnfTemplate.
 type cnfData struct {
 	ClusterName        string
+	AWSManaged         bool
 	AdminPassword      string
 	RadminPassword     string
 	MonitorPassword    string
@@ -354,6 +358,7 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 	clusterSync := len(proxysqlServers) > 0
 	data := cnfData{
 		ClusterName:        b.Name(),
+		AWSManaged:         b.Spec.RDS != nil,
 		AdminPassword:      b.Pw.Admin,
 		RadminPassword:     b.Pw.Radmin,
 		MonitorPassword:    b.Pw.Monitor,

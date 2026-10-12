@@ -135,6 +135,20 @@ func (b *Builder) podSpec() corev1.PodSpec {
 			},
 		},
 	}
+	if b.Spec.ServiceAccountName != "" {
+		spec.ServiceAccountName = b.Spec.ServiceAccountName
+	}
+	if b.Spec.RDS != nil {
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: RDSBootstrapVolumeName,
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: b.RDSBootstrapSecretName(),
+				Items: []corev1.KeyToPath{{
+					Key: RDSBootstrapFileName, Path: RDSBootstrapFileName,
+				}},
+			}},
+		})
+	}
 
 	// When persistence is disabled, mount an emptyDir for /var/lib/proxysql so
 	// the readOnlyRootFilesystem container has somewhere to write its admin DB.
@@ -364,6 +378,15 @@ func (b *Builder) container() corev1.Container {
 		Resources:      b.Spec.Resources,
 		VolumeMounts:   b.proxysqlVolumeMounts(),
 	}
+	if b.Spec.RDS != nil {
+		// The combined plugin image owns one-shot bootstrap and restart recovery
+		// in its entrypoint. Do not bypass it with the standard image command.
+		c.Command = []string{"/usr/local/bin/proxysql-entrypoint"}
+		c.Args = []string{
+			"--aws-managed-bootstrap=" + RDSBootstrapMountPath + "/" + RDSBootstrapFileName,
+			"--reload",
+		}
+	}
 
 	// Graceful shutdown (spec.gracefulShutdown, ProxySQL SaaS #196): a
 	// preStop hook that pauses new client connections and drains in-flight
@@ -468,6 +491,11 @@ func (b *Builder) proxysqlVolumeMounts() []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: "config", MountPath: "/etc/proxysql", ReadOnly: true},
 		{Name: "data", MountPath: "/var/lib/proxysql"},
+	}
+	if b.Spec.RDS != nil {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: RDSBootstrapVolumeName, MountPath: RDSBootstrapMountPath, ReadOnly: true,
+		})
 	}
 	if b.LoggingEnabled() {
 		mounts = append(mounts, corev1.VolumeMount{Name: "logs", MountPath: logsMountPath})
