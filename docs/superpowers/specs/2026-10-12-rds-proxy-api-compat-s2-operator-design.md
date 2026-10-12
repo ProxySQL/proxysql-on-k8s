@@ -27,6 +27,7 @@ rds:
   region: us-east-1
   assumeRoleARN: arn:aws:iam::123456789012:role/ProxySQLRDS
   externalID: organization-stable-value
+  vpcID: vpc-0123456789abcdef0
 ```
 
 Add these fields to `ProxySQLConfig.spec`:
