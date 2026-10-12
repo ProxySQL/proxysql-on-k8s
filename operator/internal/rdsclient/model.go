@@ -149,7 +149,7 @@ func (c *Client) Describe(ctx context.Context, proxyARN string) (State, error) {
 }
 
 func (c *Client) ModifyProxy(ctx context.Context, currentName string, proxy Proxy) error {
-	values := url.Values{"DBProxyName": {currentName}, "Auth": {""}, "SecurityGroups": {""}}
+	values := url.Values{"DBProxyName": {currentName}, "Auth": {""}}
 	if currentName != proxy.Name {
 		values.Set("NewDBProxyName", proxy.Name)
 	}
@@ -164,9 +164,6 @@ func (c *Client) ModifyProxy(ctx context.Context, currentName string, proxy Prox
 	}
 	for i, group := range proxy.VpcSecurityGroupIDs {
 		values.Set(fmt.Sprintf("SecurityGroups.member.%d", i+1), group)
-	}
-	if len(proxy.VpcSecurityGroupIDs) > 0 {
-		values.Del("SecurityGroups")
 	}
 	for i, auth := range proxy.Auth {
 		prefix := fmt.Sprintf("Auth.member.%d.", i+1)

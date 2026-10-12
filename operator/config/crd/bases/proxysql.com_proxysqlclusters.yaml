@@ -2398,10 +2398,16 @@ spec:
                       cluster.
                     minLength: 1
                     type: string
+                  vpcID:
+                    description: VPCID identifies the customer VPC represented by
+                      the RDS-compatible proxy.
+                    minLength: 1
+                    type: string
                 required:
                 - assumeRoleARN
                 - externalID
                 - region
+                - vpcID
                 type: object
               replicas:
                 default: 3

@@ -9,7 +9,7 @@ func TestBuildBootstrapAdaptsSaaSDocument(t *testing.T) {
 	raw := []byte(`{
   "schema_version": 1,
   "proxy": {
-    "arn": "arn:aws:rds:us-east-1:customer:db-proxy:proxy-1",
+    "arn": "arn:aws:rds:us-east-1:123456789012:db-proxy:proxy-1",
     "engine_family": "MYSQL",
     "auth": [{"auth_scheme":"SECRETS","iam_auth":"DISABLED","secret_arn":"arn:aws:secretsmanager:us-east-1:customer:secret:db"}],
     "default_auth_scheme": "NONE",
@@ -32,7 +32,8 @@ func TestBuildBootstrapAdaptsSaaSDocument(t *testing.T) {
 }`)
 
 	encoded, err := BuildBootstrap(raw, "default/rds-orders", "cluster-uid", "us-east-1",
-		"arn:aws:iam::customer:role/proxysql-rds", Credentials{AccessKeyID: "PXKEY", SecretAccessKey: "signing-secret"})
+		"arn:aws:iam::123456789012:role/proxysql-rds", "vpc-customer", "rds-orders.default.svc",
+		Credentials{AccessKeyID: "PXKEY", SecretAccessKey: "signing-secret"})
 	if err != nil {
 		t.Fatalf("BuildBootstrap: %v", err)
 	}
@@ -45,8 +46,13 @@ func TestBuildBootstrapAdaptsSaaSDocument(t *testing.T) {
 	if identity["resource_name"] != "orders-proxy" || identity["resource_id"] != "cluster-uid" {
 		t.Fatalf("identity = %+v", identity)
 	}
+	placement := identity["placement"].(map[string]any)
+	if placement["account_id"] != "123456789012" || placement["vpc_id"] != "vpc-customer" ||
+		placement["endpoint"] != "rds-orders.default.svc" {
+		t.Fatalf("placement = %+v", placement)
+	}
 	aws := configuration["aws"].(map[string]any)
-	if aws["DBProxyName"] != "orders-proxy" || aws["RoleArn"] != "arn:aws:iam::customer:role/proxysql-rds" {
+	if aws["DBProxyName"] != "orders-proxy" || aws["RoleArn"] != "arn:aws:iam::123456789012:role/proxysql-rds" {
 		t.Fatalf("aws identity = %+v", aws)
 	}
 	groups := aws["TargetGroups"].([]any)
@@ -66,7 +72,7 @@ func TestBuildBootstrapAdaptsSaaSDocument(t *testing.T) {
 
 func TestBuildBootstrapRejectsUnsupportedEngine(t *testing.T) {
 	raw := []byte(`{"schema_version":1,"proxy":{"arn":"arn","engine_family":"POSTGRESQL"},"target_group":{"name":"default"},"default_endpoint":{"name":"proxy"}}`)
-	if _, err := BuildBootstrap(raw, "deployment", "resource", "us-east-1", "arn:aws:iam::1:role/rds",
+	if _, err := BuildBootstrap(raw, "deployment", "resource", "us-east-1", "arn:aws:iam::1:role/rds", "vpc-1", "proxy.svc",
 		Credentials{AccessKeyID: "key", SecretAccessKey: "secret"}); err == nil {
 		t.Fatal("POSTGRESQL unexpectedly accepted in the MySQL S2 adapter")
 	}

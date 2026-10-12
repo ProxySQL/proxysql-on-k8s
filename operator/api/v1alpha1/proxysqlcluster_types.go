@@ -196,6 +196,10 @@ type RDSRuntimeSpec struct {
 	// ExternalID is supplied to STS when the customer role is assumed.
 	// +kubebuilder:validation:MinLength=1
 	ExternalID string `json:"externalID"`
+
+	// VPCID identifies the customer VPC represented by the RDS-compatible proxy.
+	// +kubebuilder:validation:MinLength=1
+	VPCID string `json:"vpcID"`
 }
 
 // TLSEnabled reports whether TLS is configured and turned on. Safe to call

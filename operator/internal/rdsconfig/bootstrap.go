@@ -5,6 +5,7 @@ package rdsconfig
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -85,7 +86,7 @@ type defaultEndpoint struct {
 
 // BuildBootstrap returns the plugin's version 1 one-shot bootstrap envelope.
 // deploymentID and resourceID must stay stable for the life of the CR.
-func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN string, credentials Credentials) ([]byte, error) {
+func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN, vpcID, endpoint string, credentials Credentials) ([]byte, error) {
 	var source document
 	if err := json.Unmarshal(raw, &source); err != nil {
 		return nil, fmt.Errorf("decode RDS document: %w", err)
@@ -93,8 +94,8 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN 
 	if source.SchemaVersion != 1 {
 		return nil, fmt.Errorf("unsupported RDS document schema version %d", source.SchemaVersion)
 	}
-	if deploymentID == "" || resourceID == "" || region == "" || assumeRoleARN == "" {
-		return nil, fmt.Errorf("RDS bootstrap identity, region, and assume-role ARN are required")
+	if deploymentID == "" || resourceID == "" || region == "" || assumeRoleARN == "" || vpcID == "" || endpoint == "" {
+		return nil, fmt.Errorf("RDS bootstrap identity, region, role, VPC, and endpoint are required")
 	}
 	if source.DefaultEndpoint.Name == "" || source.Proxy.ARN == "" {
 		return nil, fmt.Errorf("RDS document proxy identity is incomplete")
@@ -104,6 +105,10 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN 
 	}
 	if credentials.AccessKeyID == "" || credentials.SecretAccessKey == "" {
 		return nil, fmt.Errorf("internal RDS API credentials are required")
+	}
+	accountID, err := accountIDFromProxyARN(source.Proxy.ARN)
+	if err != nil {
+		return nil, err
 	}
 
 	aws := map[string]any{
@@ -137,9 +142,12 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN 
 			"resource_name": source.DefaultEndpoint.Name,
 			"engine":        "MYSQL",
 			"placement": map[string]any{
+				"account_id":         accountID,
 				"region":             region,
+				"vpc_id":             vpcID,
 				"subnet_ids":         source.Proxy.VpcSubnetIDs,
 				"security_group_ids": source.Proxy.VpcSecurityGroupIDs,
+				"endpoint":           endpoint,
 			},
 		},
 		"scope": map[string]any{
@@ -188,6 +196,23 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN 
 		return nil, fmt.Errorf("encode RDS bootstrap: %w", err)
 	}
 	return encoded, nil
+}
+
+func accountIDFromProxyARN(value string) (string, error) {
+	parts := strings.SplitN(value, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "rds" || parts[4] == "" {
+		return "", fmt.Errorf("RDS document proxy ARN is invalid")
+	}
+	accountID := parts[4]
+	if len(accountID) != 12 {
+		return "", fmt.Errorf("RDS document proxy ARN has an invalid AWS account ID")
+	}
+	for _, character := range accountID {
+		if character < '0' || character > '9' {
+			return "", fmt.Errorf("RDS document proxy ARN has an invalid AWS account ID")
+		}
+	}
+	return accountID, nil
 }
 
 func authValues(values []auth) []any {
