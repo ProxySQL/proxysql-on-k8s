@@ -18,7 +18,6 @@ package builders
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // CnfSecretName returns the name of the Secret carrying the bootstrap
@@ -37,7 +36,7 @@ func (b *Builder) CnfSecret() (*corev1.Secret, error) {
 		return nil, err
 	}
 	data := map[string][]byte{
-		"proxysql.cnf": []byte(cnf),
+		proxySQLCnfKey: []byte(cnf),
 	}
 	// The Fluent Bit sidecar config rides along as a second key: one fewer
 	// object to own, and the file contains no secrets (sink credentials reach
@@ -47,15 +46,13 @@ func (b *Builder) CnfSecret() (*corev1.Secret, error) {
 		if err != nil {
 			return nil, err
 		}
-		data["fluent-bit.conf"] = []byte(flbConf)
+		data[fluentBitCnfKey] = []byte(flbConf)
 	}
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      b.CnfSecretName(),
-			Namespace: b.Namespace(),
-			Labels:    b.Labels(),
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: data,
+		Name:      b.CnfSecretName(),
+		Namespace: b.Namespace(),
+		Labels:    b.Labels(),
+		Type:      corev1.SecretTypeOpaque,
+		Data:      data,
 	}, nil
 }

@@ -22,7 +22,7 @@ import (
 	"testing"
 )
 
-func ptr32(v int32) *int32 { return &v }
+func ptr32(v int32) *int32 { return new(v) }
 
 // fakeQuerier returns canned rows keyed by a substring of the query.
 type fakeQuerier struct {

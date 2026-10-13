@@ -19,6 +19,7 @@ package proxysqlclient
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -149,23 +150,17 @@ func NativeRuntime(rs *RuntimeState, desired *Desired, claimedHostgroups map[int
 
 func copyStringMap(source map[string]string) map[string]string {
 	result := make(map[string]string, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
+	maps.Copy(result, source)
 	return result
 }
 func copyBoolMap(source map[string]bool) map[string]bool {
 	result := make(map[string]bool, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
+	maps.Copy(result, source)
 	return result
 }
 func copyInt32Map(source map[string]int32) map[string]int32 {
 	result := make(map[string]int32, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
+	maps.Copy(result, source)
 	return result
 }
 

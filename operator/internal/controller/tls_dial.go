@@ -63,8 +63,8 @@ func (t *adminTLS) configFor(addr string) *tls.Config {
 
 // dial opens the admin client for addr with the cluster's trust config
 // (plaintext when t is nil).
-func (t *adminTLS) dial(addr, user, pass string) (*proxysqlclient.Client, error) {
-	return proxysqlclient.NewWithTLS(addr, user, pass, t.configFor(addr))
+func (t *adminTLS) dial(addr, pass string) (*proxysqlclient.Client, error) {
+	return proxysqlclient.NewWithTLS(addr, radminUser, pass, t.configFor(addr))
 }
 
 // httpClient returns a client that dials a pod IP while verifying the stable
@@ -123,7 +123,7 @@ func adminDialTLS(ctx context.Context, c client.Client, cluster *proxysqlv1alpha
 		return nil, fmt.Errorf("get tls secret %q for dial config: %w", secretName, err)
 	}
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(sec.Data["ca.crt"]) {
+	if !pool.AppendCertsFromPEM(sec.Data[tlsCAKey]) {
 		return nil, fmt.Errorf("tls secret %q: ca.crt contains no usable certificates", secretName)
 	}
 

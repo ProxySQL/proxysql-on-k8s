@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	WriterHostgroup int32 = 1
-	ReaderHostgroup int32 = 2
+	WriterHostgroup   int32 = 1
+	ReaderHostgroup   int32 = 2
+	engineFamilyMySQL       = "MYSQL"
 )
 
 // Credentials are the operator-owned SigV4 credentials installed into one
@@ -100,7 +101,7 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN,
 	if source.DefaultEndpoint.Name == "" || source.Proxy.ARN == "" {
 		return nil, fmt.Errorf("RDS document proxy identity is incomplete")
 	}
-	if source.Proxy.EngineFamily != "MYSQL" {
+	if source.Proxy.EngineFamily != engineFamilyMySQL {
 		return nil, fmt.Errorf("unsupported RDS engine family %q", source.Proxy.EngineFamily)
 	}
 	if credentials.AccessKeyID == "" || credentials.SecretAccessKey == "" {
@@ -140,7 +141,7 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN,
 			"deployment_id": deploymentID,
 			"resource_id":   resourceID,
 			"resource_name": source.DefaultEndpoint.Name,
-			"engine":        "MYSQL",
+			"engine":        engineFamilyMySQL,
 			"placement": map[string]any{
 				"account_id":         accountID,
 				"region":             region,

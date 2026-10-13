@@ -28,7 +28,7 @@ import (
 // CertificateGVK is the GroupVersionKind of the cert-manager.io/v1
 // Certificate resource (tier 2 of the TLS resolution order).
 var CertificateGVK = schema.GroupVersionKind{
-	Group:   "cert-manager.io",
+	Group:   certManagerGroup,
 	Version: "v1",
 	Kind:    "Certificate",
 }
@@ -64,7 +64,7 @@ func (b *Builder) Certificate() *unstructured.Unstructured {
 	}
 	group := tls.IssuerRef.Group
 	if group == "" {
-		group = "cert-manager.io"
+		group = certManagerGroup
 	}
 
 	spec := map[string]any{

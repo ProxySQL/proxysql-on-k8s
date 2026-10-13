@@ -51,6 +51,19 @@ const (
 )
 
 const (
+	proxySQLName     = "proxysql"
+	certManagerGroup = "cert-manager.io"
+	proxySQLCnfKey   = "proxysql.cnf"
+	fluentBitCnfKey  = "fluent-bit.conf"
+	dataVolumeName   = "data"
+	logsVolumeName   = "logs"
+	tlsCertKey       = "tls.crt"
+	tlsPrivateKey    = "tls.key"
+	tlsCAKey         = "ca.crt"
+	proxySQLDataPath = "/var/lib/proxysql"
+)
+
+const (
 	RDSBootstrapSecretSuffix = "-rds-bootstrap"
 	RDSBootstrapVolumeName   = "rds-bootstrap"
 	RDSBootstrapMountPath    = "/etc/proxysql/rds"
@@ -317,7 +330,7 @@ func (b *Builder) ManagesAuthSecret() bool {
 // Labels returns the standard label set for owned objects.
 func (b *Builder) Labels() map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":       "proxysql",
+		"app.kubernetes.io/name":       proxySQLName,
 		"app.kubernetes.io/instance":   b.Cluster.Name,
 		"app.kubernetes.io/component":  "proxysql-cluster",
 		"app.kubernetes.io/managed-by": "proxysql-operator",
@@ -329,7 +342,7 @@ func (b *Builder) Labels() map[string]string {
 // stay stable across upgrades; do not add fields here.
 func (b *Builder) SelectorLabels() map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":     "proxysql",
+		"app.kubernetes.io/name":     proxySQLName,
 		"app.kubernetes.io/instance": b.Cluster.Name,
 		"proxysql.com/cluster":       b.Cluster.Name,
 	}
@@ -356,54 +369,7 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 		spec.Image.PullPolicy = corev1.PullIfNotPresent
 	}
 
-	// Protocol defaulting. An explicitly set Enabled always wins; when nil,
-	// admin/mysql default to on and pgsql/web default to off, with a
-	// non-zero port implying enabled. Enabled is always non-nil afterwards.
-
-	// Admin port: always enabled, default 6032.
-	spec.Protocols.Admin.Enabled = boolPtr(true)
-	if spec.Protocols.Admin.Port == 0 {
-		spec.Protocols.Admin.Port = DefaultAdminPort
-	}
-
-	// MySQL: enabled by default, default port 6033.
-	if spec.Protocols.MySQL.Enabled == nil {
-		spec.Protocols.MySQL.Enabled = boolPtr(true)
-	}
-	if spec.Protocols.MySQL.IsEnabled() && spec.Protocols.MySQL.Port == 0 {
-		spec.Protocols.MySQL.Port = DefaultMySQLPort
-	}
-
-	// PostgreSQL: disabled by default; a non-zero port implies enabled.
-	if spec.Protocols.PostgreSQL.Enabled == nil {
-		spec.Protocols.PostgreSQL.Enabled = boolPtr(spec.Protocols.PostgreSQL.Port != 0)
-	}
-	if spec.Protocols.PostgreSQL.IsEnabled() && spec.Protocols.PostgreSQL.Port == 0 {
-		spec.Protocols.PostgreSQL.Port = DefaultPostgreSQLPort
-	}
-
-	// Web UI: disabled by default; a non-zero port implies enabled.
-	if spec.Protocols.Web.Enabled == nil {
-		spec.Protocols.Web.Enabled = boolPtr(spec.Protocols.Web.Port != 0)
-	}
-	if spec.Protocols.Web.IsEnabled() && spec.Protocols.Web.Port == 0 {
-		spec.Protocols.Web.Port = DefaultWebPort
-	}
-	// The RDS-compatible API is served by the web plugin. RDS-enabled clusters
-	// always need that internal listener even when the caller did not set the
-	// generic web protocol block.
-	if spec.RDS != nil {
-		spec.Protocols.Web.Enabled = boolPtr(true)
-		if spec.Protocols.Web.Port == 0 {
-			spec.Protocols.Web.Port = DefaultWebPort
-		}
-		// The RDS API is HTTPS. Use the operator's existing self-signed serving
-		// certificate fallback when the caller did not supply a TLS policy, so
-		// the config reconciler can verify every pod certificate.
-		if spec.TLS == nil || !spec.TLS.Enabled {
-			spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
-		}
-	}
+	defaultProtocols(&spec)
 
 	// Persistence default: enabled, 1Gi.
 	if spec.Persistence.Enabled == nil {
@@ -483,6 +449,53 @@ func DefaultedSpec(c *proxysqlv1alpha1.ProxySQLCluster) proxysqlv1alpha1.ProxySQ
 	return spec
 }
 
+// defaultProtocols applies listener defaults and the additional web/TLS
+// requirements of an RDS-enabled cluster.
+func defaultProtocols(spec *proxysqlv1alpha1.ProxySQLClusterSpec) {
+	// Admin port: always enabled, default 6032.
+	spec.Protocols.Admin.Enabled = new(true)
+	if spec.Protocols.Admin.Port == 0 {
+		spec.Protocols.Admin.Port = DefaultAdminPort
+	}
+
+	// MySQL: enabled by default, default port 6033.
+	if spec.Protocols.MySQL.Enabled == nil {
+		spec.Protocols.MySQL.Enabled = new(true)
+	}
+	if spec.Protocols.MySQL.IsEnabled() && spec.Protocols.MySQL.Port == 0 {
+		spec.Protocols.MySQL.Port = DefaultMySQLPort
+	}
+
+	// PostgreSQL: disabled by default; a non-zero port implies enabled.
+	if spec.Protocols.PostgreSQL.Enabled == nil {
+		spec.Protocols.PostgreSQL.Enabled = new(spec.Protocols.PostgreSQL.Port != 0)
+	}
+	if spec.Protocols.PostgreSQL.IsEnabled() && spec.Protocols.PostgreSQL.Port == 0 {
+		spec.Protocols.PostgreSQL.Port = DefaultPostgreSQLPort
+	}
+
+	// Web UI: disabled by default; a non-zero port implies enabled.
+	if spec.Protocols.Web.Enabled == nil {
+		spec.Protocols.Web.Enabled = boolPtr(spec.Protocols.Web.Port != 0)
+	}
+	if spec.Protocols.Web.IsEnabled() && spec.Protocols.Web.Port == 0 {
+		spec.Protocols.Web.Port = DefaultWebPort
+	}
+
+	// The RDS-compatible API is served by the web plugin. RDS-enabled clusters
+	// always need that internal listener and pod TLS.
+	if spec.RDS == nil {
+		return
+	}
+	spec.Protocols.Web.Enabled = boolPtr(true)
+	if spec.Protocols.Web.Port == 0 {
+		spec.Protocols.Web.Port = DefaultWebPort
+	}
+	if spec.TLS == nil || !spec.TLS.Enabled {
+		spec.TLS = &proxysqlv1alpha1.TLSSpec{Enabled: true}
+	}
+}
+
 // defaultTLS applies the documented defaults to a non-nil TLSSpec,
 // mirroring the CRD's kubebuilder defaults for older API servers: 90d
 // certificates renewed 30d before expiry, issuerRef kind/group per
@@ -499,7 +512,7 @@ func defaultTLS(t *proxysqlv1alpha1.TLSSpec) {
 			t.IssuerRef.Kind = "Issuer"
 		}
 		if t.IssuerRef.Group == "" {
-			t.IssuerRef.Group = "cert-manager.io"
+			t.IssuerRef.Group = certManagerGroup
 		}
 	}
 }

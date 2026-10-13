@@ -353,7 +353,7 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 			return "", err
 		}
 	}
-	tpl, err := template.New("proxysql.cnf").Parse(bootstrapCnfTemplate)
+	tpl, err := template.New(proxySQLCnfKey).Parse(bootstrapCnfTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse cnf template: %w", err)
 	}

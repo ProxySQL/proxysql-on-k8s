@@ -7,7 +7,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -60,14 +59,13 @@ func (r *ProxySQLConfigReconciler) ensureRDSBootstrap(
 		return err
 	}
 	desired := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: cluster.Name + builders.RDSBootstrapSecretSuffix, Namespace: cluster.Namespace,
-			Labels: b.Labels(),
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{builders.RDSBootstrapFileName: bootstrap},
+		Name:      cluster.Name + builders.RDSBootstrapSecretSuffix,
+		Namespace: cluster.Namespace,
+		Labels:    b.Labels(),
+		Type:      corev1.SecretTypeOpaque,
+		Data:      map[string][]byte{builders.RDSBootstrapFileName: bootstrap},
 	}
-	existing := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
+	existing := &corev1.Secret{Name: desired.Name, Namespace: desired.Namespace}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
 		existing.Labels = desired.Labels
 		existing.Type = desired.Type
@@ -113,8 +111,10 @@ func (r *ProxySQLConfigReconciler) ensureRDSCredentials(
 	}
 	credentials := rdsconfig.Credentials{AccessKeyID: "PX" + accessRandom, SecretAccessKey: secret + secretSuffix}
 	desired := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: b.Labels()},
-		Type:       corev1.SecretTypeOpaque,
+		Name:      key.Name,
+		Namespace: key.Namespace,
+		Labels:    b.Labels(),
+		Type:      corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			rdsAccessKeyIDKey: []byte(credentials.AccessKeyID), rdsSecretAccessKeyKey: []byte(credentials.SecretAccessKey),
 		},

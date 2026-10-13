@@ -17,6 +17,13 @@ import (
 	"net/url"
 )
 
+const (
+	paramDBProxyName     = "DBProxyName"
+	paramTargetGroupName = "TargetGroupName"
+	paramResourceName    = "ResourceName"
+	defaultTargetGroup   = "default"
+)
+
 type Auth struct {
 	AuthScheme             string `xml:"AuthScheme"`
 	ClientPasswordAuthType string `xml:"ClientPasswordAuthType"`
@@ -123,7 +130,7 @@ func (c *Client) Describe(ctx context.Context, proxyARN string) (State, error) {
 
 	var groups describeGroupsResponse
 	if err := c.Call(ctx, "DescribeDBProxyTargetGroups", url.Values{
-		"DBProxyName": {state.Proxy.Name}, "TargetGroupName": {"default"},
+		paramDBProxyName: {state.Proxy.Name}, paramTargetGroupName: {defaultTargetGroup},
 	}, &groups); err != nil {
 		return state, err
 	}
@@ -134,14 +141,14 @@ func (c *Client) Describe(ctx context.Context, proxyARN string) (State, error) {
 
 	var targets describeTargetsResponse
 	if err := c.Call(ctx, "DescribeDBProxyTargets", url.Values{
-		"DBProxyName": {state.Proxy.Name}, "TargetGroupName": {"default"},
+		paramDBProxyName: {state.Proxy.Name}, paramTargetGroupName: {defaultTargetGroup},
 	}, &targets); err != nil {
 		return state, err
 	}
 	state.Targets = targets.Items
 
 	var tags listTagsResponse
-	if err := c.Call(ctx, "ListTagsForResource", url.Values{"ResourceName": {proxyARN}}, &tags); err != nil {
+	if err := c.Call(ctx, "ListTagsForResource", url.Values{paramResourceName: {proxyARN}}, &tags); err != nil {
 		return state, err
 	}
 	state.Tags = tags.Items
@@ -149,7 +156,7 @@ func (c *Client) Describe(ctx context.Context, proxyARN string) (State, error) {
 }
 
 func (c *Client) ModifyProxy(ctx context.Context, currentName string, proxy Proxy) error {
-	values := url.Values{"DBProxyName": {currentName}, "Auth": {""}}
+	values := url.Values{paramDBProxyName: {currentName}, "Auth": {""}}
 	if currentName != proxy.Name {
 		values.Set("NewDBProxyName", proxy.Name)
 	}
@@ -188,7 +195,7 @@ func (c *Client) ClearMutable(ctx context.Context, state State) error {
 	if err := c.RemoveTags(ctx, state.Proxy.ARN, state.Tags); err != nil {
 		return err
 	}
-	if err := c.Call(ctx, "ModifyDBProxy", url.Values{"DBProxyName": {state.Proxy.Name}, "Auth": {""}}, nil); err != nil {
+	if err := c.Call(ctx, "ModifyDBProxy", url.Values{paramDBProxyName: {state.Proxy.Name}, "Auth": {""}}, nil); err != nil {
 		return err
 	}
 	return c.ModifyPool(ctx, state.Proxy.Name, Pool{ConnectionBorrowTimeout: 120, MaxConnectionsPercent: 100, MaxIdleConnectionsPercent: 50})
@@ -208,7 +215,7 @@ func (c *Client) Apply(ctx context.Context, current State, desired State) error 
 }
 
 func (c *Client) ModifyPool(ctx context.Context, proxyName string, pool Pool) error {
-	values := url.Values{"DBProxyName": {proxyName}, "TargetGroupName": {"default"}, "ConnectionPoolConfig.SessionPinningFilters": {""}}
+	values := url.Values{paramDBProxyName: {proxyName}, paramTargetGroupName: {defaultTargetGroup}, "ConnectionPoolConfig.SessionPinningFilters": {""}}
 	setInt(values, "ConnectionPoolConfig.ConnectionBorrowTimeout", pool.ConnectionBorrowTimeout)
 	setInt(values, "ConnectionPoolConfig.MaxConnectionsPercent", pool.MaxConnectionsPercent)
 	setInt(values, "ConnectionPoolConfig.MaxIdleConnectionsPercent", pool.MaxIdleConnectionsPercent)
@@ -238,7 +245,7 @@ func (c *Client) DeregisterTargets(ctx context.Context, proxyName string, target
 }
 
 func targetValues(proxyName string, targets []Target) url.Values {
-	values := url.Values{"DBProxyName": {proxyName}, "TargetGroupName": {"default"}}
+	values := url.Values{paramDBProxyName: {proxyName}, paramTargetGroupName: {defaultTargetGroup}}
 	instances, clusters := 0, 0
 	for _, target := range targets {
 		if target.Type == "RDS_INSTANCE" {
@@ -256,7 +263,7 @@ func (c *Client) AddTags(ctx context.Context, proxyARN string, tags []Tag) error
 	if len(tags) == 0 {
 		return nil
 	}
-	values := url.Values{"ResourceName": {proxyARN}}
+	values := url.Values{paramResourceName: {proxyARN}}
 	for i, tag := range tags {
 		values.Set(fmt.Sprintf("Tags.Tag.%d.Key", i+1), tag.Key)
 		values.Set(fmt.Sprintf("Tags.Tag.%d.Value", i+1), tag.Value)
@@ -268,7 +275,7 @@ func (c *Client) RemoveTags(ctx context.Context, proxyARN string, tags []Tag) er
 	if len(tags) == 0 {
 		return nil
 	}
-	values := url.Values{"ResourceName": {proxyARN}}
+	values := url.Values{paramResourceName: {proxyARN}}
 	for i, tag := range tags {
 		values.Set(fmt.Sprintf("TagKeys.member.%d", i+1), tag.Key)
 	}

@@ -487,7 +487,7 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 
 			// Enabling the web UI changes the rendered cnf.
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, cluster)).To(Succeed())
-			cluster.Spec.Protocols.Web.Enabled = ptrBool(true)
+			cluster.Spec.Protocols.Web.Enabled = new(true)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 
 			reconcileAndExpectSuccess(name)
@@ -2007,9 +2007,6 @@ func TestDerivePhase(t *testing.T) {
 		})
 	}
 }
-
-// ptrBool returns a pointer to v.
-func ptrBool(v bool) *bool { return &v }
 
 // isOwnedBy returns true when obj has owner as a controller ownerReference.
 func isOwnedBy(obj metav1.Object, owner *proxysqlv1alpha1.ProxySQLCluster) bool {

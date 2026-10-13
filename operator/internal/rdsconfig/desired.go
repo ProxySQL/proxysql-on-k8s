@@ -38,7 +38,7 @@ func ParseDesired(raw []byte, assumeRoleARN string) (Desired, error) {
 	if source.SchemaVersion != 1 {
 		return Desired{}, fmt.Errorf("unsupported RDS document schema version %d", source.SchemaVersion)
 	}
-	if source.Proxy.EngineFamily != "MYSQL" || source.DefaultEndpoint.Name == "" || source.Proxy.ARN == "" {
+	if source.Proxy.EngineFamily != engineFamilyMySQL || source.DefaultEndpoint.Name == "" || source.Proxy.ARN == "" {
 		return Desired{}, fmt.Errorf("RDS document has an unsupported or incomplete proxy identity")
 	}
 	desired := Desired{

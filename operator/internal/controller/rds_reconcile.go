@@ -89,7 +89,7 @@ type replicaObservation struct {
 func (r *ProxySQLConfigReconciler) observeReplica(ctx context.Context, endpoint podEndpoint, password string, native *proxysqlclient.Desired, rdsState *rdsReconcileState, dialTLS *adminTLS, version int64) replicaObservation {
 	now := metav1.NewTime(time.Now())
 	result := replicaObservation{status: proxysqlv1alpha1.ProxySQLConfigReplicaStatus{Pod: endpoint.Pod, LastCheckTime: &now}}
-	pxc, err := dialTLS.dial(endpoint.Addr, radminUser, password)
+	pxc, err := dialTLS.dial(endpoint.Addr, password)
 	if err != nil {
 		result.status.Reason = "AdminUnavailable"
 		result.drifted = true
@@ -159,7 +159,7 @@ func (r *ProxySQLConfigReconciler) applyReplica(ctx context.Context, endpoint po
 		}})
 	}
 	steps = append(steps, applyCycleStep{"NativeApplyFailed", func() error {
-		pxc, err := dialTLS.dial(endpoint.Addr, radminUser, password)
+		pxc, err := dialTLS.dial(endpoint.Addr, password)
 		if err != nil {
 			return err
 		}

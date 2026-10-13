@@ -85,7 +85,7 @@ func (c *Client) Call(ctx context.Context, action string, values url.Values, out
 	if err != nil {
 		return fmt.Errorf("%s request failed: %w", action, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return fmt.Errorf("read %s response: %w", action, err)

@@ -125,8 +125,6 @@ const (
 // changes, but explicitly writing to every replica makes SyncedReplicas
 // accurate and surfaces unreachable pods immediately.
 func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
 	var cfg proxysqlv1alpha1.ProxySQLConfig
 	if err := r.Get(ctx, req.NamespacedName, &cfg); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -223,6 +221,23 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if done != nil {
 		return *done, nil
 	}
+	return r.reconcileReadyReplicas(ctx, cfg, desired, rdsState, endpoints, addrs, dialTLS, radminPassword, pgsqlMismatch)
+}
+
+// reconcileReadyReplicas selects drifted replicas, applies the unified
+// native/RDS cycle, and records one combined convergence result.
+func (r *ProxySQLConfigReconciler) reconcileReadyReplicas(
+	ctx context.Context,
+	cfg proxysqlv1alpha1.ProxySQLConfig,
+	desired *proxysqlclient.Desired,
+	rdsState *rdsReconcileState,
+	endpoints []podEndpoint,
+	addrs []string,
+	dialTLS *adminTLS,
+	radminPassword string,
+	pgsqlMismatch bool,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
 
 	// 5) Compute a fingerprint over (desired config + the exact pod set) for
 	// the short-circuit. Including the address set means a recreated pod (new
@@ -621,7 +636,7 @@ func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []
 	var ok int
 	var errs []error
 	for _, addr := range addrs {
-		pxc, err := dialTLS.dial(addr, radminUser, password)
+		pxc, err := dialTLS.dial(addr, password)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", addr, err))
 			continue
@@ -645,7 +660,7 @@ func (r *ProxySQLConfigReconciler) applyToReplicas(ctx context.Context, addrs []
 func (r *ProxySQLConfigReconciler) verifyReplicas(ctx context.Context, addrs []string, password string, d *proxysqlclient.Desired, dialTLS *adminTLS) (drifted []string, shunned int32) {
 	log := logf.FromContext(ctx)
 	for _, addr := range addrs {
-		pxc, err := dialTLS.dial(addr, radminUser, password)
+		pxc, err := dialTLS.dial(addr, password)
 		if err != nil {
 			drifted = append(drifted, addr)
 			continue
@@ -914,7 +929,7 @@ func (r *ProxySQLConfigReconciler) configsForCluster(ctx context.Context, obj cl
 	var out []reconcile.Request
 	for _, c := range configs.Items {
 		if c.Spec.ClusterRef.Name == cluster.Name {
-			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: c.Name, Namespace: c.Namespace}})
+			out = append(out, reconcile.Request{Name: c.Name, Namespace: c.Namespace})
 		}
 	}
 	return out
@@ -936,7 +951,7 @@ func (r *ProxySQLConfigReconciler) configsForPod(ctx context.Context, obj client
 	var out []reconcile.Request
 	for _, c := range configs.Items {
 		if c.Spec.ClusterRef.Name == clusterName {
-			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: c.Name, Namespace: c.Namespace}})
+			out = append(out, reconcile.Request{Name: c.Name, Namespace: c.Namespace})
 		}
 	}
 	return out
@@ -975,7 +990,7 @@ func (r *ProxySQLConfigReconciler) configsForSecret(ctx context.Context, obj cli
 	var out []reconcile.Request
 	for _, c := range configs.Items {
 		if adminOf[c.Spec.ClusterRef.Name] || configReferencesSecret(&c, sec.Name) {
-			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: c.Name, Namespace: c.Namespace}})
+			out = append(out, reconcile.Request{Name: c.Name, Namespace: c.Namespace})
 		}
 	}
 	return out
