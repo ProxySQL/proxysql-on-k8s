@@ -361,7 +361,7 @@ func (r *ProxySQLClusterReconciler) resolveRestartChecksum(
 
 	for _, ep := range endpoints {
 		addr := ep.Addr
-		pxc, cerr := dialTLS.dial(addr, radminUser, radminPassword)
+		pxc, cerr := dialTLS.dial(addr, radminPassword)
 		if cerr != nil {
 			return "", "", "", "", fmt.Errorf("dial %s: %w", addr, cerr)
 		}

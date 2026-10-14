@@ -118,7 +118,7 @@ func (b *Builder) podSpec() corev1.PodSpec {
 		Tolerations:                   b.Spec.Tolerations,
 		Affinity:                      b.Spec.Affinity,
 		TopologySpreadConstraints:     b.topologySpreadConstraints(),
-		TerminationGracePeriodSeconds: ptrInt64(b.terminationGracePeriodSeconds()),
+		TerminationGracePeriodSeconds: new(b.terminationGracePeriodSeconds()),
 		Containers:                    []corev1.Container{b.container()},
 		Volumes: []corev1.Volume{
 			{
@@ -128,19 +128,33 @@ func (b *Builder) podSpec() corev1.PodSpec {
 					Secret: &corev1.SecretVolumeSource{
 						SecretName: b.CnfSecretName(),
 						Items: []corev1.KeyToPath{
-							{Key: "proxysql.cnf", Path: "proxysql.cnf"},
+							{Key: proxySQLCnfKey, Path: proxySQLCnfKey},
 						},
 					},
 				},
 			},
 		},
 	}
+	if b.Spec.ServiceAccountName != "" {
+		spec.ServiceAccountName = b.Spec.ServiceAccountName
+	}
+	if b.Spec.RDS != nil {
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: RDSBootstrapVolumeName,
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: b.RDSBootstrapSecretName(),
+				Items: []corev1.KeyToPath{{
+					Key: RDSBootstrapFileName, Path: RDSBootstrapFileName,
+				}},
+			}},
+		})
+	}
 
 	// When persistence is disabled, mount an emptyDir for /var/lib/proxysql so
 	// the readOnlyRootFilesystem container has somewhere to write its admin DB.
 	if !isTrue(b.Spec.Persistence.Enabled) {
 		spec.Volumes = append(spec.Volumes, corev1.Volume{
-			Name:         "data",
+			Name:         dataVolumeName,
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		})
 	}
@@ -163,9 +177,9 @@ func (b *Builder) podSpec() corev1.PodSpec {
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: b.tlsMountSecretName(),
 					Items: []corev1.KeyToPath{
-						{Key: "tls.crt", Path: "tls.crt"},
-						{Key: "tls.key", Path: "tls.key"},
-						{Key: "ca.crt", Path: "ca.crt"},
+						{Key: tlsCertKey, Path: tlsCertKey},
+						{Key: tlsPrivateKey, Path: tlsPrivateKey},
+						{Key: tlsCAKey, Path: tlsCAKey},
 					},
 				},
 			},
@@ -250,7 +264,7 @@ func (b *Builder) tlsInitContainer() corev1.Container {
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: tlsVolumeName, MountPath: tlsMountPath, ReadOnly: true},
-			{Name: "data", MountPath: "/var/lib/proxysql"},
+			{Name: dataVolumeName, MountPath: proxySQLDataPath},
 		},
 	}
 }
@@ -279,7 +293,7 @@ func (b *Builder) tlsCleanupInitContainer() corev1.Container {
 				` [ -L "/var/lib/proxysql/$f" ] && rm -f "/var/lib/proxysql/$f"; done; true`,
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "data", MountPath: "/var/lib/proxysql"},
+			{Name: dataVolumeName, MountPath: proxySQLDataPath},
 		},
 	}
 }
@@ -292,7 +306,7 @@ func (b *Builder) backendTLSVolume() corev1.Volume {
 	sources := []corev1.VolumeProjection{{
 		Secret: &corev1.SecretProjection{
 			LocalObjectReference: corev1.LocalObjectReference{Name: b.Spec.TLS.Backend.CASecretName},
-			Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+			Items:                []corev1.KeyToPath{{Key: tlsCAKey, Path: tlsCAKey}},
 		},
 	}}
 	if b.Spec.TLS.Backend.ClientCertSecretName != "" {
@@ -300,8 +314,8 @@ func (b *Builder) backendTLSVolume() corev1.Volume {
 			Secret: &corev1.SecretProjection{
 				LocalObjectReference: corev1.LocalObjectReference{Name: b.Spec.TLS.Backend.ClientCertSecretName},
 				Items: []corev1.KeyToPath{
-					{Key: "tls.crt", Path: "tls.crt"},
-					{Key: "tls.key", Path: "tls.key"},
+					{Key: tlsCertKey, Path: tlsCertKey},
+					{Key: tlsPrivateKey, Path: tlsPrivateKey},
 				},
 			},
 		})
@@ -332,7 +346,7 @@ func (b *Builder) container() corev1.Container {
 	}
 
 	c := corev1.Container{
-		Name:            "proxysql",
+		Name:            proxySQLName,
 		Image:           b.Image(),
 		ImagePullPolicy: b.Spec.Image.PullPolicy,
 		SecurityContext: b.Spec.ContainerSecurityContext,
@@ -341,7 +355,7 @@ func (b *Builder) container() corev1.Container {
 		// args without command makes Kubernetes exec "-f" directly, and the
 		// container CrashLoops with `exec: "-f": executable file not found`. So
 		// command must be set explicitly.
-		Command: []string{"proxysql"},
+		Command: []string{proxySQLName},
 		// --reload merges the bootstrap cnf over the persisted proxysql.db on
 		// every start (issue #50): without it, an existing proxysql.db on a PVC
 		// wins over the cnf, so variables added to the cnf after first boot
@@ -354,7 +368,7 @@ func (b *Builder) container() corev1.Container {
 		Args: []string{
 			"-f",
 			"-c", "/etc/proxysql/proxysql.cnf",
-			"-D", "/var/lib/proxysql",
+			"-D", proxySQLDataPath,
 			"--reload",
 		},
 		Ports:          ports,
@@ -363,6 +377,15 @@ func (b *Builder) container() corev1.Container {
 		ReadinessProbe: b.readinessProbe(),
 		Resources:      b.Spec.Resources,
 		VolumeMounts:   b.proxysqlVolumeMounts(),
+	}
+	if b.Spec.RDS != nil {
+		// The combined plugin image owns one-shot bootstrap and restart recovery
+		// in its entrypoint. Do not bypass it with the standard image command.
+		c.Command = []string{"/usr/local/bin/proxysql-entrypoint"}
+		c.Args = []string{
+			"--aws-managed-bootstrap=" + RDSBootstrapMountPath + "/" + RDSBootstrapFileName,
+			"--reload",
+		}
 	}
 
 	// Graceful shutdown (spec.gracefulShutdown, ProxySQL SaaS #196): a
@@ -467,10 +490,15 @@ func (b *Builder) readinessProbe() *corev1.Probe {
 func (b *Builder) proxysqlVolumeMounts() []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: "config", MountPath: "/etc/proxysql", ReadOnly: true},
-		{Name: "data", MountPath: "/var/lib/proxysql"},
+		{Name: dataVolumeName, MountPath: proxySQLDataPath},
+	}
+	if b.Spec.RDS != nil {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: RDSBootstrapVolumeName, MountPath: RDSBootstrapMountPath, ReadOnly: true,
+		})
 	}
 	if b.LoggingEnabled() {
-		mounts = append(mounts, corev1.VolumeMount{Name: "logs", MountPath: logsMountPath})
+		mounts = append(mounts, corev1.VolumeMount{Name: logsVolumeName, MountPath: logsMountPath})
 	}
 	if b.Spec.TLSEnabled() {
 		// The tls mount is load-bearing at runtime, not just for the init
@@ -488,7 +516,7 @@ func (b *Builder) proxysqlVolumeMounts() []corev1.VolumeMount {
 func (b *Builder) dataPVC() corev1.PersistentVolumeClaim {
 	pvc := corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "data",
+			Name: dataVolumeName,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: b.Spec.Persistence.AccessModes,
@@ -550,10 +578,10 @@ func (b *Builder) keepaliveSysctls() []corev1.Sysctl {
 	return out
 }
 
-func ptrInt64(v int64) *int64 { return &v }
+func ptrInt64(v int64) *int64 { return new(v) }
 
 // isTrue reports whether a *bool is non-nil and dereferences to true.
 func isTrue(p *bool) bool { return p != nil && *p }
 
 // boolPtr returns a pointer to v.
-func boolPtr(v bool) *bool { return &v }
+func boolPtr(v bool) *bool { return new(v) }

@@ -46,6 +46,8 @@ says which.
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
+| `serviceAccountName` | `string` | namespace default | — | ServiceAccount assigned to every ProxySQL pod. |
+| `rds` | `*RDSRuntimeSpec` | `nil` | required nested fields | Enables the internal RDS-compatible plugin runtime. See [RDS-compatible runtime](#rds-compatible-runtime). |
 | `replicas` | `*int32` | `3` (CRD + operator) | min 1 | Number of ProxySQL control-plane pods. |
 | `pause` | `bool` | `false` | — | Scales the StatefulSet to 0 while retaining Services/Secrets/PVCs; never mutates `replicas`. See [Pausing a cluster](../user-guide/clusters.md#pausing-a-cluster). |
 | `image` | `ImageSpec` | see [Image](#image) | — | ProxySQL container image. |
@@ -70,6 +72,27 @@ says which.
 | `variables` | `VariablesSpec` | see [Variables](#variables) | CEL + operator validation | Extra ProxySQL global variables baked into the bootstrap cnf. |
 | `probes` | `ProbesSpec` | see [Probes](#probes) | — | Overrides the `proxysql` container's startup/readiness/liveness probes. |
 | `tls` | `*TLSSpec` | `nil` (TLS off) | see [TLS](#tls) | Certificate issuance and TLS wiring for the frontend/admin surface and, separately, the backend (ProxySQL-to-database) trust. |
+
+### RDS-compatible runtime
+
+`spec.rds` enables the AWS and web plugins in an image selected through the
+existing `spec.image` field. The operator exposes the internal HTTPS API on
+port 6080, mounts the operator-generated one-shot bootstrap Secret, and uses
+the image's plugin entrypoint. It also enables the operator-managed TLS
+fallback when no TLS policy was supplied, so the config reconciler can verify
+each pod's API certificate.
+
+| Field | Type | Validation | Description |
+|---|---|---|---|
+| `rds.region` | `string` | non-empty | AWS SDK and SigV4 region. |
+| `rds.assumeRoleARN` | `string` | non-empty | Customer role used by the plugin workload. |
+| `rds.externalID` | `string` | non-empty | Organization External ID supplied when the customer role is assumed. |
+| `rds.vpcID` | `string` | non-empty | Customer VPC represented by the RDS-compatible proxy. |
+
+`serviceAccountName` is intentionally generic. In a managed RDS deployment,
+the SaaS agent sets it to the ServiceAccount carrying the seller workload
+identity. The operator only copies the name to the pod template; it does not
+create IAM roles or long-lived AWS credentials.
 
 ### Image
 

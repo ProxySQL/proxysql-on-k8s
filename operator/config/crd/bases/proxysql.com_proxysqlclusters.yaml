@@ -2379,6 +2379,36 @@ spec:
                         type: integer
                     type: object
                 type: object
+              rds:
+                description: RDS enables the RDS-compatible plugin runtime for this
+                  cluster.
+                properties:
+                  assumeRoleARN:
+                    description: AssumeRoleARN is the customer role the plugin workload
+                      assumes.
+                    minLength: 1
+                    type: string
+                  externalID:
+                    description: ExternalID is supplied to STS when the customer role
+                      is assumed.
+                    minLength: 1
+                    type: string
+                  region:
+                    description: Region is the SigV4 and AWS SDK region for this RDS-compatible
+                      cluster.
+                    minLength: 1
+                    type: string
+                  vpcID:
+                    description: VPCID identifies the customer VPC represented by
+                      the RDS-compatible proxy.
+                    minLength: 1
+                    type: string
+                required:
+                - assumeRoleARN
+                - externalID
+                - region
+                - vpcID
+                type: object
               replicas:
                 default: 3
                 description: Replicas is the number of ProxySQL control-plane pods.
@@ -2587,6 +2617,11 @@ spec:
                     - LoadBalancer
                     type: string
                 type: object
+              serviceAccountName:
+                description: |-
+                  ServiceAccountName is copied to the ProxySQL pod template. When empty,
+                  Kubernetes uses the namespace's default ServiceAccount.
+                type: string
               tls:
                 description: |-
                   TLS configures certificate issuance and TLS wiring across the

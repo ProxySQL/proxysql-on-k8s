@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // ProxySQLConfigSpec is the declarative ProxySQL configuration the operator
@@ -32,6 +33,16 @@ type ProxySQLConfigSpec struct {
 	// Must exist in the same namespace.
 	// +required
 	ClusterRef corev1.LocalObjectReference `json:"clusterRef"`
+
+	// Version is the product configuration version supplied by the control
+	// plane. Native and RDS-compatible state advance as one version.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Version int64 `json:"version,omitempty"`
+
+	// RDS is the RDS-compatible desired state for the target cluster.
+	// +optional
+	RDS *RDSConfigSpec `json:"rds,omitempty"`
 
 	// MySQL backend topology.
 	// +optional
@@ -100,6 +111,15 @@ type ProxySQLConfigSpec struct {
 	// +optional
 	// +kubebuilder:validation:items:MinLength=1
 	SQLStatements []string `json:"sqlStatements,omitempty"`
+}
+
+// RDSConfigSpec carries the complete SaaS RDS-compatible document. Config is
+// intentionally opaque at the Kubernetes API boundary so fields introduced by
+// a newer control plane survive older agents and clients.
+type RDSConfigSpec struct {
+	// Config is the complete versioned RDS-compatible document.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Config runtime.RawExtension `json:"config"`
 }
 
 // MySQLServer maps to a row in the ProxySQL mysql_servers table.
@@ -397,6 +417,11 @@ type ProxySQLConfigStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// ObservedVersion is spec.version after the complete native and RDS state
+	// has been verified on every ready replica.
+	// +optional
+	ObservedVersion int64 `json:"observedVersion,omitempty"`
+
 	// LastAppliedHash is a SHA of the spec last successfully pushed to the cluster.
 	// +optional
 	LastAppliedHash string `json:"lastAppliedHash,omitempty"`
@@ -407,13 +432,14 @@ type ProxySQLConfigStatus struct {
 	// +optional
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 
-	// SyncedReplicas is the number of ProxySQL pods that received the latest config.
+	// SyncedReplicas is the number of ready pods whose complete native and RDS
+	// state matches the current version.
 	// +optional
 	SyncedReplicas int32 `json:"syncedReplicas,omitempty"`
 
-	// DriftedReplicas is the number of ready replicas whose runtime tables
-	// diverged from the desired config at the last runtime check. 0 when
-	// everything converged.
+	// DriftedReplicas is the number of ready replicas whose native or RDS state
+	// diverged from the desired config, or could not be verified. 0 when all
+	// ready replicas converged.
 	// +optional
 	DriftedReplicas int32 `json:"driftedReplicas,omitempty"`
 
@@ -427,12 +453,34 @@ type ProxySQLConfigStatus struct {
 	// +optional
 	LastRuntimeCheckTime *metav1.Time `json:"lastRuntimeCheckTime,omitempty"`
 
+	// Replicas reports the combined native and RDS result for each ready pod.
+	// +listType=map
+	// +listMapKey=pod
+	// +optional
+	Replicas []ProxySQLConfigReplicaStatus `json:"replicas,omitempty"`
+
 	// Conditions follow standard K8s conventions:
 	//   Ready, Progressing, Degraded, ClusterFound
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// ProxySQLConfigReplicaStatus is a credential-free reconciliation result for
+// one ProxySQL pod.
+type ProxySQLConfigReplicaStatus struct {
+	Pod string `json:"pod"`
+	// +optional
+	ObservedVersion int64 `json:"observedVersion,omitempty"`
+	// +optional
+	Converged bool `json:"converged,omitempty"`
+	// +optional
+	Drifted bool `json:"drifted,omitempty"`
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// +optional
+	LastCheckTime *metav1.Time `json:"lastCheckTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true

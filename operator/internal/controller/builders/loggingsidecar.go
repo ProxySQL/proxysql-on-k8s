@@ -124,7 +124,7 @@ func (b *Builder) FluentBitConf() (string, error) {
 	if l == nil {
 		return "", fmt.Errorf("logging spec is nil")
 	}
-	tpl, err := template.New("fluent-bit.conf").Parse(fluentBitConfTemplate)
+	tpl, err := template.New(fluentBitCnfKey).Parse(fluentBitConfTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse fluent-bit template: %w", err)
 	}
@@ -183,7 +183,7 @@ func (b *Builder) fluentBitContainer() corev1.Container {
 		Resources: l.Resources,
 		Env:       b.fluentBitEnv(),
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "logs", MountPath: logsMountPath},
+			{Name: logsVolumeName, MountPath: logsMountPath},
 			{
 				Name: "flb-config",
 				// subPath overlays just this file, keeping the image's
@@ -191,7 +191,7 @@ func (b *Builder) fluentBitContainer() corev1.Container {
 				// Stale-on-update doesn't matter: a conf change rolls the
 				// pods via the cnf-checksum annotation.
 				MountPath: "/fluent-bit/etc/fluent-bit.conf",
-				SubPath:   "fluent-bit.conf",
+				SubPath:   fluentBitCnfKey,
 				ReadOnly:  true,
 			},
 		},
@@ -243,19 +243,15 @@ func (b *Builder) loggingVolumes() []corev1.Volume {
 	bufferSize := b.Spec.Logging.BufferSize
 	return []corev1.Volume{
 		{
-			Name: "logs",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &bufferSize},
-			},
+			Name:     logsVolumeName,
+			EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &bufferSize},
 		},
 		{
 			Name: "flb-config",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: b.CnfSecretName(),
-					Items: []corev1.KeyToPath{
-						{Key: "fluent-bit.conf", Path: "fluent-bit.conf"},
-					},
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: b.CnfSecretName(),
+				Items: []corev1.KeyToPath{
+					{Key: fluentBitCnfKey, Path: fluentBitCnfKey},
 				},
 			},
 		},
