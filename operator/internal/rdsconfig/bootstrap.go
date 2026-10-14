@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	WriterHostgroup   int32 = 1
-	ReaderHostgroup   int32 = 2
-	engineFamilyMySQL       = "MYSQL"
+	WriterHostgroup        int32 = 1
+	ReaderHostgroup        int32 = 2
+	engineFamilyMySQL            = "MYSQL"
+	defaultTargetGroupName       = "default"
 )
 
 // Credentials are the operator-owned SigV4 credentials installed into one
@@ -113,7 +114,7 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN,
 	}
 	targetGroupName := source.TargetGroup.Name
 	if targetGroupName == "" {
-		targetGroupName = "default"
+		targetGroupName = defaultTargetGroupName
 	}
 
 	aws := map[string]any{
@@ -259,7 +260,7 @@ func targetValues(values []target) []any {
 	result := make([]any, 0, len(values))
 	for _, value := range values {
 		result = append(result, map[string]any{
-			"Type": value.Type, "RdsResourceId": value.Identifier, "TargetGroupName": "default",
+			"Type": value.Type, "RdsResourceId": value.Identifier, "TargetGroupName": defaultTargetGroupName,
 		})
 	}
 	return result

@@ -111,7 +111,7 @@ func Drift(desired Desired, observed rdsclient.State) []string {
 
 func normalizeDesired(value *Desired) {
 	if value.TargetGroup.Name == "" {
-		value.TargetGroup.Name = "default"
+		value.TargetGroup.Name = defaultTargetGroupName
 	}
 	sort.Strings(value.Proxy.VpcSecurityGroupIDs)
 	sort.Slice(value.Proxy.Auth, func(i, j int) bool { return authKey(value.Proxy.Auth[i]) < authKey(value.Proxy.Auth[j]) })
