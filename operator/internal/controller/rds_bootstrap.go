@@ -51,6 +51,7 @@ func (r *ProxySQLConfigReconciler) ensureRDSBootstrap(
 		stableID,
 		cluster.Spec.RDS.Region,
 		cluster.Spec.RDS.AssumeRoleARN,
+		cluster.Spec.RDS.ExternalID,
 		cluster.Spec.RDS.VPCID,
 		cluster.Name+"."+cluster.Namespace+".svc",
 		credentials,

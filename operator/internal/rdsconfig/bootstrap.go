@@ -87,7 +87,7 @@ type defaultEndpoint struct {
 
 // BuildBootstrap returns the plugin's version 1 one-shot bootstrap envelope.
 // deploymentID and resourceID must stay stable for the life of the CR.
-func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN, vpcID, endpoint string, credentials Credentials) ([]byte, error) {
+func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN, externalID, vpcID, endpoint string, credentials Credentials) ([]byte, error) {
 	var source document
 	if err := json.Unmarshal(raw, &source); err != nil {
 		return nil, fmt.Errorf("decode RDS document: %w", err)
@@ -95,8 +95,8 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN,
 	if source.SchemaVersion != 1 {
 		return nil, fmt.Errorf("unsupported RDS document schema version %d", source.SchemaVersion)
 	}
-	if deploymentID == "" || resourceID == "" || region == "" || assumeRoleARN == "" || vpcID == "" || endpoint == "" {
-		return nil, fmt.Errorf("RDS bootstrap identity, region, role, VPC, and endpoint are required")
+	if deploymentID == "" || resourceID == "" || region == "" || assumeRoleARN == "" || externalID == "" || vpcID == "" || endpoint == "" {
+		return nil, fmt.Errorf("RDS bootstrap identity, region, role, external ID, VPC, and endpoint are required")
 	}
 	if source.DefaultEndpoint.Name == "" || source.Proxy.ARN == "" {
 		return nil, fmt.Errorf("RDS document proxy identity is incomplete")
@@ -111,6 +111,10 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN,
 	if err != nil {
 		return nil, err
 	}
+	targetGroupName := source.TargetGroup.Name
+	if targetGroupName == "" {
+		targetGroupName = "default"
+	}
 
 	aws := map[string]any{
 		"DBProxyName":                 source.DefaultEndpoint.Name,
@@ -118,6 +122,7 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN,
 		"EngineFamily":                source.Proxy.EngineFamily,
 		"DefaultAuthScheme":           source.Proxy.DefaultAuthScheme,
 		"RoleArn":                     assumeRoleARN,
+		"ExternalId":                  externalID,
 		"RequireTLS":                  source.Proxy.RequireTLS,
 		"DebugLogging":                source.Proxy.DebugLogging,
 		"IdleClientTimeout":           source.Proxy.IdleClientTimeout,
@@ -125,7 +130,7 @@ func BuildBootstrap(raw []byte, deploymentID, resourceID, region, assumeRoleARN,
 		"TargetConnectionNetworkType": source.Proxy.TargetConnectionNetworkType,
 		"Auth":                        authValues(source.Proxy.Auth),
 		"TargetGroups": []any{map[string]any{
-			"TargetGroupName":      source.TargetGroup.Name,
+			"TargetGroupName":      targetGroupName,
 			"WriterHostgroup":      WriterHostgroup,
 			"ReaderHostgroup":      ReaderHostgroup,
 			"ConnectionPoolConfig": poolValues(source.TargetGroup.ConnectionPoolConfig),

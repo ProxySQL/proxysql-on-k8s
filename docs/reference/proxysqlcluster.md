@@ -87,6 +87,7 @@ each pod's API certificate.
 | `rds.region` | `string` | non-empty | AWS SDK and SigV4 region. |
 | `rds.assumeRoleARN` | `string` | non-empty | Customer role used by the plugin workload. |
 | `rds.externalID` | `string` | non-empty | Organization External ID supplied when the customer role is assumed. |
+| `rds.vpcID` | `string` | non-empty | Customer VPC represented by the RDS-compatible proxy. |
 
 `serviceAccountName` is intentionally generic. In a managed RDS deployment,
 the SaaS agent sets it to the ServiceAccount carrying the seller workload

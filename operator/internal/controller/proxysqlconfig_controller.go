@@ -747,21 +747,34 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 	if cfg.Spec.RDS != nil {
 		rdsState, err := r.buildRDSReconcileState(ctx, cfg, &cluster)
 		if err != nil {
-			log.Info("RDS cleanup pending; retrying", "cluster", cluster.Name, "error", err.Error())
-			return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+			if apierrors.IsNotFound(err) {
+				log.Info("RDS credentials are absent; continuing cleanup without plugin state",
+					"cluster", cluster.Name)
+			} else {
+				log.Info("RDS cleanup pending; retrying", "cluster", cluster.Name,
+					"error", err.Error(), "escapeHatch", skipCleanupAnnotation)
+				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+			}
 		}
-		for _, endpoint := range endpoints {
-			api, err := rdsState.client(endpoint, dialTLS)
-			if err != nil {
-				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
-			}
-			observed, err := api.Describe(ctx, rdsState.desired.Proxy.ARN)
-			if err != nil {
-				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
-			}
-			if err := api.ClearMutable(ctx, observed); err != nil {
-				log.Info("RDS cleanup incomplete; retrying", "pod", endpoint.Pod, "error", err.Error())
-				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+		if rdsState != nil {
+			for _, endpoint := range endpoints {
+				api, err := rdsState.client(endpoint, dialTLS)
+				if err != nil {
+					log.Info("RDS cleanup pending: client creation failed; retrying", "pod", endpoint.Pod,
+						"error", err.Error(), "escapeHatch", skipCleanupAnnotation)
+					return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+				}
+				observed, err := api.Describe(ctx, rdsState.desired.Proxy.ARN)
+				if err != nil {
+					log.Info("RDS cleanup pending: describe failed; retrying", "pod", endpoint.Pod,
+						"error", err.Error(), "escapeHatch", skipCleanupAnnotation)
+					return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+				}
+				if err := api.ClearMutable(ctx, observed); err != nil {
+					log.Info("RDS cleanup incomplete; retrying", "pod", endpoint.Pod,
+						"error", err.Error(), "escapeHatch", skipCleanupAnnotation)
+					return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+				}
 			}
 		}
 	}
