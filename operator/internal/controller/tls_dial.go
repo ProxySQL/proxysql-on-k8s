@@ -96,7 +96,7 @@ func (t *adminTLS) httpClient(serverName string) (*http.Client, error) {
 //     fingerprint-pinned rather than pool-verified) reloads the pod, and
 //     the failed routine dial's requeue retries against the new cert.
 func adminDialTLS(ctx context.Context, c client.Client, cluster *proxysqlv1alpha1.ProxySQLCluster, endpoints []podEndpoint) (*adminTLS, error) {
-	if !cluster.Spec.TLSEnabled() && cluster.Spec.RDS == nil {
+	if !cluster.Spec.TLSEnabled() && !cluster.Spec.AWSPluginEnabled() {
 		return nil, nil
 	}
 

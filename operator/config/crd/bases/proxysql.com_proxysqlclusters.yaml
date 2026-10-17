@@ -1558,6 +1558,47 @@ spec:
                   storageClass:
                     type: string
                 type: object
+              plugin:
+                description: Plugin configures optional ProxySQL plugins for this
+                  cluster.
+                properties:
+                  aws:
+                    description: AWS configures the AWS plugin.
+                    properties:
+                      bootstrap:
+                        description: Bootstrap selects the opaque deployment descriptor
+                          mounted for the plugin.
+                        properties:
+                          configMapRef:
+                            description: Selects a key from a ConfigMap.
+                            properties:
+                              key:
+                                description: The key to select.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the ConfigMap or its
+                                  key must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        required:
+                        - configMapRef
+                        type: object
+                    required:
+                    - bootstrap
+                    type: object
+                type: object
               podAnnotations:
                 additionalProperties:
                   type: string
@@ -2378,36 +2419,6 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
-                type: object
-              rds:
-                description: RDS enables the RDS-compatible plugin runtime for this
-                  cluster.
-                properties:
-                  assumeRoleARN:
-                    description: AssumeRoleARN is the customer role the plugin workload
-                      assumes.
-                    minLength: 1
-                    type: string
-                  externalID:
-                    description: ExternalID is supplied to STS when the customer role
-                      is assumed.
-                    minLength: 1
-                    type: string
-                  region:
-                    description: Region is the SigV4 and AWS SDK region for this RDS-compatible
-                      cluster.
-                    minLength: 1
-                    type: string
-                  vpcID:
-                    description: VPCID identifies the customer VPC represented by
-                      the RDS-compatible proxy.
-                    minLength: 1
-                    type: string
-                required:
-                - assumeRoleARN
-                - externalID
-                - region
-                - vpcID
                 type: object
               replicas:
                 default: 3

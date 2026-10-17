@@ -32,9 +32,9 @@ type ProxySQLClusterSpec struct {
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 
-	// RDS enables the RDS-compatible plugin runtime for this cluster.
+	// Plugin configures optional ProxySQL plugins for this cluster.
 	// +optional
-	RDS *RDSRuntimeSpec `json:"rds,omitempty"`
+	Plugin *ClusterPluginSpec `json:"plugin,omitempty"`
 
 	// Replicas is the number of ProxySQL control-plane pods.
 	// +optional
@@ -182,24 +182,27 @@ type ProxySQLClusterSpec struct {
 	TLS *TLSSpec `json:"tls,omitempty"`
 }
 
-// RDSRuntimeSpec contains the customer AWS role inputs used by the plugin
-// workload. Long-lived AWS credentials are never stored in this resource.
-type RDSRuntimeSpec struct {
-	// Region is the SigV4 and AWS SDK region for this RDS-compatible cluster.
-	// +kubebuilder:validation:MinLength=1
-	Region string `json:"region"`
+// ClusterPluginSpec configures optional plugin startup inputs.
+type ClusterPluginSpec struct {
+	// AWS configures the AWS plugin.
+	// +optional
+	AWS *AWSClusterPluginSpec `json:"aws,omitempty"`
+}
 
-	// AssumeRoleARN is the customer role the plugin workload assumes.
-	// +kubebuilder:validation:MinLength=1
-	AssumeRoleARN string `json:"assumeRoleARN"`
+// AWSClusterPluginSpec configures the AWS plugin startup contract.
+type AWSClusterPluginSpec struct {
+	// Bootstrap selects the opaque deployment descriptor mounted for the plugin.
+	Bootstrap AWSBootstrapSpec `json:"bootstrap"`
+}
 
-	// ExternalID is supplied to STS when the customer role is assumed.
-	// +kubebuilder:validation:MinLength=1
-	ExternalID string `json:"externalID"`
+// AWSBootstrapSpec identifies one ConfigMap key containing aws-deployment.json.
+type AWSBootstrapSpec struct {
+	ConfigMapRef corev1.ConfigMapKeySelector `json:"configMapRef"`
+}
 
-	// VPCID identifies the customer VPC represented by the RDS-compatible proxy.
-	// +kubebuilder:validation:MinLength=1
-	VPCID string `json:"vpcID"`
+// AWSPluginEnabled reports whether the cluster has AWS plugin startup input.
+func (s *ProxySQLClusterSpec) AWSPluginEnabled() bool {
+	return s.Plugin != nil && s.Plugin.AWS != nil
 }
 
 // TLSEnabled reports whether TLS is configured and turned on. Safe to call

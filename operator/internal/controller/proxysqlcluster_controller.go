@@ -77,9 +77,9 @@ type ProxySQLClusterReconciler struct {
 // resolveTLSRotation's discoverPodEndpoints calls to find ready replicas to
 // push runtime variable changes / PROXYSQL RELOAD TLS to.
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// configmaps: get + delete only — needed to garbage-collect the legacy
-// bootstrap-cnf ConfigMap left behind by operator versions < v0.3.0. The
-// operator no longer creates or updates any ConfigMap.
+// configmaps: get/list/watch reads the agent-owned AWS bootstrap ConfigMap;
+// delete garbage-collects the legacy bootstrap-cnf ConfigMap left by operator
+// versions < v0.3.0. The operator does not create or update ConfigMaps.
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
@@ -138,6 +138,12 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	b := builders.New(&cluster, r.Scheme, pw)
+	if err := r.resolveAWSBootstrap(ctx, &cluster, b); err != nil {
+		cluster.Status.Phase = proxysqlv1alpha1.PhaseDegraded
+		r.setCondition(&cluster, condTypeDegraded, metav1.ConditionTrue, "AWSBootstrapError", err.Error())
+		_ = r.Status().Update(ctx, &cluster)
+		return ctrl.Result{}, err
+	}
 
 	// TLS: resolve the serving-cert Secret (three-tier precedence) and flip
 	// the Builder's TLS-render inputs ONLY when validation passes — the cnf
@@ -1034,8 +1040,31 @@ func (r *ProxySQLClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.clustersForTLSSecret)).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.clustersForAWSBootstrapConfigMap)).
 		Named("proxysqlcluster").
 		Complete(r)
+}
+
+func (r *ProxySQLClusterReconciler) clustersForAWSBootstrapConfigMap(ctx context.Context, obj client.Object) []reconcile.Request {
+	configMap, ok := obj.(*corev1.ConfigMap)
+	if !ok {
+		return nil
+	}
+	var clusters proxysqlv1alpha1.ProxySQLClusterList
+	if err := r.List(ctx, &clusters, client.InNamespace(configMap.Namespace)); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range clusters.Items {
+		cluster := &clusters.Items[i]
+		if !cluster.Spec.AWSPluginEnabled() {
+			continue
+		}
+		if cluster.Spec.Plugin.AWS.Bootstrap.ConfigMapRef.Name == configMap.Name {
+			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}})
+		}
+	}
+	return requests
 }
 
 // clustersForTLSSecret maps a Secret event to the clusters that must
