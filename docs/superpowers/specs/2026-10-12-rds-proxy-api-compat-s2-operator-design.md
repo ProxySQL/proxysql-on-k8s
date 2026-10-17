@@ -1,6 +1,6 @@
 # RDS Proxy API Compatibility S2: Operator Delivery
 
-**Status:** Draft  
+**Status:** Approved  
 **Owner:** Wazir Ahmed  
 **Issue:** ProxySQL/proxysql-on-k8s#98  
 **SaaS slice:** ProxySQL/proxysql-saas#2521
