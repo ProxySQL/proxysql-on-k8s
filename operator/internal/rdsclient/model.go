@@ -110,11 +110,11 @@ type listTagsResponse struct {
 	Items []Tag `xml:"ListTagsForResourceResult>TagList>Tag"`
 }
 
-// Describe reads the complete RDS state used by the S2 convergence decision.
-func (c *Client) Describe(ctx context.Context, proxyARN string) (State, error) {
+// Describe reads the complete RDS state used by the convergence decision.
+func (c *Client) Describe(ctx context.Context, proxyName string) (State, error) {
 	var state State
 	var proxies describeProxiesResponse
-	if err := c.Call(ctx, "DescribeDBProxies", nil, &proxies); err != nil {
+	if err := c.Call(ctx, "DescribeDBProxies", url.Values{paramDBProxyName: {proxyName}}, &proxies); err != nil {
 		return state, err
 	}
 	if len(proxies.Items) != 1 {
@@ -148,7 +148,7 @@ func (c *Client) Describe(ctx context.Context, proxyARN string) (State, error) {
 	state.Targets = targets.Items
 
 	var tags listTagsResponse
-	if err := c.Call(ctx, "ListTagsForResource", url.Values{paramResourceName: {proxyARN}}, &tags); err != nil {
+	if err := c.Call(ctx, "ListTagsForResource", url.Values{paramResourceName: {state.Proxy.ARN}}, &tags); err != nil {
 		return state, err
 	}
 	state.Tags = tags.Items
@@ -211,7 +211,7 @@ func (c *Client) Apply(ctx context.Context, current State, desired State) error 
 	if err := c.RegisterTargets(ctx, desired.Proxy.Name, desired.Targets); err != nil {
 		return err
 	}
-	return c.AddTags(ctx, desired.Proxy.ARN, desired.Tags)
+	return c.AddTags(ctx, current.Proxy.ARN, desired.Tags)
 }
 
 func (c *Client) ModifyPool(ctx context.Context, proxyName string, pool Pool) error {

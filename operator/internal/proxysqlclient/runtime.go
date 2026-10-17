@@ -148,6 +148,34 @@ func NativeRuntime(rs *RuntimeState, desired *Desired, claimedHostgroups map[int
 	return filtered
 }
 
+// NativeRuntimeWithAWSDBProxy excludes the complete MySQL server and user
+// categories owned by the AWS plugin. Query rules and PostgreSQL categories
+// remain visible to native reconciliation.
+func NativeRuntimeWithAWSDBProxy(rs *RuntimeState) *RuntimeState {
+	if rs == nil {
+		return nil
+	}
+	return &RuntimeState{
+		MySQLServers: map[string]string{}, MySQLUsers: map[string]bool{},
+		MySQLUserHostgroups: map[string]int32{}, MySQLRules: copyBoolMap(rs.MySQLRules),
+		PgSQLServers: copyStringMap(rs.PgSQLServers), PgSQLUsers: copyBoolMap(rs.PgSQLUsers), PgSQLRules: copyBoolMap(rs.PgSQLRules),
+	}
+}
+
+// NativeDesiredWithAWSDBProxy removes native intent for the table categories
+// owned by the AWS plugin while preserving all unrelated native sections.
+func NativeDesiredWithAWSDBProxy(desired *Desired) *Desired {
+	if desired == nil {
+		return nil
+	}
+	filtered := *desired
+	filtered.MySQLServers = nil
+	filtered.MySQLUsers = nil
+	filtered.MySQLReplicationHostgroups = nil
+	filtered.MySQLHostgroupAttributes = nil
+	return &filtered
+}
+
 func copyStringMap(source map[string]string) map[string]string {
 	result := make(map[string]string, len(source))
 	maps.Copy(result, source)

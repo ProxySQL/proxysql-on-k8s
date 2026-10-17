@@ -64,10 +64,14 @@ const (
 )
 
 const (
-	RDSBootstrapSecretSuffix = "-rds-bootstrap"
-	RDSBootstrapVolumeName   = "rds-bootstrap"
-	RDSBootstrapMountPath    = "/etc/proxysql/rds"
-	RDSBootstrapFileName     = "bootstrap.json"
+	AWSBootstrapVolumeName         = "aws-bootstrap"
+	AWSBootstrapFileName           = "aws-deployment.json"
+	AWSBootstrapMountPath          = "/var/lib/proxysql/aws-deployment.json"
+	AWSCredentialsVolumeName       = "aws-credentials"
+	AWSCredentialsMountPath        = "/etc/proxysql/rds"
+	AWSCredentialsFileName         = "aws-credentials.json"
+	AWSCredentialsSecretSuffix     = "-rds-api"
+	AWSBootstrapChecksumAnnotation = "proxysql.com/aws-bootstrap-checksum"
 )
 
 // Default ProxySQL secret key names. Match the AuthKeys defaults on the CRD.
@@ -231,6 +235,11 @@ type Builder struct {
 	// again. Rendered only with persistence enabled; an emptyDir datadir
 	// is fresh every boot and never dangles.
 	TLSCleanup bool
+
+	// AWSBootstrapChecksum is the checksum of the selected opaque ConfigMap
+	// key. The reconciler resolves it without interpreting the JSON so a
+	// changed deployment descriptor rolls the pods.
+	AWSBootstrapChecksum string
 }
 
 // New returns a Builder with .Spec already defaulted. Pass the resolved
@@ -255,10 +264,9 @@ func (b *Builder) Namespace() string { return b.Cluster.Namespace }
 // StatefulSet's serviceName.
 func (b *Builder) HeadlessName() string { return b.Cluster.Name + "-headless" }
 
-// RDSBootstrapSecretName returns the Secret mounted for the plugin's one-shot
-// managed bootstrap.
-func (b *Builder) RDSBootstrapSecretName() string {
-	return b.Cluster.Name + RDSBootstrapSecretSuffix
+// AWSCredentialsSecretName returns the operator-owned internal SigV4 Secret.
+func (b *Builder) AWSCredentialsSecretName() string {
+	return b.Cluster.Name + AWSCredentialsSecretSuffix
 }
 
 // TLSSecretName returns the name of the operator-managed serving-cert
@@ -484,7 +492,7 @@ func defaultProtocols(spec *proxysqlv1alpha1.ProxySQLClusterSpec) {
 
 	// The RDS-compatible API is served by the web plugin. RDS-enabled clusters
 	// always need that internal listener and pod TLS.
-	if spec.RDS == nil {
+	if !spec.AWSPluginEnabled() {
 		return
 	}
 	spec.Protocols.Web.Enabled = boolPtr(true)

@@ -13,11 +13,14 @@ import (
 func TestRDSClusterRendersPluginRuntime(t *testing.T) {
 	cluster := newCluster("rds-proxy", func(cluster *proxysqlv1alpha1.ProxySQLCluster) {
 		cluster.Spec.ServiceAccountName = "proxysql-rds-workload"
-		cluster.Spec.RDS = &proxysqlv1alpha1.RDSRuntimeSpec{
-			Region: "us-east-1", AssumeRoleARN: "arn:aws:iam::123456789012:role/rds", ExternalID: "organization-1",
-		}
+		cluster.Spec.Plugin = &proxysqlv1alpha1.ClusterPluginSpec{AWS: &proxysqlv1alpha1.AWSClusterPluginSpec{
+			Bootstrap: proxysqlv1alpha1.AWSBootstrapSpec{ConfigMapRef: corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "rds-proxy-aws-bootstrap"}, Key: "aws-deployment.json",
+			}},
+		}}
 	})
 	builder := New(cluster, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m"})
+	builder.AWSBootstrapChecksum = "aws-checksum"
 
 	if !builder.Spec.Protocols.Web.IsEnabled() || builder.Spec.Protocols.Web.Port != DefaultWebPort {
 		t.Fatalf("RDS web listener = %+v, want enabled on %d", builder.Spec.Protocols.Web, DefaultWebPort)
@@ -45,18 +48,23 @@ func TestRDSClusterRendersPluginRuntime(t *testing.T) {
 		t.Fatalf("serviceAccountName = %q", pod.ServiceAccountName)
 	}
 	container := pod.Containers[0]
-	if !slices.Equal(container.Command, []string{"/usr/local/bin/proxysql-entrypoint"}) {
+	if !slices.Equal(container.Command, []string{"proxysql"}) {
 		t.Fatalf("command = %v", container.Command)
 	}
-	wantBootstrapArg := "--aws-managed-bootstrap=" + RDSBootstrapMountPath + "/" + RDSBootstrapFileName
-	if !slices.Contains(container.Args, wantBootstrapArg) {
-		t.Fatalf("args = %v, missing %q", container.Args, wantBootstrapArg)
+	if slices.ContainsFunc(container.Args, func(arg string) bool { return strings.Contains(arg, "aws-managed-bootstrap") }) {
+		t.Fatalf("args retain removed bootstrap flag: %v", container.Args)
 	}
-	if !hasVolume(pod.Volumes, RDSBootstrapVolumeName, builder.RDSBootstrapSecretName()) {
-		t.Fatalf("RDS bootstrap volume missing from %+v", pod.Volumes)
+	if !hasConfigMapVolume(pod.Volumes, AWSBootstrapVolumeName, "rds-proxy-aws-bootstrap") {
+		t.Fatalf("AWS bootstrap volume missing from %+v", pod.Volumes)
 	}
-	if !hasMount(container.VolumeMounts, RDSBootstrapVolumeName, RDSBootstrapMountPath) {
-		t.Fatalf("RDS bootstrap mount missing from %+v", container.VolumeMounts)
+	if !hasMount(container.VolumeMounts, AWSBootstrapVolumeName, AWSBootstrapMountPath) {
+		t.Fatalf("AWS bootstrap mount missing from %+v", container.VolumeMounts)
+	}
+	if !hasVolume(pod.Volumes, AWSCredentialsVolumeName, builder.AWSCredentialsSecretName()) {
+		t.Fatalf("AWS credentials volume missing from %+v", pod.Volumes)
+	}
+	if statefulSet.Spec.Template.Annotations[AWSBootstrapChecksumAnnotation] != "aws-checksum" {
+		t.Fatalf("AWS bootstrap checksum annotation missing from %+v", statefulSet.Spec.Template.Annotations)
 	}
 
 	service := builder.Service()
@@ -65,6 +73,12 @@ func TestRDSClusterRendersPluginRuntime(t *testing.T) {
 	}) {
 		t.Fatalf("RDS web service port missing from %+v", service.Spec.Ports)
 	}
+}
+
+func hasConfigMapVolume(volumes []corev1.Volume, name, configMapName string) bool {
+	return slices.ContainsFunc(volumes, func(volume corev1.Volume) bool {
+		return volume.Name == name && volume.ConfigMap != nil && volume.ConfigMap.Name == configMapName
+	})
 }
 
 func hasVolume(volumes []corev1.Volume, name, secretName string) bool {

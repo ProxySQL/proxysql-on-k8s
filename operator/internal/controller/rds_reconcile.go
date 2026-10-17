@@ -35,29 +35,34 @@ type rdsReconcileState struct {
 }
 
 func (r *ProxySQLConfigReconciler) buildRDSReconcileState(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig, cluster *proxysqlv1alpha1.ProxySQLCluster) (*rdsReconcileState, error) {
-	if cfg.Spec.RDS == nil {
+	if cfg.Spec.Plugin == nil || cfg.Spec.Plugin.AWS == nil || cfg.Spec.Plugin.AWS.DBProxy == nil {
 		return nil, nil
 	}
-	if cluster.Spec.RDS == nil {
-		return nil, fmt.Errorf("config has RDS state but cluster has no RDS runtime settings")
+	if !cluster.Spec.AWSPluginEnabled() {
+		return nil, fmt.Errorf("config has AWS DB proxy state but cluster has no AWS plugin bootstrap")
 	}
-	raw, err := rawRDSConfig(cfg.Spec.RDS.Config)
+	desired, err := rdsconfig.FromSpec(cfg.Spec.Plugin.AWS.DBProxy, cluster.Name)
 	if err != nil {
 		return nil, err
 	}
-	desired, err := rdsconfig.ParseDesired(raw, cluster.Spec.RDS.AssumeRoleARN)
-	if err != nil {
-		return nil, err
+	ref := cluster.Spec.Plugin.AWS.Bootstrap.ConfigMapRef
+	var bootstrap corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: cluster.Namespace}, &bootstrap); err != nil {
+		return nil, fmt.Errorf("read AWS bootstrap ConfigMap: %w", err)
+	}
+	region := bootstrap.Annotations[awsRegionAnnotation]
+	if region == "" {
+		return nil, fmt.Errorf("AWS bootstrap ConfigMap %q does not declare %s", ref.Name, awsRegionAnnotation)
 	}
 	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: cluster.Name + rdsCredentialSecretSuffix, Namespace: cluster.Namespace}, &secret); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: cluster.Name + builders.AWSCredentialsSecretSuffix, Namespace: cluster.Namespace}, &secret); err != nil {
 		return nil, fmt.Errorf("read RDS API credentials: %w", err)
 	}
-	credentials := rdsclient.Credentials{AccessKeyID: string(secret.Data[rdsAccessKeyIDKey]), SecretAccessKey: string(secret.Data[rdsSecretAccessKeyKey])}
-	if credentials.AccessKeyID == "" || credentials.SecretAccessKey == "" {
-		return nil, fmt.Errorf("RDS API credential secret is incomplete")
+	credentials, err := credentialsFromSecret(&secret)
+	if err != nil {
+		return nil, fmt.Errorf("RDS API credential secret is incomplete: %w", err)
 	}
-	return &rdsReconcileState{region: cluster.Spec.RDS.Region, credentials: credentials, desired: desired}, nil
+	return &rdsReconcileState{region: region, credentials: credentials, desired: desired}, nil
 }
 
 func (state *rdsReconcileState) client(endpoint podEndpoint, dialTLS *adminTLS) (*rdsclient.Client, error) {
@@ -74,10 +79,6 @@ func (state *rdsReconcileState) client(endpoint podEndpoint, dialTLS *adminTLS) 
 
 func (state *rdsReconcileState) desiredState() rdsclient.State {
 	return rdsclient.State{Proxy: state.desired.Proxy, TargetGroup: state.desired.TargetGroup, Targets: state.desired.Targets, Tags: state.desired.Tags}
-}
-
-func claimedRDSHostgroups() map[int32]bool {
-	return map[int32]bool{rdsconfig.WriterHostgroup: true, rdsconfig.ReaderHostgroup: true}
 }
 
 type replicaObservation struct {
@@ -106,7 +107,7 @@ func (r *ProxySQLConfigReconciler) observeReplica(ctx context.Context, endpoint 
 	}
 	result.shunned = runtimeState.ShunnedCount()
 	if rdsState != nil {
-		runtimeState = proxysqlclient.NativeRuntime(runtimeState, native, claimedRDSHostgroups())
+		runtimeState = proxysqlclient.NativeRuntimeWithAWSDBProxy(runtimeState)
 	}
 	if diffs := native.Drift(runtimeState); len(diffs) != 0 {
 		result.status.Reason = "NativeDrift"
@@ -122,7 +123,7 @@ func (r *ProxySQLConfigReconciler) observeReplica(ctx context.Context, endpoint 
 			result.status.Drifted = true
 			return result
 		}
-		observed, err := client.Describe(ctx, rdsState.desired.Proxy.ARN)
+		observed, err := client.Describe(ctx, rdsState.desired.Proxy.Name)
 		if err != nil {
 			result.status.Reason = "RDSReadFailed"
 			result.drifted = true
@@ -151,7 +152,7 @@ func (r *ProxySQLConfigReconciler) applyReplica(ctx context.Context, endpoint po
 			if err != nil {
 				return err
 			}
-			current, err = client.Describe(ctx, rdsState.desired.Proxy.ARN)
+			current, err = client.Describe(ctx, rdsState.desired.Proxy.Name)
 			if err != nil {
 				return err
 			}
@@ -163,7 +164,7 @@ func (r *ProxySQLConfigReconciler) applyReplica(ctx context.Context, endpoint po
 		if err != nil {
 			return err
 		}
-		err = proxysqlclient.Sync(ctx, pxc, native)
+		err = proxysqlclient.SyncWithAWSDBProxy(ctx, pxc, native, rdsState != nil)
 		_ = pxc.Close()
 		return err
 	}})
@@ -173,7 +174,7 @@ func (r *ProxySQLConfigReconciler) applyReplica(ctx context.Context, endpoint po
 			if err != nil {
 				return err
 			}
-			current, err = client.Describe(ctx, rdsState.desired.Proxy.ARN)
+			current, err = client.Describe(ctx, rdsState.desired.Proxy.Name)
 			if err != nil {
 				return err
 			}

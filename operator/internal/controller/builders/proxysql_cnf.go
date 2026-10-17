@@ -360,7 +360,7 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 	clusterSync := len(proxysqlServers) > 0
 	data := cnfData{
 		ClusterName:        b.Name(),
-		AWSManaged:         b.Spec.RDS != nil,
+		AWSManaged:         b.Spec.AWSPluginEnabled(),
 		AdminPassword:      b.Pw.Admin,
 		RadminPassword:     b.Pw.Radmin,
 		MonitorPassword:    b.Pw.Monitor,

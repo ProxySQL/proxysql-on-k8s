@@ -19,7 +19,6 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // ProxySQLConfigSpec is the declarative ProxySQL configuration the operator
@@ -40,9 +39,9 @@ type ProxySQLConfigSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	Version int64 `json:"version,omitempty"`
 
-	// RDS is the RDS-compatible desired state for the target cluster.
+	// Plugin contains desired configuration for optional ProxySQL plugins.
 	// +optional
-	RDS *RDSConfigSpec `json:"rds,omitempty"`
+	Plugin *ConfigPluginSpec `json:"plugin,omitempty"`
 
 	// MySQL backend topology.
 	// +optional
@@ -113,13 +112,72 @@ type ProxySQLConfigSpec struct {
 	SQLStatements []string `json:"sqlStatements,omitempty"`
 }
 
-// RDSConfigSpec carries the complete SaaS RDS-compatible document. Config is
-// intentionally opaque at the Kubernetes API boundary so fields introduced by
-// a newer control plane survive older agents and clients.
-type RDSConfigSpec struct {
-	// Config is the complete versioned RDS-compatible document.
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Config runtime.RawExtension `json:"config"`
+// ConfigPluginSpec contains desired state for optional ProxySQL plugins.
+type ConfigPluginSpec struct {
+	// AWS contains AWS plugin desired state.
+	// +optional
+	AWS *AWSConfigSpec `json:"aws,omitempty"`
+}
+
+// AWSConfigSpec contains the RDS-compatible configuration reconciled through
+// the AWS plugin's RDS API.
+type AWSConfigSpec struct {
+	// DBProxy is one RDS-compatible proxy resource.
+	// +optional
+	DBProxy *AWSDBProxySpec `json:"dbProxy,omitempty"`
+}
+
+// AWSDBProxySpec maps to RDS DB proxy settings and related resources. The
+// operator derives DBProxyName from ProxySQLCluster.metadata.name.
+type AWSDBProxySpec struct {
+	EngineFamily      string        `json:"engineFamily"`
+	Auth              []AWSAuthSpec `json:"auth,omitempty"`
+	DefaultAuthScheme string        `json:"defaultAuthScheme,omitempty"`
+	RoleARN           string        `json:"roleArn,omitempty"`
+	DebugLogging      bool          `json:"debugLogging,omitempty"`
+	IdleClientTimeout int32         `json:"idleClientTimeout,omitempty"`
+	RequireTLS        bool          `json:"requireTLS,omitempty"`
+
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	TargetGroups []AWSTargetGroupSpec `json:"targetGroups"`
+	Targets      []AWSTargetSpec      `json:"targets,omitempty"`
+	Tags         []AWSTagSpec         `json:"tags,omitempty"`
+}
+
+type AWSAuthSpec struct {
+	AuthScheme             string `json:"authScheme,omitempty"`
+	ClientPasswordAuthType string `json:"clientPasswordAuthType,omitempty"`
+	Description            string `json:"description,omitempty"`
+	IAMAuth                string `json:"iamAuth,omitempty"`
+	SecretARN              string `json:"secretArn,omitempty"`
+	UserName               string `json:"userName,omitempty"`
+}
+
+type AWSTargetGroupSpec struct {
+	// +kubebuilder:validation:Enum=default
+	TargetGroupName      string                      `json:"targetGroupName"`
+	ConnectionPoolConfig AWSConnectionPoolConfigSpec `json:"connectionPoolConfig,omitempty"`
+}
+
+type AWSConnectionPoolConfigSpec struct {
+	ConnectionBorrowTimeout   *int32   `json:"connectionBorrowTimeout,omitempty"`
+	InitQuery                 *string  `json:"initQuery,omitempty"`
+	MaxConnectionsPercent     *int32   `json:"maxConnectionsPercent,omitempty"`
+	MaxIdleConnectionsPercent *int32   `json:"maxIdleConnectionsPercent,omitempty"`
+	SessionPinningFilters     []string `json:"sessionPinningFilters,omitempty"`
+}
+
+type AWSTargetSpec struct {
+	// +kubebuilder:validation:Enum=default
+	TargetGroupName       string   `json:"targetGroupName"`
+	DBClusterIdentifiers  []string `json:"dbClusterIdentifiers,omitempty"`
+	DBInstanceIdentifiers []string `json:"dbInstanceIdentifiers,omitempty"`
+}
+
+type AWSTagSpec struct {
+	Key   string `json:"key"`
+	Value string `json:"value,omitempty"`
 }
 
 // MySQLServer maps to a row in the ProxySQL mysql_servers table.
