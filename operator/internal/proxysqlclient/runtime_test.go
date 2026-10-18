@@ -22,7 +22,7 @@ import (
 	"testing"
 )
 
-func ptr32(v int32) *int32 { return &v }
+func ptr32(v int32) *int32 { return new(v) }
 
 // fakeQuerier returns canned rows keyed by a substring of the query.
 type fakeQuerier struct {
@@ -46,7 +46,7 @@ func TestReadRuntime_ParsesTables(t *testing.T) {
 			{"0", "db-0", "3306", "ONLINE"},
 			{"1", "db-1", "3306", "SHUNNED"},
 		},
-		"runtime_mysql_users":       {{"app"}},
+		"runtime_mysql_users":       {{"app", "10"}},
 		"runtime_mysql_query_rules": {{"1"}},
 		"runtime_pgsql_servers":     {},
 		"runtime_pgsql_users":       {},
@@ -65,8 +65,37 @@ func TestReadRuntime_ParsesTables(t *testing.T) {
 	if !rs.MySQLUsers["app"] {
 		t.Errorf("user app missing from runtime state")
 	}
+	if rs.MySQLUserHostgroups["app"] != 10 {
+		t.Errorf("user app hostgroup = %d, want 10", rs.MySQLUserHostgroups["app"])
+	}
 	if !rs.MySQLRules["1"] {
 		t.Errorf("rule 1 missing from runtime state")
+	}
+}
+
+func TestNativeRuntimeExcludesOnlyPluginOwnedRows(t *testing.T) {
+	desired := &Desired{MySQLUsers: []MySQLUser{{Username: "native", DefaultHostgroup: 1}}}
+	runtime := &RuntimeState{
+		MySQLServers:        map[string]string{"1:plugin-db:3306": "ONLINE", "10:native-db:3306": "ONLINE"},
+		MySQLUsers:          map[string]bool{"plugin": true, "native": true, "outside": true},
+		MySQLUserHostgroups: map[string]int32{"plugin": 1, "native": 1, "outside": 10},
+		MySQLRules:          map[string]bool{}, PgSQLServers: map[string]string{}, PgSQLUsers: map[string]bool{}, PgSQLRules: map[string]bool{},
+	}
+	filtered := NativeRuntime(runtime, desired, map[int32]bool{1: true, 2: true})
+	if filtered.MySQLServers["1:plugin-db:3306"] != "" {
+		t.Fatal("plugin server remained in native runtime")
+	}
+	if !filtered.MySQLUsers["native"] {
+		t.Fatal("explicit native user was filtered")
+	}
+	if filtered.MySQLUsers["plugin"] {
+		t.Fatal("plugin-owned user remained in native runtime")
+	}
+	if !filtered.MySQLUsers["outside"] {
+		t.Fatal("user outside claimed hostgroups was filtered")
+	}
+	if len(runtime.MySQLServers) != 2 || !runtime.MySQLUsers["plugin"] {
+		t.Fatal("source runtime was mutated")
 	}
 }
 

@@ -565,6 +565,113 @@ spec:
                 additionalProperties:
                   type: string
                 type: object
+              plugin:
+                description: Plugin contains desired configuration for optional ProxySQL
+                  plugins.
+                properties:
+                  aws:
+                    description: AWS contains AWS plugin desired state.
+                    properties:
+                      dbProxy:
+                        description: DBProxy is one RDS-compatible proxy resource.
+                        properties:
+                          auth:
+                            items:
+                              properties:
+                                authScheme:
+                                  type: string
+                                clientPasswordAuthType:
+                                  type: string
+                                description:
+                                  type: string
+                                iamAuth:
+                                  type: string
+                                secretArn:
+                                  type: string
+                                userName:
+                                  type: string
+                              type: object
+                            type: array
+                          debugLogging:
+                            type: boolean
+                          defaultAuthScheme:
+                            type: string
+                          engineFamily:
+                            type: string
+                          idleClientTimeout:
+                            format: int32
+                            type: integer
+                          requireTLS:
+                            type: boolean
+                          roleArn:
+                            type: string
+                          tags:
+                            items:
+                              properties:
+                                key:
+                                  type: string
+                                value:
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                          targetGroups:
+                            items:
+                              properties:
+                                connectionPoolConfig:
+                                  properties:
+                                    connectionBorrowTimeout:
+                                      format: int32
+                                      type: integer
+                                    initQuery:
+                                      type: string
+                                    maxConnectionsPercent:
+                                      format: int32
+                                      type: integer
+                                    maxIdleConnectionsPercent:
+                                      format: int32
+                                      type: integer
+                                    sessionPinningFilters:
+                                      items:
+                                        type: string
+                                      type: array
+                                  type: object
+                                targetGroupName:
+                                  enum:
+                                  - default
+                                  type: string
+                              required:
+                              - targetGroupName
+                              type: object
+                            maxItems: 1
+                            minItems: 1
+                            type: array
+                          targets:
+                            items:
+                              properties:
+                                dbClusterIdentifiers:
+                                  items:
+                                    type: string
+                                  type: array
+                                dbInstanceIdentifiers:
+                                  items:
+                                    type: string
+                                  type: array
+                                targetGroupName:
+                                  enum:
+                                  - default
+                                  type: string
+                              required:
+                              - targetGroupName
+                              type: object
+                            type: array
+                        required:
+                        - engineFamily
+                        - targetGroups
+                        type: object
+                    type: object
+                type: object
               proxysqlServers:
                 description: |-
                   ProxySQLServers identifies peer nodes for ProxySQL Cluster sync.
@@ -605,6 +712,13 @@ spec:
                   minLength: 1
                   type: string
                 type: array
+              version:
+                description: |-
+                  Version is the product configuration version supplied by the control
+                  plane. Native and RDS-compatible state advance as one version.
+                format: int64
+                minimum: 0
+                type: integer
             required:
             - clusterRef
             type: object
@@ -675,9 +789,9 @@ spec:
                 x-kubernetes-list-type: map
               driftedReplicas:
                 description: |-
-                  DriftedReplicas is the number of ready replicas whose runtime tables
-                  diverged from the desired config at the last runtime check. 0 when
-                  everything converged.
+                  DriftedReplicas is the number of ready replicas whose native or RDS state
+                  diverged from the desired config, or could not be verified. 0 when all
+                  ready replicas converged.
                 format: int32
                 type: integer
               lastAppliedHash:
@@ -700,6 +814,41 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
+              observedVersion:
+                description: |-
+                  ObservedVersion is spec.version after the complete native and RDS state
+                  has been verified on every ready replica.
+                format: int64
+                type: integer
+              replicas:
+                description: Replicas reports the combined native and RDS result for
+                  each ready pod.
+                items:
+                  description: |-
+                    ProxySQLConfigReplicaStatus is a credential-free reconciliation result for
+                    one ProxySQL pod.
+                  properties:
+                    converged:
+                      type: boolean
+                    drifted:
+                      type: boolean
+                    lastCheckTime:
+                      format: date-time
+                      type: string
+                    observedVersion:
+                      format: int64
+                      type: integer
+                    pod:
+                      type: string
+                    reason:
+                      type: string
+                  required:
+                  - pod
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - pod
+                x-kubernetes-list-type: map
               shunnedBackends:
                 description: |-
                   ShunnedBackends is the total number of backend server rows in SHUNNED
@@ -707,8 +856,9 @@ spec:
                 format: int32
                 type: integer
               syncedReplicas:
-                description: SyncedReplicas is the number of ProxySQL pods that received
-                  the latest config.
+                description: |-
+                  SyncedReplicas is the number of ready pods whose complete native and RDS
+                  state matches the current version.
                 format: int32
                 type: integer
             type: object

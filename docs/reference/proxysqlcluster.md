@@ -46,6 +46,8 @@ says which.
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
+| `serviceAccountName` | `string` | namespace default | — | ServiceAccount assigned to every ProxySQL pod. |
+| `plugin` | `*ClusterPluginSpec` | `nil` | typed nested fields | Configures optional plugin startup inputs. See [AWS plugin runtime](#aws-plugin-runtime). |
 | `replicas` | `*int32` | `3` (CRD + operator) | min 1 | Number of ProxySQL control-plane pods. |
 | `pause` | `bool` | `false` | — | Scales the StatefulSet to 0 while retaining Services/Secrets/PVCs; never mutates `replicas`. See [Pausing a cluster](../user-guide/clusters.md#pausing-a-cluster). |
 | `image` | `ImageSpec` | see [Image](#image) | — | ProxySQL container image. |
@@ -70,6 +72,24 @@ says which.
 | `variables` | `VariablesSpec` | see [Variables](#variables) | CEL + operator validation | Extra ProxySQL global variables baked into the bootstrap cnf. |
 | `probes` | `ProbesSpec` | see [Probes](#probes) | — | Overrides the `proxysql` container's startup/readiness/liveness probes. |
 | `tls` | `*TLSSpec` | `nil` (TLS off) | see [TLS](#tls) | Certificate issuance and TLS wiring for the frontend/admin surface and, separately, the backend (ProxySQL-to-database) trust. |
+
+### AWS plugin runtime
+
+`spec.plugin.aws` enables the AWS and web plugins in an image selected through
+the existing `spec.image` field. The operator mounts the selected ConfigMap
+key as `aws-deployment.json` without interpreting its JSON, creates one
+internal RDS API credential Secret, and enables the internal HTTPS listener
+and TLS fallback.
+
+| Field | Type | Validation | Description |
+|---|---|---|---|
+| `plugin.aws.bootstrap.configMapRef.name` | `string` | required | ConfigMap containing the opaque AWS plugin deployment descriptor. |
+| `plugin.aws.bootstrap.configMapRef.key` | `string` | required | Key mounted as `aws-deployment.json`. |
+
+`serviceAccountName` is intentionally generic. In a managed RDS deployment,
+the SaaS agent sets it to the ServiceAccount carrying the seller workload
+identity. The operator only copies the name to the pod template; it does not
+create IAM roles or long-lived AWS credentials.
 
 ### Image
 

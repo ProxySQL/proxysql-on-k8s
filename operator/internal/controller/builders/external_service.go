@@ -18,7 +18,6 @@ package builders
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 )
@@ -43,12 +42,10 @@ func (b *Builder) ExternalService() *corev1.Service {
 	}
 
 	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        b.ExternalName(),
-			Namespace:   b.Namespace(),
-			Labels:      b.Labels(),
-			Annotations: ext.Annotations,
-		},
+		Name:        b.ExternalName(),
+		Namespace:   b.Namespace(),
+		Labels:      b.Labels(),
+		Annotations: ext.Annotations,
 		Spec: corev1.ServiceSpec{
 			Type:                  externalServiceType(ext),
 			Selector:              b.SelectorLabels(),

@@ -30,6 +30,8 @@ import (
 // podEndpoint is a dialable ready replica: the pod-IP address the operator
 // connects to, plus the pod's stable DNS identity for TLS verification.
 type podEndpoint struct {
+	// Pod is the stable StatefulSet pod name used in per-replica status.
+	Pod string
 	// Addr is "<PodIP>:<port>". The operator dials IPs (they come straight
 	// from the apiserver, no resolver in the path).
 	Addr string
@@ -66,6 +68,7 @@ func discoverPodEndpoints(ctx context.Context, c client.Client, cluster *proxysq
 			continue
 		}
 		out = append(out, podEndpoint{
+			Pod:        p.Name,
 			Addr:       fmt.Sprintf("%s:%d", p.Status.PodIP, port),
 			ServerName: podDNSName(p.Name, cluster.Name, cluster.Namespace),
 		})

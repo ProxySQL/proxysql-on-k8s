@@ -18,10 +18,12 @@ For task-oriented guidance see the
 | Subresources | `status` |
 | Printer columns | `Cluster`, `Synced`, `Drifted`, `Last-Sync`, `Age` |
 
-A `ProxySQLConfig` owns **no** Kubernetes objects; reconciling it produces
+A `ProxySQLConfig` normally owns no Kubernetes objects; reconciling it produces
 SQL writes (DELETE/INSERT/LOAD/SAVE per table, UPDATE for variables) on every
 ready replica of the referenced cluster, connecting as `radmin` (ProxySQL
-restricts the `admin` account to localhost). A finalizer
+restricts the `admin` account to localhost). When
+`spec.plugin.aws.dbProxy` is present, the same reconciler also uses the AWS
+plugin's signed RDS API. A finalizer
 (`proxysql.com/config-cleanup`) clears the managed tables on deletion — see
 the [annotations & finalizers reference](annotations.md).
 
@@ -53,6 +55,29 @@ explicit-vs-defaulted port are still distinct rows.
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `clusterRef.name` | `string` | — | required | Name of the target `ProxySQLCluster` in the **same namespace**. A missing cluster sets `ClusterFound=False` and retries every 5s. |
+
+### version and RDS-compatible config
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `version` | `int64` | `0` | min 0 | Product configuration version shared by native and RDS-compatible state. |
+| `plugin.aws.dbProxy` | `*AWSDBProxySpec` | none | typed RDS request fields | RDS-compatible proxy settings, one default target group, request-shaped target identifiers, and tags. The proxy name is derived from the referenced cluster name. |
+
+The operator generates one internal SigV4 credential per cluster and preserves
+it in `<cluster>-rds-api`. The agent-provided bootstrap ConfigMap remains
+opaque to the operator. Neither credential value appears in status.
+
+The same controller reconciles native and RDS-compatible state as one config.
+It uses Admin SQL for native tables and the plugin's signed HTTPS RDS API for
+the RDS section. Status advances `observedVersion` only after both domains are
+verified on every ready replica. `status.replicas` reports a safe per-pod reason
+without credentials, passwords, signed requests, or fetched secret values.
+
+When `dbProxy` is present, the AWS plugin owns MySQL servers, users,
+replication hostgroups, hostgroup attributes, Aurora hostgroups, and RDS
+blue-green hostgroups. Native reconciliation leaves those categories untouched
+and continues to manage query rules, variables, ProxySQL peers, PostgreSQL
+state, and explicit SQL statements.
 
 ### mysqlServers
 

@@ -45,39 +45,50 @@ type Executor interface {
 // sql_statements runs last, after every structured section above; within
 // it, the first failing statement aborts the remaining statements in the list.
 func Sync(ctx context.Context, c Executor, d *Desired) error {
-	steps := []syncStep{
-		{name: "mysql_servers", run: func() error { return syncMySQLServers(ctx, c, d) }},
-		{name: "mysql_replication_hostgroups", run: func() error { return syncMySQLReplicationHostgroups(ctx, c, d) }},
-		{name: "mysql_hostgroup_attributes", run: func() error { return syncMySQLHostgroupAttributes(ctx, c, d) }},
-		// mysql_replication_hostgroups and mysql_hostgroup_attributes are
-		// loaded with mysql_servers (verified live: runtime rows appear only
-		// after LOAD MYSQL SERVERS TO RUNTIME); apply the LOAD/SAVE only once
-		// after all three tables are written.
-		{name: "mysql_servers_apply", run: func() error { return loadSave(ctx, c, "MYSQL SERVERS") }},
+	return SyncWithAWSDBProxy(ctx, c, d, false)
+}
 
-		{name: "mysql_users", run: func() error { return syncMySQLUsers(ctx, c, d) }},
-		{name: "mysql_users_apply", run: func() error { return loadSave(ctx, c, "MYSQL USERS") }},
+// SyncWithAWSDBProxy applies native desired state while leaving MySQL server,
+// hostgroup, and user tables untouched when the AWS plugin owns them.
+func SyncWithAWSDBProxy(ctx context.Context, c Executor, d *Desired, awsDBProxy bool) error {
+	steps := []syncStep{}
+	if !awsDBProxy {
+		steps = append(steps,
+			syncStep{name: "mysql_servers", run: func() error { return syncMySQLServers(ctx, c, d) }},
+			syncStep{name: "mysql_replication_hostgroups", run: func() error { return syncMySQLReplicationHostgroups(ctx, c, d) }},
+			syncStep{name: "mysql_hostgroup_attributes", run: func() error { return syncMySQLHostgroupAttributes(ctx, c, d) }},
+			// mysql_replication_hostgroups and mysql_hostgroup_attributes are
+			// loaded with mysql_servers (verified live: runtime rows appear only
+			// after LOAD MYSQL SERVERS TO RUNTIME); apply the LOAD/SAVE only once
+			// after all three tables are written.
+			syncStep{name: "mysql_servers_apply", run: func() error { return loadSave(ctx, c, "MYSQL SERVERS") }},
 
-		{name: "mysql_query_rules", run: func() error { return syncMySQLQueryRules(ctx, c, d) }},
-		{name: "mysql_query_rules_apply", run: func() error { return loadSave(ctx, c, "MYSQL QUERY RULES") }},
-
-		{name: "pgsql_servers", run: func() error { return syncPostgreSQLServers(ctx, c, d) }},
-		{name: "pgsql_servers_apply", run: func() error { return loadSave(ctx, c, "PGSQL SERVERS") }},
-
-		{name: "pgsql_users", run: func() error { return syncPostgreSQLUsers(ctx, c, d) }},
-		{name: "pgsql_users_apply", run: func() error { return loadSave(ctx, c, "PGSQL USERS") }},
-
-		{name: "pgsql_query_rules", run: func() error { return syncPostgreSQLQueryRules(ctx, c, d) }},
-		{name: "pgsql_query_rules_apply", run: func() error { return loadSave(ctx, c, "PGSQL QUERY RULES") }},
-
-		{name: "proxysql_servers", run: func() error { return syncProxySQLServers(ctx, c, d) }},
-		{name: "proxysql_servers_apply", run: func() error { return loadSave(ctx, c, "PROXYSQL SERVERS") }},
-
-		{name: "mysql_variables", run: func() error { return syncVariables(ctx, c, d.MySQLVariables, "MYSQL") }},
-		{name: "pgsql_variables", run: func() error { return syncVariables(ctx, c, d.PostgreSQLVariables, "PGSQL") }},
-		{name: "admin_variables", run: func() error { return syncVariables(ctx, c, d.AdminVariables, "ADMIN") }},
-		{name: "sql_statements", run: func() error { return syncSQLStatements(ctx, c, d) }},
+			syncStep{name: "mysql_users", run: func() error { return syncMySQLUsers(ctx, c, d) }},
+			syncStep{name: "mysql_users_apply", run: func() error { return loadSave(ctx, c, "MYSQL USERS") }},
+		)
 	}
+	steps = append(steps,
+
+		syncStep{name: "mysql_query_rules", run: func() error { return syncMySQLQueryRules(ctx, c, d) }},
+		syncStep{name: "mysql_query_rules_apply", run: func() error { return loadSave(ctx, c, "MYSQL QUERY RULES") }},
+
+		syncStep{name: "pgsql_servers", run: func() error { return syncPostgreSQLServers(ctx, c, d) }},
+		syncStep{name: "pgsql_servers_apply", run: func() error { return loadSave(ctx, c, "PGSQL SERVERS") }},
+
+		syncStep{name: "pgsql_users", run: func() error { return syncPostgreSQLUsers(ctx, c, d) }},
+		syncStep{name: "pgsql_users_apply", run: func() error { return loadSave(ctx, c, "PGSQL USERS") }},
+
+		syncStep{name: "pgsql_query_rules", run: func() error { return syncPostgreSQLQueryRules(ctx, c, d) }},
+		syncStep{name: "pgsql_query_rules_apply", run: func() error { return loadSave(ctx, c, "PGSQL QUERY RULES") }},
+
+		syncStep{name: "proxysql_servers", run: func() error { return syncProxySQLServers(ctx, c, d) }},
+		syncStep{name: "proxysql_servers_apply", run: func() error { return loadSave(ctx, c, "PROXYSQL SERVERS") }},
+
+		syncStep{name: "mysql_variables", run: func() error { return syncVariables(ctx, c, d.MySQLVariables, "MYSQL") }},
+		syncStep{name: "pgsql_variables", run: func() error { return syncVariables(ctx, c, d.PostgreSQLVariables, "PGSQL") }},
+		syncStep{name: "admin_variables", run: func() error { return syncVariables(ctx, c, d.AdminVariables, "ADMIN") }},
+		syncStep{name: "sql_statements", run: func() error { return syncSQLStatements(ctx, c, d) }},
+	)
 
 	var firstErr error
 	for _, s := range steps {

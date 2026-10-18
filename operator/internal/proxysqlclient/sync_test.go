@@ -80,6 +80,21 @@ func TestSync_EmptyDesired_StillIssuesDeletesAndLoadSaves(t *testing.T) {
 	}
 }
 
+func TestSyncWithAWSDBProxyLeavesPluginOwnedTablesUntouched(t *testing.T) {
+	rec := &recorder{}
+	if err := SyncWithAWSDBProxy(context.Background(), rec, &Desired{}, true); err != nil {
+		t.Fatalf("SyncWithAWSDBProxy: %v", err)
+	}
+	for _, table := range []string{"mysql_servers", "mysql_replication_hostgroups", "mysql_hostgroup_attributes", "mysql_users"} {
+		if rec.seen(table) {
+			t.Fatalf("AWS-owned table %s was modified: %v", table, rec.queries)
+		}
+	}
+	if !rec.seen("mysql_query_rules") || !rec.seen("proxysql_servers") {
+		t.Fatalf("native-owned tables were not reconciled: %v", rec.queries)
+	}
+}
+
 func TestSync_MySQLServers_RendersInsert(t *testing.T) {
 	rec := &recorder{}
 	w := int32(100)

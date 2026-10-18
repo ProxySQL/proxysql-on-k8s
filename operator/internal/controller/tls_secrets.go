@@ -50,11 +50,17 @@ const reasonTLSSecretError = "TLSSecretError"
 // preserved across reconciles so clients pinning it don't churn.
 const tlsCADuration = 5 * 365 * 24 * time.Hour
 
+const (
+	tlsCertKey    = "tls.crt"
+	tlsPrivateKey = "tls.key"
+	tlsCAKey      = "ca.crt"
+)
+
 // tlsRequiredKeys are the keys the resolved serving-cert Secret MUST carry
 // before any TLS wiring reaches the StatefulSet. ca.crt is required even
 // for tier 2 — a CA-less cert-manager issuer omits it, and the datadir
 // symlink delivery (proxysql-ca.pem) needs a real file behind it.
-var tlsRequiredKeys = []string{"tls.crt", "tls.key", "ca.crt"}
+var tlsRequiredKeys = []string{tlsCertKey, tlsPrivateKey, tlsCAKey}
 
 // ensureTLSSecrets resolves the frontend/admin serving-cert Secret per the
 // three-tier precedence (user Secret > cert-manager issuerRef > operator
@@ -150,11 +156,11 @@ func (r *ProxySQLClusterReconciler) validateBackendTLSSecrets(ctx context.Contex
 		return nil
 	}
 	be := b.Spec.TLS.Backend
-	if err := r.requireSecretKeys(ctx, be.CASecretName, b.Namespace(), []string{"ca.crt"}); err != nil {
+	if err := r.requireSecretKeys(ctx, be.CASecretName, b.Namespace(), []string{tlsCAKey}); err != nil {
 		return fmt.Errorf("backend TLS: %w", err)
 	}
 	if be.ClientCertSecretName != "" {
-		if err := r.requireSecretKeys(ctx, be.ClientCertSecretName, b.Namespace(), []string{"tls.crt", "tls.key"}); err != nil {
+		if err := r.requireSecretKeys(ctx, be.ClientCertSecretName, b.Namespace(), []string{tlsCertKey, tlsPrivateKey}); err != nil {
 			return fmt.Errorf("backend TLS: %w", err)
 		}
 	}
@@ -262,9 +268,9 @@ func (r *ProxySQLClusterReconciler) holdBackendTLSLastGood(ctx context.Context, 
 			}
 			for _, item := range src.Secret.Items {
 				switch item.Key {
-				case "ca.crt":
+				case tlsCAKey:
 					lastCA = src.Secret.Name
-				case "tls.crt":
+				case tlsCertKey:
 					lastClient = src.Secret.Name
 				}
 			}
@@ -345,15 +351,15 @@ func (r *ProxySQLClusterReconciler) ensureSelfSignedTLS(ctx context.Context, clu
 		// Preserve an existing CA unless it is malformed or would expire
 		// before a serving cert issued today reaches its own renewal
 		// window (a serving cert must never outlive its CA).
-		if len(caSec.Data["tls.crt"]) > 0 && len(caSec.Data["tls.key"]) > 0 &&
-			!tlsutil.NeedsRenewal(caSec.Data["tls.crt"], duration+renewBefore) {
+		if len(caSec.Data[tlsCertKey]) > 0 && len(caSec.Data[tlsPrivateKey]) > 0 &&
+			!tlsutil.NeedsRenewal(caSec.Data[tlsCertKey], duration+renewBefore) {
 			return controllerutil.SetControllerReference(cluster, caSec, r.Scheme)
 		}
 		caCrt, caKey, err := tlsutil.NewCA("proxysql-ca-"+b.Name(), tlsCADuration)
 		if err != nil {
 			return fmt.Errorf("minting self-signed CA: %w", err)
 		}
-		caSec.Data = map[string][]byte{"tls.crt": caCrt, "tls.key": caKey, "ca.crt": caCrt}
+		caSec.Data = map[string][]byte{tlsCertKey: caCrt, tlsPrivateKey: caKey, tlsCAKey: caCrt}
 		return controllerutil.SetControllerReference(cluster, caSec, r.Scheme)
 	})
 	if err != nil {
@@ -370,14 +376,14 @@ func (r *ProxySQLClusterReconciler) ensureSelfSignedTLS(ctx context.Context, clu
 		if srvSec.CreationTimestamp.IsZero() {
 			srvSec.Type = corev1.SecretTypeTLS
 		}
-		if !servingReissueNeeded(srvSec.Data, caSec.Data["tls.crt"], sans, renewBefore) {
+		if !servingReissueNeeded(srvSec.Data, caSec.Data[tlsCertKey], sans, renewBefore) {
 			return controllerutil.SetControllerReference(cluster, srvSec, r.Scheme)
 		}
-		crt, key, err := tlsutil.IssueServing(caSec.Data["tls.crt"], caSec.Data["tls.key"], sans, duration)
+		crt, key, err := tlsutil.IssueServing(caSec.Data[tlsCertKey], caSec.Data[tlsPrivateKey], sans, duration)
 		if err != nil {
 			return fmt.Errorf("issuing serving certificate: %w", err)
 		}
-		srvSec.Data = map[string][]byte{"tls.crt": crt, "tls.key": key, "ca.crt": caSec.Data["tls.crt"]}
+		srvSec.Data = map[string][]byte{tlsCertKey: crt, tlsPrivateKey: key, tlsCAKey: caSec.Data[tlsCertKey]}
 		return controllerutil.SetControllerReference(cluster, srvSec, r.Scheme)
 	})
 	if err != nil {
@@ -398,13 +404,13 @@ func servingReissueNeeded(data map[string][]byte, caCert []byte, sans []string, 
 			return true
 		}
 	}
-	if !bytes.Equal(data["ca.crt"], caCert) {
+	if !bytes.Equal(data[tlsCAKey], caCert) {
 		return true
 	}
-	if tlsutil.NeedsRenewal(data["tls.crt"], renewBefore) {
+	if tlsutil.NeedsRenewal(data[tlsCertKey], renewBefore) {
 		return true
 	}
-	return !certCoversSANs(data["tls.crt"], sans)
+	return !certCoversSANs(data[tlsCertKey], sans)
 }
 
 // certCoversSANs reports whether every desired SAN appears verbatim in the

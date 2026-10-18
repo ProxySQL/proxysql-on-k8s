@@ -118,7 +118,7 @@ func classifyTLSRotation(applied, secretHash string) tlsRotationVerdict {
 // rotations. Length-prefixed framing, same shape as structuralHash.
 func tlsContentHash(data map[string][]byte) string {
 	h := sha256.New()
-	for _, k := range []string{"ca.crt", "tls.crt", "tls.key"} {
+	for _, k := range []string{tlsCAKey, tlsCertKey, tlsPrivateKey} {
 		v := data[k]
 		_, _ = fmt.Fprintf(h, "%d:%s:%d:", len(k), k, len(v))
 		_, _ = h.Write(v)
@@ -256,12 +256,12 @@ func (r *ProxySQLClusterReconciler) resolveTLSRotation(
 		return tlsRotationOutcome{applied: cur.tlsApplied, state: cur.tlsRotationState, restart: cur.tlsRestart}, nil
 	}
 
-	expectedFP, err := tlsutil.LeafFingerprint(sec.Data["tls.crt"])
+	expectedFP, err := tlsutil.LeafFingerprint(sec.Data[tlsCertKey])
 	if err != nil {
 		return keep, fmt.Errorf("tls secret %q: parsing tls.crt: %w", secretName, err)
 	}
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(sec.Data["ca.crt"]) {
+	if !pool.AppendCertsFromPEM(sec.Data[tlsCAKey]) {
 		return keep, fmt.Errorf("tls secret %q: ca.crt contains no usable certificates", secretName)
 	}
 	start := parseTLSRotationState(cur.tlsRotationState, secretHash, time.Now())
@@ -295,11 +295,11 @@ func (r *ProxySQLClusterReconciler) resolveTLSRotation(
 	}
 
 	return tlsRotationOutcome{
-			applied: cur.tlsApplied,
-			state:   formatTLSRotationState(secretHash, start),
-			restart: cur.tlsRestart,
-		}, fmt.Errorf("TLS rotation pending on %d/%d replica(s): %s",
-			len(failures), len(endpoints), joinTrunc(failures, 512))
+		applied: cur.tlsApplied,
+		state:   formatTLSRotationState(secretHash, start),
+		restart: cur.tlsRestart,
+	}, fmt.Errorf("TLS rotation pending on %d/%d replica(s): %s",
+		len(failures), len(endpoints), joinTrunc(failures, 512))
 }
 
 // reloadAndVerifyTLS drives one replica through reload-then-verify:

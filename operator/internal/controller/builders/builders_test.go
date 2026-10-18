@@ -995,7 +995,7 @@ func TestRandomPassword_Length(t *testing.T) {
 	}
 }
 
-func int32Ptr(v int32) *int32 { return &v }
+func int32Ptr(v int32) *int32 { return new(v) }
 
 func TestBuilder_Service_DefaultsHaveNoAnnotationsOrAffinity(t *testing.T) {
 	b := New(newCluster(clusterName), newScheme(t), Passwords{})

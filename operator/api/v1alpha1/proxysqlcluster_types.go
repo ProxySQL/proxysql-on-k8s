@@ -27,6 +27,15 @@ import (
 // cluster. The operator reconciles this into a StatefulSet, headless+regular
 // Services, an admin Secret, and an optional PodDisruptionBudget.
 type ProxySQLClusterSpec struct {
+	// ServiceAccountName is copied to the ProxySQL pod template. When empty,
+	// Kubernetes uses the namespace's default ServiceAccount.
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// Plugin configures optional ProxySQL plugins for this cluster.
+	// +optional
+	Plugin *ClusterPluginSpec `json:"plugin,omitempty"`
+
 	// Replicas is the number of ProxySQL control-plane pods.
 	// +optional
 	// +kubebuilder:default=3
@@ -171,6 +180,29 @@ type ProxySQLClusterSpec struct {
 	// precedence.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
+}
+
+// ClusterPluginSpec configures optional plugin startup inputs.
+type ClusterPluginSpec struct {
+	// AWS configures the AWS plugin.
+	// +optional
+	AWS *AWSClusterPluginSpec `json:"aws,omitempty"`
+}
+
+// AWSClusterPluginSpec configures the AWS plugin startup contract.
+type AWSClusterPluginSpec struct {
+	// Bootstrap selects the opaque deployment descriptor mounted for the plugin.
+	Bootstrap AWSBootstrapSpec `json:"bootstrap"`
+}
+
+// AWSBootstrapSpec identifies one ConfigMap key containing aws-deployment.json.
+type AWSBootstrapSpec struct {
+	ConfigMapRef corev1.ConfigMapKeySelector `json:"configMapRef"`
+}
+
+// AWSPluginEnabled reports whether the cluster has AWS plugin startup input.
+func (s *ProxySQLClusterSpec) AWSPluginEnabled() bool {
+	return s.Plugin != nil && s.Plugin.AWS != nil
 }
 
 // TLSEnabled reports whether TLS is configured and turned on. Safe to call

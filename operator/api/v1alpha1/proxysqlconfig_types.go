@@ -33,6 +33,16 @@ type ProxySQLConfigSpec struct {
 	// +required
 	ClusterRef corev1.LocalObjectReference `json:"clusterRef"`
 
+	// Version is the product configuration version supplied by the control
+	// plane. Native and RDS-compatible state advance as one version.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Version int64 `json:"version,omitempty"`
+
+	// Plugin contains desired configuration for optional ProxySQL plugins.
+	// +optional
+	Plugin *ConfigPluginSpec `json:"plugin,omitempty"`
+
 	// MySQL backend topology.
 	// +optional
 	// +listType=map
@@ -100,6 +110,74 @@ type ProxySQLConfigSpec struct {
 	// +optional
 	// +kubebuilder:validation:items:MinLength=1
 	SQLStatements []string `json:"sqlStatements,omitempty"`
+}
+
+// ConfigPluginSpec contains desired state for optional ProxySQL plugins.
+type ConfigPluginSpec struct {
+	// AWS contains AWS plugin desired state.
+	// +optional
+	AWS *AWSConfigSpec `json:"aws,omitempty"`
+}
+
+// AWSConfigSpec contains the RDS-compatible configuration reconciled through
+// the AWS plugin's RDS API.
+type AWSConfigSpec struct {
+	// DBProxy is one RDS-compatible proxy resource.
+	// +optional
+	DBProxy *AWSDBProxySpec `json:"dbProxy,omitempty"`
+}
+
+// AWSDBProxySpec maps to RDS DB proxy settings and related resources. The
+// operator derives DBProxyName from ProxySQLCluster.metadata.name.
+type AWSDBProxySpec struct {
+	EngineFamily      string        `json:"engineFamily"`
+	Auth              []AWSAuthSpec `json:"auth,omitempty"`
+	DefaultAuthScheme string        `json:"defaultAuthScheme,omitempty"`
+	RoleARN           string        `json:"roleArn,omitempty"`
+	DebugLogging      bool          `json:"debugLogging,omitempty"`
+	IdleClientTimeout int32         `json:"idleClientTimeout,omitempty"`
+	RequireTLS        bool          `json:"requireTLS,omitempty"`
+
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	TargetGroups []AWSTargetGroupSpec `json:"targetGroups"`
+	Targets      []AWSTargetSpec      `json:"targets,omitempty"`
+	Tags         []AWSTagSpec         `json:"tags,omitempty"`
+}
+
+type AWSAuthSpec struct {
+	AuthScheme             string `json:"authScheme,omitempty"`
+	ClientPasswordAuthType string `json:"clientPasswordAuthType,omitempty"`
+	Description            string `json:"description,omitempty"`
+	IAMAuth                string `json:"iamAuth,omitempty"`
+	SecretARN              string `json:"secretArn,omitempty"`
+	UserName               string `json:"userName,omitempty"`
+}
+
+type AWSTargetGroupSpec struct {
+	// +kubebuilder:validation:Enum=default
+	TargetGroupName      string                      `json:"targetGroupName"`
+	ConnectionPoolConfig AWSConnectionPoolConfigSpec `json:"connectionPoolConfig,omitempty"`
+}
+
+type AWSConnectionPoolConfigSpec struct {
+	ConnectionBorrowTimeout   *int32   `json:"connectionBorrowTimeout,omitempty"`
+	InitQuery                 *string  `json:"initQuery,omitempty"`
+	MaxConnectionsPercent     *int32   `json:"maxConnectionsPercent,omitempty"`
+	MaxIdleConnectionsPercent *int32   `json:"maxIdleConnectionsPercent,omitempty"`
+	SessionPinningFilters     []string `json:"sessionPinningFilters,omitempty"`
+}
+
+type AWSTargetSpec struct {
+	// +kubebuilder:validation:Enum=default
+	TargetGroupName       string   `json:"targetGroupName"`
+	DBClusterIdentifiers  []string `json:"dbClusterIdentifiers,omitempty"`
+	DBInstanceIdentifiers []string `json:"dbInstanceIdentifiers,omitempty"`
+}
+
+type AWSTagSpec struct {
+	Key   string `json:"key"`
+	Value string `json:"value,omitempty"`
 }
 
 // MySQLServer maps to a row in the ProxySQL mysql_servers table.
@@ -397,6 +475,11 @@ type ProxySQLConfigStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// ObservedVersion is spec.version after the complete native and RDS state
+	// has been verified on every ready replica.
+	// +optional
+	ObservedVersion int64 `json:"observedVersion,omitempty"`
+
 	// LastAppliedHash is a SHA of the spec last successfully pushed to the cluster.
 	// +optional
 	LastAppliedHash string `json:"lastAppliedHash,omitempty"`
@@ -407,13 +490,14 @@ type ProxySQLConfigStatus struct {
 	// +optional
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 
-	// SyncedReplicas is the number of ProxySQL pods that received the latest config.
+	// SyncedReplicas is the number of ready pods whose complete native and RDS
+	// state matches the current version.
 	// +optional
 	SyncedReplicas int32 `json:"syncedReplicas,omitempty"`
 
-	// DriftedReplicas is the number of ready replicas whose runtime tables
-	// diverged from the desired config at the last runtime check. 0 when
-	// everything converged.
+	// DriftedReplicas is the number of ready replicas whose native or RDS state
+	// diverged from the desired config, or could not be verified. 0 when all
+	// ready replicas converged.
 	// +optional
 	DriftedReplicas int32 `json:"driftedReplicas,omitempty"`
 
@@ -427,12 +511,34 @@ type ProxySQLConfigStatus struct {
 	// +optional
 	LastRuntimeCheckTime *metav1.Time `json:"lastRuntimeCheckTime,omitempty"`
 
+	// Replicas reports the combined native and RDS result for each ready pod.
+	// +listType=map
+	// +listMapKey=pod
+	// +optional
+	Replicas []ProxySQLConfigReplicaStatus `json:"replicas,omitempty"`
+
 	// Conditions follow standard K8s conventions:
 	//   Ready, Progressing, Degraded, ClusterFound
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// ProxySQLConfigReplicaStatus is a credential-free reconciliation result for
+// one ProxySQL pod.
+type ProxySQLConfigReplicaStatus struct {
+	Pod string `json:"pod"`
+	// +optional
+	ObservedVersion int64 `json:"observedVersion,omitempty"`
+	// +optional
+	Converged bool `json:"converged,omitempty"`
+	// +optional
+	Drifted bool `json:"drifted,omitempty"`
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// +optional
+	LastCheckTime *metav1.Time `json:"lastCheckTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
