@@ -79,6 +79,7 @@ spec field.
 | `maxConnections` | `max_connections` | `1000` |
 | `maxReplicationLag` | `max_replication_lag` | `0` |
 | `useSSL` | `use_ssl` | `0` |
+| `status` | `status` | `'ONLINE'` (always emitted, so a full push never resets an administrative `OFFLINE_*` status) |
 | `comment` | `comment` | `''` |
 
 ### mysql_replication_hostgroups
@@ -231,7 +232,7 @@ back **identity keys only** from the `runtime_*` tables and compares:
 
 | Table | In drift detection | Compared key |
 |---|---|---|
-| `runtime_mysql_servers` | yes | `hostgroup_id:hostname:port` — membership-aware: hostgroups joined by a `mysqlReplicationHostgroups` pair compare as one equivalence class, so a server in either hostgroup of its pair is present (status read but ignored for drift; counted for `shunnedBackends`) |
+| `runtime_mysql_servers` | yes | `hostgroup_id:hostname:port` — membership-aware: hostgroups joined by a `mysqlReplicationHostgroups` pair compare as one equivalence class, so a server in either hostgroup of its pair is present (status counted for `shunnedBackends`; compared only for servers whose spec sets an explicit `OFFLINE_*` `status` — see notes) |
 | `runtime_mysql_users` | yes | `username` (DISTINCT — runtime holds frontend + backend rows per user) |
 | `runtime_mysql_query_rules` | yes | `rule_id` |
 | `runtime_pgsql_servers` | yes | `hostgroup_id:hostname:port` |
@@ -251,6 +252,21 @@ Notes:
 - A `SHUNNED` server is *present*, therefore **not** drifted — shunning is
   ProxySQL's own health reaction, surfaced separately as
   `status.shunnedBackends`.
+- The one attribute that *is* runtime-compared is an explicit
+  administrative `mysqlServers[].status`, and only `OFFLINE_SOFT` /
+  `OFFLINE_HARD` participate. A server whose spec says `ONLINE` (or omits
+  `status`) never compares status, so a monitor-`SHUNNED` server stays
+  converged. For explicit values:
+  - `OFFLINE_SOFT` — drift when the server is present but no runtime row
+    of it (across its replication pair) reports `OFFLINE_SOFT`, e.g. after
+    an out-of-band reset to `ONLINE`, or a reset followed by a monitor
+    shun. Reported as `mysql_servers: status <key> want OFFLINE_SOFT have
+    <runtime status>`.
+  - `OFFLINE_HARD` — ProxySQL omits `OFFLINE_HARD` rows from
+    `runtime_mysql_servers`, so absence is the converged state (never
+    "missing"), and the server appearing at runtime in any status is drift.
+  - When several spec rows of one server in a replication pair disagree on
+    status, status is not compared for it (membership only).
 - Server comparison enforces **membership, not placement** (#34): within
   the hostgroups of a `mysqlReplicationHostgroups` pair, monitor-driven
   moves (`read_only` demotion, failover promotion, writer-is-also-reader

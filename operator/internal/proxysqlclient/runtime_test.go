@@ -444,3 +444,136 @@ func TestReadGlobalVariables_EmptyNamesNoQuery(t *testing.T) {
 		t.Errorf("result = %v, want empty map", result)
 	}
 }
+
+// ---- explicit administrative status (MySQLServer.Status) ----
+
+func assertDrift(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("Drift = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Drift[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Desired ONLINE (explicit or unset) never compares status: a server the
+// monitor shunned, or one an operator drained by hand, is not drift.
+func TestDrift_DesiredOnlineIgnoresRuntimeStatus(t *testing.T) {
+	d := &Desired{MySQLServers: []MySQLServer{
+		{Hostgroup: 0, Hostname: "db-0", Port: 3306},
+		{Hostgroup: 0, Hostname: "db-1", Port: 3306, Status: "ONLINE"},
+		{Hostgroup: 0, Hostname: "db-2", Port: 3306, Status: "ONLINE"},
+	}}
+	rs := &RuntimeState{MySQLServers: map[string]string{
+		"0:db-0:3306": "SHUNNED",
+		"0:db-1:3306": "SHUNNED",
+		"0:db-2:3306": "OFFLINE_SOFT",
+	}}
+	assertDrift(t, d.Drift(rs), nil)
+}
+
+func TestDrift_OfflineSoftConverged(t *testing.T) {
+	d := &Desired{MySQLServers: []MySQLServer{{Hostgroup: 0, Hostname: "db-0", Port: 3306, Status: "OFFLINE_SOFT"}}}
+	rs := &RuntimeState{MySQLServers: map[string]string{"0:db-0:3306": "OFFLINE_SOFT"}}
+	assertDrift(t, d.Drift(rs), nil)
+}
+
+// An out-of-band reset (or a pre-status operator push) puts a drained server
+// back ONLINE — or ONLINE and then monitor-SHUNNED. Either way the desired
+// OFFLINE_SOFT is lost: that is drift.
+func TestDrift_OfflineSoftResetIsDrift(t *testing.T) {
+	d := &Desired{MySQLServers: []MySQLServer{
+		{Hostgroup: 0, Hostname: "db-0", Port: 3306, Status: "OFFLINE_SOFT"},
+		{Hostgroup: 0, Hostname: "db-1", Port: 3306, Status: "OFFLINE_SOFT"},
+	}}
+	rs := &RuntimeState{MySQLServers: map[string]string{
+		"0:db-0:3306": "ONLINE",
+		"0:db-1:3306": "SHUNNED",
+	}}
+	assertDrift(t, d.Drift(rs), []string{
+		"mysql_servers: status 0:db-0:3306 want OFFLINE_SOFT have ONLINE",
+		"mysql_servers: status 0:db-1:3306 want OFFLINE_SOFT have SHUNNED",
+	})
+}
+
+// A desired OFFLINE_SOFT server absent from runtime is reported once, as
+// missing — not additionally as a status mismatch.
+func TestDrift_OfflineSoftMissingReportedOnce(t *testing.T) {
+	d := &Desired{MySQLServers: []MySQLServer{{Hostgroup: 0, Hostname: "db-0", Port: 3306, Status: "OFFLINE_SOFT"}}}
+	assertDrift(t, d.Drift(&RuntimeState{MySQLServers: map[string]string{}}), []string{
+		"mysql_servers: missing 0:db-0:3306",
+	})
+}
+
+// ProxySQL omits OFFLINE_HARD rows from runtime_mysql_servers (verified on
+// proxysql/proxysql:3.0.11), so absence is the converged state — it must not
+// be reported as missing, or every resync would re-push forever.
+func TestDrift_OfflineHardAbsentIsConverged(t *testing.T) {
+	d := &Desired{MySQLServers: []MySQLServer{
+		{Hostgroup: 0, Hostname: "db-0", Port: 3306},
+		{Hostgroup: 0, Hostname: "db-1", Port: 3306, Status: "OFFLINE_HARD"},
+	}}
+	rs := &RuntimeState{MySQLServers: map[string]string{"0:db-0:3306": "ONLINE"}}
+	assertDrift(t, d.Drift(rs), nil)
+}
+
+// A desired OFFLINE_HARD server visible at runtime in any status has lost its
+// hard-offline state — drift, and not "extra" (it is a known server).
+func TestDrift_OfflineHardVisibleIsDrift(t *testing.T) {
+	d := &Desired{MySQLServers: []MySQLServer{
+		{Hostgroup: 0, Hostname: "db-0", Port: 3306, Status: "OFFLINE_HARD"},
+		{Hostgroup: 0, Hostname: "db-1", Port: 3306, Status: "OFFLINE_HARD"},
+	}}
+	rs := &RuntimeState{MySQLServers: map[string]string{
+		"0:db-0:3306": "ONLINE",
+		"0:db-1:3306": "SHUNNED",
+	}}
+	assertDrift(t, d.Drift(rs), []string{
+		"mysql_servers: status 0:db-0:3306 want OFFLINE_HARD have ONLINE",
+		"mysql_servers: status 0:db-1:3306 want OFFLINE_HARD have SHUNNED",
+	})
+}
+
+// Status follows the membership classes: a drained server the read_only
+// monitor moved to the pair's reader hostgroup is still converged, and one
+// reset to ONLINE there is still drift.
+func TestDrift_OfflineStatusFollowsReplicationClass(t *testing.T) {
+	d := pairedDesired()
+	d.MySQLServers[2].Status = "OFFLINE_SOFT" // db-2, spec hostgroup 10
+	moved := &RuntimeState{MySQLServers: map[string]string{
+		"10:db-0:3306": "ONLINE",
+		"20:db-1:3306": "ONLINE",
+		"20:db-2:3306": "OFFLINE_SOFT",
+	}}
+	assertDrift(t, d.Drift(moved), nil)
+
+	reset := &RuntimeState{MySQLServers: map[string]string{
+		"10:db-0:3306": "ONLINE",
+		"20:db-1:3306": "ONLINE",
+		"20:db-2:3306": "ONLINE",
+	}}
+	assertDrift(t, d.Drift(reset), []string{
+		"mysql_servers: status 10:db-2:3306 want OFFLINE_SOFT have ONLINE",
+	})
+}
+
+// When desired rows collapsing onto one canonical key disagree (one OFFLINE,
+// one ONLINE/unset), status is ambiguous: fall back to membership only, which
+// can never cause a re-push loop.
+func TestDrift_MixedStatusesInClassFallBackToMembership(t *testing.T) {
+	d := &Desired{
+		MySQLServers: []MySQLServer{
+			{Hostgroup: 10, Hostname: "db-0", Port: 3306, Status: "OFFLINE_HARD"},
+			{Hostgroup: 20, Hostname: "db-0", Port: 3306},
+		},
+		MySQLReplicationHostgroups: []MySQLReplicationHostgroup{{WriterHostgroup: 10, ReaderHostgroup: 20}},
+	}
+	rs := &RuntimeState{MySQLServers: map[string]string{"20:db-0:3306": "ONLINE"}}
+	assertDrift(t, d.Drift(rs), nil)
+	assertDrift(t, d.Drift(&RuntimeState{MySQLServers: map[string]string{}}), []string{
+		"mysql_servers: missing 10:db-0:3306",
+	})
+}

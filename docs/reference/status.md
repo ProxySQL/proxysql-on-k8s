@@ -147,7 +147,10 @@ the reconciler performs an **informed resync** instead of a blind re-push:
 
 Drift comparison is keys-only (server `hostgroup:hostname:port`, usernames,
 rule IDs); attribute-level changes are carried by the spec-hash path. A
-`SHUNNED` backend is *present*, not drifted. Server keys are additionally
+`SHUNNED` backend is *present*, not drifted; the only runtime-compared
+attribute is an explicit `mysqlServers[].status` of `OFFLINE_SOFT` /
+`OFFLINE_HARD` (see
+[admin-tables.md](admin-tables.md#drift-detection-coverage)). Server keys are additionally
 **membership-aware**: hostgroups joined by a `mysqlReplicationHostgroups`
 pair compare as one equivalence class, so the `read_only` monitor moving a
 server between the pair's writer and reader hostgroups is not drift — only

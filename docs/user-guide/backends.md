@@ -161,7 +161,10 @@ hostgroup on a `read_only` flip, promoting a replica during failover, or
 mirroring the writer into the reader hostgroup
 (`mysql-monitor_writer_is_also_reader`) is ProxySQL doing its job, never
 drift. The same goes for health status: a `SHUNNED` backend is present,
-not drifted. What *is* drift: a listed server missing from every
+not drifted. (A server you take out of rotation on purpose with
+`status: OFFLINE_SOFT` or `OFFLINE_HARD` is the exception: losing that
+status at runtime *is* drift and is re-pushed — see
+[admin-tables.md](../reference/admin-tables.md#drift-detection-coverage).) What *is* drift: a listed server missing from every
 hostgroup of its pair, or an unknown server appearing in one — both
 trigger a re-push. Hostgroups not covered by any pair keep exact
 placement enforcement (without a pair, nothing may legitimately move a
