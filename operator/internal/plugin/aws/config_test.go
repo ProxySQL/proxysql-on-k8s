@@ -1,4 +1,4 @@
-package rdsconfig
+package aws
 
 import (
 	"testing"

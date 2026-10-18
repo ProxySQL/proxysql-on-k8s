@@ -23,15 +23,15 @@ import (
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 	"github.com/ProxySQL/kubernetes/operator/internal/controller/builders"
+	pluginaws "github.com/ProxySQL/kubernetes/operator/internal/plugin/aws"
 	"github.com/ProxySQL/kubernetes/operator/internal/proxysqlclient"
 	"github.com/ProxySQL/kubernetes/operator/internal/rdsclient"
-	"github.com/ProxySQL/kubernetes/operator/internal/rdsconfig"
 )
 
 type rdsReconcileState struct {
 	region      string
 	credentials rdsclient.Credentials
-	desired     rdsconfig.Desired
+	desired     pluginaws.Desired
 }
 
 func (r *ProxySQLConfigReconciler) buildRDSReconcileState(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig, cluster *proxysqlv1alpha1.ProxySQLCluster) (*rdsReconcileState, error) {
@@ -41,7 +41,7 @@ func (r *ProxySQLConfigReconciler) buildRDSReconcileState(ctx context.Context, c
 	if !cluster.Spec.AWSPluginEnabled() {
 		return nil, fmt.Errorf("config has AWS DB proxy state but cluster has no AWS plugin bootstrap")
 	}
-	desired, err := rdsconfig.FromSpec(cfg.Spec.Plugin.AWS.DBProxy, cluster.Name)
+	desired, err := pluginaws.FromSpec(cfg.Spec.Plugin.AWS.DBProxy, cluster.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ func (r *ProxySQLConfigReconciler) observeReplica(ctx context.Context, endpoint 
 			result.status.Drifted = true
 			return result
 		}
-		if diffs := rdsconfig.Drift(rdsState.desired, observed); len(diffs) != 0 {
+		if diffs := pluginaws.Drift(rdsState.desired, observed); len(diffs) != 0 {
 			result.status.Reason = "RDSDrift"
 			result.drifted = true
 			result.status.Drifted = true
