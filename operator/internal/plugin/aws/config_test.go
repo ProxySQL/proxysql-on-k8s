@@ -1,10 +1,32 @@
-package rdsconfig
+package aws
 
 import (
 	"testing"
 
+	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 	"github.com/ProxySQL/kubernetes/operator/internal/rdsclient"
 )
+
+func TestFromSpecPreservesRDSRequestTargets(t *testing.T) {
+	source := &proxysqlv1alpha1.AWSDBProxySpec{
+		EngineFamily: "MYSQL",
+		TargetGroups: []proxysqlv1alpha1.AWSTargetGroupSpec{{TargetGroupName: "default"}},
+		Targets: []proxysqlv1alpha1.AWSTargetSpec{{
+			TargetGroupName: "default", DBClusterIdentifiers: []string{"aurora-orders"}, DBInstanceIdentifiers: []string{"orders-1"},
+		}},
+	}
+	desired, err := FromSpec(source, "orders")
+	if err != nil {
+		t.Fatalf("FromSpec: %v", err)
+	}
+	if desired.Proxy.Name != "orders" || len(desired.Targets) != 2 {
+		t.Fatalf("desired = %+v", desired)
+	}
+	if desired.Targets[0] != (rdsclient.Target{Identifier: "orders-1", Type: "RDS_INSTANCE"}) ||
+		desired.Targets[1] != (rdsclient.Target{Identifier: "aurora-orders", Type: "TRACKED_CLUSTER"}) {
+		t.Fatalf("targets = %+v", desired.Targets)
+	}
+}
 
 func TestDesiredDriftNormalizesOrderAndDefaults(t *testing.T) {
 	desired := Desired{

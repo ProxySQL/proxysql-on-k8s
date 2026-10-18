@@ -9,16 +9,18 @@ CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and limitations.
 */
 
-package rdsconfig
+package aws
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
 
+	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 	"github.com/ProxySQL/kubernetes/operator/internal/rdsclient"
 )
+
+const defaultTargetGroupName = "default"
 
 // Desired is the API-facing subset of the S1 document. Network placement and
 // the default endpoint remain bootstrap/provisioning data; the existing-resource
@@ -30,30 +32,25 @@ type Desired struct {
 	Tags        []rdsclient.Tag
 }
 
-func ParseDesired(raw []byte, assumeRoleARN string) (Desired, error) {
-	var source document
-	if err := json.Unmarshal(raw, &source); err != nil {
-		return Desired{}, fmt.Errorf("decode RDS document: %w", err)
+func FromSpec(source *proxysqlv1alpha1.AWSDBProxySpec, proxyName string) (Desired, error) {
+	if source == nil || proxyName == "" {
+		return Desired{}, fmt.Errorf("RDS proxy desired state is incomplete")
 	}
-	if source.SchemaVersion != 1 {
-		return Desired{}, fmt.Errorf("unsupported RDS document schema version %d", source.SchemaVersion)
+	if source.EngineFamily != "MYSQL" {
+		return Desired{}, fmt.Errorf("unsupported RDS engine family %q", source.EngineFamily)
 	}
-	if source.Proxy.EngineFamily != engineFamilyMySQL || source.DefaultEndpoint.Name == "" || source.Proxy.ARN == "" {
-		return Desired{}, fmt.Errorf("RDS document has an unsupported or incomplete proxy identity")
+	if len(source.TargetGroups) != 1 || source.TargetGroups[0].TargetGroupName != defaultTargetGroupName {
+		return Desired{}, fmt.Errorf("RDS proxy requires exactly one target group named %q", defaultTargetGroupName)
 	}
 	desired := Desired{
 		Proxy: rdsclient.Proxy{
-			Name: source.DefaultEndpoint.Name, ARN: source.Proxy.ARN,
-			EngineFamily: source.Proxy.EngineFamily, DefaultAuthScheme: source.Proxy.DefaultAuthScheme,
-			DebugLogging: source.Proxy.DebugLogging, IdleClientTimeout: source.Proxy.IdleClientTimeout,
-			RequireTLS: source.Proxy.RequireTLS, RoleARN: assumeRoleARN,
-			EndpointNetworkType:         source.Proxy.EndpointNetworkType,
-			TargetConnectionNetworkType: source.Proxy.TargetConnectionNetworkType,
-			VpcSecurityGroupIDs:         append([]string(nil), source.Proxy.VpcSecurityGroupIDs...),
+			Name: proxyName, EngineFamily: source.EngineFamily, DefaultAuthScheme: source.DefaultAuthScheme,
+			DebugLogging: source.DebugLogging, IdleClientTimeout: int(source.IdleClientTimeout),
+			RequireTLS: source.RequireTLS, RoleARN: source.RoleARN,
 		},
-		TargetGroup: rdsclient.TargetGroup{Name: source.TargetGroup.Name, Pool: poolIntent(source.TargetGroup.ConnectionPoolConfig)},
+		TargetGroup: rdsclient.TargetGroup{Name: source.TargetGroups[0].TargetGroupName, Pool: poolIntent(source.TargetGroups[0].ConnectionPoolConfig)},
 	}
-	for _, value := range source.Proxy.Auth {
+	for _, value := range source.Auth {
 		desired.Proxy.Auth = append(desired.Proxy.Auth, rdsclient.Auth{
 			AuthScheme: value.AuthScheme, ClientPasswordAuthType: value.ClientPasswordAuthType,
 			Description: value.Description, IAMAuth: value.IAMAuth,
@@ -61,7 +58,15 @@ func ParseDesired(raw []byte, assumeRoleARN string) (Desired, error) {
 		})
 	}
 	for _, value := range source.Targets {
-		desired.Targets = append(desired.Targets, rdsclient.Target{Identifier: value.Identifier, Type: value.Type})
+		if value.TargetGroupName != defaultTargetGroupName {
+			return Desired{}, fmt.Errorf("target registration uses unsupported target group %q", value.TargetGroupName)
+		}
+		for _, identifier := range value.DBClusterIdentifiers {
+			desired.Targets = append(desired.Targets, rdsclient.Target{Identifier: identifier, Type: "TRACKED_CLUSTER"})
+		}
+		for _, identifier := range value.DBInstanceIdentifiers {
+			desired.Targets = append(desired.Targets, rdsclient.Target{Identifier: identifier, Type: "RDS_INSTANCE"})
+		}
 	}
 	for _, value := range source.Tags {
 		desired.Tags = append(desired.Tags, rdsclient.Tag{Key: value.Key, Value: value.Value})
@@ -70,19 +75,19 @@ func ParseDesired(raw []byte, assumeRoleARN string) (Desired, error) {
 	return desired, nil
 }
 
-func poolIntent(value connectionPoolConfig) rdsclient.Pool {
+func poolIntent(value proxysqlv1alpha1.AWSConnectionPoolConfigSpec) rdsclient.Pool {
 	pool := rdsclient.Pool{ConnectionBorrowTimeout: 120, MaxConnectionsPercent: 100, MaxIdleConnectionsPercent: 50}
 	if value.ConnectionBorrowTimeout != nil {
-		pool.ConnectionBorrowTimeout = *value.ConnectionBorrowTimeout
+		pool.ConnectionBorrowTimeout = int(*value.ConnectionBorrowTimeout)
 	}
 	if value.InitQuery != nil {
 		pool.InitQuery = *value.InitQuery
 	}
 	if value.MaxConnectionsPercent != nil {
-		pool.MaxConnectionsPercent = *value.MaxConnectionsPercent
+		pool.MaxConnectionsPercent = int(*value.MaxConnectionsPercent)
 	}
 	if value.MaxIdleConnectionsPercent != nil {
-		pool.MaxIdleConnectionsPercent = *value.MaxIdleConnectionsPercent
+		pool.MaxIdleConnectionsPercent = int(*value.MaxIdleConnectionsPercent)
 	}
 	pool.SessionPinningFilters = append([]string(nil), value.SessionPinningFilters...)
 	return pool
@@ -94,7 +99,7 @@ func Drift(desired Desired, observed rdsclient.State) []string {
 	normalizeDesired(&desired)
 	normalizeState(&observed)
 	var drift []string
-	if !reflect.DeepEqual(desired.Proxy, observed.Proxy) {
+	if !reflect.DeepEqual(proxyIntent(desired.Proxy), proxyIntent(observed.Proxy)) {
 		drift = append(drift, "proxy")
 	}
 	if !reflect.DeepEqual(desired.TargetGroup, observed.TargetGroup) {
@@ -138,6 +143,14 @@ func normalizeState(value *rdsclient.State) {
 	desired := Desired{Proxy: value.Proxy, TargetGroup: value.TargetGroup, Targets: value.Targets, Tags: value.Tags}
 	normalizeDesired(&desired)
 	value.Proxy, value.TargetGroup, value.Targets, value.Tags = desired.Proxy, desired.TargetGroup, desired.Targets, desired.Tags
+}
+
+func proxyIntent(value rdsclient.Proxy) rdsclient.Proxy {
+	value.ARN = ""
+	value.EndpointNetworkType = ""
+	value.TargetConnectionNetworkType = ""
+	value.VpcSecurityGroupIDs = nil
+	return value
 }
 
 func authKey(value rdsclient.Auth) string {

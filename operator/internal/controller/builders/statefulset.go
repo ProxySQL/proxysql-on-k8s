@@ -43,9 +43,12 @@ func (b *Builder) StatefulSet(cnfChecksum string) *appsv1.StatefulSet {
 	// (and the TLS rotation-fallback bump) are rollout triggers, so a
 	// user-supplied podAnnotations entry with the same key must never
 	// clobber them.
-	podAnnotations := make(map[string]string, len(b.Spec.PodAnnotations)+2)
+	podAnnotations := make(map[string]string, len(b.Spec.PodAnnotations)+3)
 	maps.Copy(podAnnotations, b.Spec.PodAnnotations)
 	podAnnotations["proxysql.com/cnf-checksum"] = cnfChecksum
+	if b.Spec.AWSPluginEnabled() && b.AWSBootstrapChecksum != "" {
+		podAnnotations[AWSBootstrapChecksumAnnotation] = b.AWSBootstrapChecksum
+	}
 	if b.Spec.TLSEnabled() && b.TLSRestartValue != "" {
 		podAnnotations[TLSRestartAnnotation] = b.TLSRestartValue
 	}
@@ -138,16 +141,25 @@ func (b *Builder) podSpec() corev1.PodSpec {
 	if b.Spec.ServiceAccountName != "" {
 		spec.ServiceAccountName = b.Spec.ServiceAccountName
 	}
-	if b.Spec.RDS != nil {
-		spec.Volumes = append(spec.Volumes, corev1.Volume{
-			Name: RDSBootstrapVolumeName,
-			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-				SecretName: b.RDSBootstrapSecretName(),
-				Items: []corev1.KeyToPath{{
-					Key: RDSBootstrapFileName, Path: RDSBootstrapFileName,
+	if b.Spec.AWSPluginEnabled() {
+		ref := b.Spec.Plugin.AWS.Bootstrap.ConfigMapRef
+		spec.Volumes = append(spec.Volumes,
+			corev1.Volume{
+				Name: AWSBootstrapVolumeName,
+				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: ref.LocalObjectReference,
+					Optional:             ref.Optional,
+					Items:                []corev1.KeyToPath{{Key: ref.Key, Path: AWSBootstrapFileName}},
 				}},
-			}},
-		})
+			},
+			corev1.Volume{
+				Name: AWSCredentialsVolumeName,
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: b.AWSCredentialsSecretName(),
+					Items:      []corev1.KeyToPath{{Key: AWSCredentialsFileName, Path: AWSCredentialsFileName}},
+				}},
+			},
+		)
 	}
 
 	// When persistence is disabled, mount an emptyDir for /var/lib/proxysql so
@@ -378,16 +390,6 @@ func (b *Builder) container() corev1.Container {
 		Resources:      b.Spec.Resources,
 		VolumeMounts:   b.proxysqlVolumeMounts(),
 	}
-	if b.Spec.RDS != nil {
-		// The combined plugin image owns one-shot bootstrap and restart recovery
-		// in its entrypoint. Do not bypass it with the standard image command.
-		c.Command = []string{"/usr/local/bin/proxysql-entrypoint"}
-		c.Args = []string{
-			"--aws-managed-bootstrap=" + RDSBootstrapMountPath + "/" + RDSBootstrapFileName,
-			"--reload",
-		}
-	}
-
 	// Graceful shutdown (spec.gracefulShutdown, ProxySQL SaaS #196): a
 	// preStop hook that pauses new client connections and drains in-flight
 	// ones, plus the MYSQL_PWD env the hook's admin `mysql` calls need.
@@ -492,10 +494,16 @@ func (b *Builder) proxysqlVolumeMounts() []corev1.VolumeMount {
 		{Name: "config", MountPath: "/etc/proxysql", ReadOnly: true},
 		{Name: dataVolumeName, MountPath: proxySQLDataPath},
 	}
-	if b.Spec.RDS != nil {
-		mounts = append(mounts, corev1.VolumeMount{
-			Name: RDSBootstrapVolumeName, MountPath: RDSBootstrapMountPath, ReadOnly: true,
-		})
+	if b.Spec.AWSPluginEnabled() {
+		mounts = append(mounts,
+			corev1.VolumeMount{
+				Name: AWSBootstrapVolumeName, MountPath: AWSBootstrapMountPath,
+				SubPath: AWSBootstrapFileName, ReadOnly: true,
+			},
+			corev1.VolumeMount{
+				Name: AWSCredentialsVolumeName, MountPath: AWSCredentialsMountPath, ReadOnly: true,
+			},
+		)
 	}
 	if b.LoggingEnabled() {
 		mounts = append(mounts, corev1.VolumeMount{Name: logsVolumeName, MountPath: logsMountPath})

@@ -565,6 +565,113 @@ spec:
                 additionalProperties:
                   type: string
                 type: object
+              plugin:
+                description: Plugin contains desired configuration for optional ProxySQL
+                  plugins.
+                properties:
+                  aws:
+                    description: AWS contains AWS plugin desired state.
+                    properties:
+                      dbProxy:
+                        description: DBProxy is one RDS-compatible proxy resource.
+                        properties:
+                          auth:
+                            items:
+                              properties:
+                                authScheme:
+                                  type: string
+                                clientPasswordAuthType:
+                                  type: string
+                                description:
+                                  type: string
+                                iamAuth:
+                                  type: string
+                                secretArn:
+                                  type: string
+                                userName:
+                                  type: string
+                              type: object
+                            type: array
+                          debugLogging:
+                            type: boolean
+                          defaultAuthScheme:
+                            type: string
+                          engineFamily:
+                            type: string
+                          idleClientTimeout:
+                            format: int32
+                            type: integer
+                          requireTLS:
+                            type: boolean
+                          roleArn:
+                            type: string
+                          tags:
+                            items:
+                              properties:
+                                key:
+                                  type: string
+                                value:
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                          targetGroups:
+                            items:
+                              properties:
+                                connectionPoolConfig:
+                                  properties:
+                                    connectionBorrowTimeout:
+                                      format: int32
+                                      type: integer
+                                    initQuery:
+                                      type: string
+                                    maxConnectionsPercent:
+                                      format: int32
+                                      type: integer
+                                    maxIdleConnectionsPercent:
+                                      format: int32
+                                      type: integer
+                                    sessionPinningFilters:
+                                      items:
+                                        type: string
+                                      type: array
+                                  type: object
+                                targetGroupName:
+                                  enum:
+                                  - default
+                                  type: string
+                              required:
+                              - targetGroupName
+                              type: object
+                            maxItems: 1
+                            minItems: 1
+                            type: array
+                          targets:
+                            items:
+                              properties:
+                                dbClusterIdentifiers:
+                                  items:
+                                    type: string
+                                  type: array
+                                dbInstanceIdentifiers:
+                                  items:
+                                    type: string
+                                  type: array
+                                targetGroupName:
+                                  enum:
+                                  - default
+                                  type: string
+                              required:
+                              - targetGroupName
+                              type: object
+                            type: array
+                        required:
+                        - engineFamily
+                        - targetGroups
+                        type: object
+                    type: object
+                type: object
               proxysqlServers:
                 description: |-
                   ProxySQLServers identifies peer nodes for ProxySQL Cluster sync.
@@ -591,17 +698,6 @@ spec:
                 - hostname
                 - port
                 x-kubernetes-list-type: map
-              rds:
-                description: RDS is the RDS-compatible desired state for the target
-                  cluster.
-                properties:
-                  config:
-                    description: Config is the complete versioned RDS-compatible document.
-                    type: object
-                    x-kubernetes-preserve-unknown-fields: true
-                required:
-                - config
-                type: object
               sqlStatements:
                 description: |-
                   SQLStatements is raw admin SQL executed verbatim on every replica,

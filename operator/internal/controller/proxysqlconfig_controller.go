@@ -158,12 +158,6 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	r.setCfgCondition(&cfg, cfgCondClusterFound, metav1.ConditionTrue, "Found", "ProxySQLCluster resolved")
 
 	b := builders.New(&cluster, r.Scheme, builders.Passwords{})
-	if err := r.ensureRDSBootstrap(ctx, &cfg, &cluster, b); err != nil {
-		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "RDSBootstrapError", err.Error())
-		r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "RDSBootstrapError", err.Error())
-		_ = r.Status().Update(ctx, &cfg)
-		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
-	}
 	keys := b.SecretKeys()
 	adminPort := b.Spec.Protocols.Admin.Port
 
@@ -211,6 +205,9 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		r.setCfgCondition(&cfg, cfgCondDegraded, metav1.ConditionTrue, "RDSConfigError", err.Error())
 		_ = r.Status().Update(ctx, &cfg)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+	if rdsState != nil {
+		desired = proxysqlclient.NativeDesiredWithAWSDBProxy(desired)
 	}
 
 	// 4) Discover ready ProxySQL pods plus the TLS dial config.
@@ -744,7 +741,7 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 			"cluster", cluster.Name, "escapeHatch", skipCleanupAnnotation)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
-	if cfg.Spec.RDS != nil {
+	if cfg.Spec.Plugin != nil && cfg.Spec.Plugin.AWS != nil && cfg.Spec.Plugin.AWS.DBProxy != nil {
 		rdsState, err := r.buildRDSReconcileState(ctx, cfg, &cluster)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -764,7 +761,7 @@ func (r *ProxySQLConfigReconciler) finalize(ctx context.Context, cfg *proxysqlv1
 						"error", err.Error(), "escapeHatch", skipCleanupAnnotation)
 					return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 				}
-				observed, err := api.Describe(ctx, rdsState.desired.Proxy.ARN)
+				observed, err := api.Describe(ctx, rdsState.desired.Proxy.Name)
 				if err != nil {
 					log.Info("RDS cleanup pending: describe failed; retrying", "pod", endpoint.Pod,
 						"error", err.Error(), "escapeHatch", skipCleanupAnnotation)
