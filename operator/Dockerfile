@@ -14,7 +14,7 @@
 #   docker buildx build --push --platform=linux/amd64,linux/arm64 \
 #     -t ghcr.io/proxysql/proxysql-operator:<tag> .
 
-FROM --platform=${BUILDPLATFORM} golang:1.27.2 AS builder
+FROM --platform=${BUILDPLATFORM} golang:1.27.3 AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH
 ARG VERSION=dev
