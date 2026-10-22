@@ -118,16 +118,72 @@ func TestSync_MySQLServers_RendersInsert(t *testing.T) {
 		t.Fatalf("no INSERT into mysql_servers issued; queries=%v", rec.queries)
 	}
 	for _, want := range []string{
-		"(0,'host-a',3306,100,",
+		"(0,'host-a',3306,'ONLINE',100,",
 		// Unset optional columns must get ProxySQL's NOT NULL defaults, not NULL
 		// (weight=1, max_connections=1000, max_replication_lag=0, use_ssl=0) —
 		// emitting NULL into these NOT NULL columns fails the constraint.
-		"(1,'host-b',3306,1,1000,0,0,'')",
+		// status is always emitted and defaults to ONLINE, so a full push
+		// (DELETE + INSERT) never relies on the column default.
+		"(1,'host-b',3306,'ONLINE',1,1000,0,0,'')",
 		"'primary'",
 	} {
 		if !strings.Contains(insert, want) {
 			t.Errorf("INSERT missing %q\nfull: %s", want, insert)
 		}
+	}
+}
+
+func mysqlServersInsert(t *testing.T, d *Desired) string {
+	t.Helper()
+	rec := &recorder{}
+	if err := Sync(context.Background(), rec, d); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	for _, q := range rec.queries {
+		if strings.HasPrefix(q, "INSERT INTO mysql_servers") {
+			return q
+		}
+	}
+	t.Fatalf("no INSERT into mysql_servers issued; queries=%v", rec.queries)
+	return ""
+}
+
+// An explicit administrative status must reach mysql_servers. Before the
+// status column was emitted, every full push (DELETE + INSERT) silently reset
+// an OFFLINE_SOFT/OFFLINE_HARD backend to ONLINE.
+func TestSync_MySQLServers_RendersStatus(t *testing.T) {
+	insert := mysqlServersInsert(t, &Desired{
+		MySQLServers: []MySQLServer{
+			{Hostgroup: 0, Hostname: "db-on"},
+			{Hostgroup: 0, Hostname: "db-online", Status: "ONLINE"},
+			{Hostgroup: 0, Hostname: "db-soft", Status: "OFFLINE_SOFT"},
+			{Hostgroup: 1, Hostname: "db-hard", Status: "OFFLINE_HARD"},
+		},
+	})
+	if !strings.HasPrefix(insert, "INSERT INTO mysql_servers (hostgroup_id,hostname,port,status,weight,max_connections,max_replication_lag,use_ssl,comment) VALUES ") {
+		t.Errorf("unexpected column list: %s", insert)
+	}
+	for _, want := range []string{
+		"(0,'db-on',3306,'ONLINE',1,1000,0,0,'')", // unset → ONLINE
+		"(0,'db-online',3306,'ONLINE',1,1000,0,0,'')",
+		"(0,'db-soft',3306,'OFFLINE_SOFT',1,1000,0,0,'')",
+		"(1,'db-hard',3306,'OFFLINE_HARD',1,1000,0,0,'')",
+	} {
+		if !strings.Contains(insert, want) {
+			t.Errorf("INSERT missing %q\nfull: %s", want, insert)
+		}
+	}
+}
+
+// Status is CRD-enum-validated, but the SQL builder must not trust that: a
+// value that bypassed validation is still quoted like every other string
+// field, so it cannot break out of its literal.
+func TestSync_MySQLServers_StatusIsQuoted(t *testing.T) {
+	insert := mysqlServersInsert(t, &Desired{
+		MySQLServers: []MySQLServer{{Hostgroup: 0, Hostname: "db", Status: "ONLINE'); DELETE FROM mysql_users; --"}},
+	})
+	if want := "(0,'db',3306,'ONLINE''); DELETE FROM mysql_users; --',1,"; !strings.Contains(insert, want) {
+		t.Errorf("status not quoted/escaped: want substring %q\nfull: %s", want, insert)
 	}
 }
 

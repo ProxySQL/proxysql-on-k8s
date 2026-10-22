@@ -384,7 +384,8 @@ func (r *ProxySQLConfigReconciler) configToDesired(ctx context.Context, cfg *pro
 		d.MySQLServers = append(d.MySQLServers, proxysqlclient.MySQLServer{
 			Hostgroup: s.Hostgroup, Hostname: s.Hostname, Port: s.Port,
 			Weight: s.Weight, MaxConnections: s.MaxConnections,
-			MaxReplicationLag: s.MaxReplicationLag, UseSSL: s.UseSSL, Comment: s.Comment,
+			MaxReplicationLag: s.MaxReplicationLag, UseSSL: s.UseSSL, Status: s.Status,
+			Comment: s.Comment,
 		})
 	}
 	for _, h := range cfg.Spec.MySQLReplicationHostgroups {

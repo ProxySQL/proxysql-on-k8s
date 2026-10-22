@@ -94,6 +94,7 @@ emitted as the ProxySQL column default — see
 | `maxConnections` | `*int32` | unset → SQL `1000` | — | Per-server connection cap. |
 | `maxReplicationLag` | `*int32` | unset → SQL `0` (disabled) | — | Shun the server when seconds-behind-master exceeds this. |
 | `useSSL` | `*bool` | unset → SQL `0` | — | TLS to the backend. |
+| `status` | `string` | unset → SQL `'ONLINE'` | enum `ONLINE`, `OFFLINE_SOFT`, `OFFLINE_HARD` | Administrative `mysql_servers.status`. `OFFLINE_SOFT` drains the server (no new connections; existing ones finish), `OFFLINE_HARD` takes it out of routing at once. `SHUNNED` is not accepted — it is ProxySQL's monitor verdict, not configuration. An explicit `OFFLINE_*` value is drift-tracked: see [admin-tables.md](admin-tables.md#drift-detection-coverage). |
 | `comment` | `string` | `''` | — | Free text. |
 
 ### mysqlUsers

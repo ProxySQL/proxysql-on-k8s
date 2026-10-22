@@ -123,15 +123,23 @@ func syncMySQLServers(ctx context.Context, c Executor, d *Desired) error {
 		return nil
 	}
 	var b strings.Builder
-	b.WriteString("INSERT INTO mysql_servers (hostgroup_id,hostname,port,weight,max_connections,max_replication_lag,use_ssl,comment) VALUES ")
+	// status is always emitted: a full push DELETEs every row first, so
+	// leaving the column out would silently reset an administrative
+	// OFFLINE_SOFT/OFFLINE_HARD to ONLINE on every sync.
+	b.WriteString("INSERT INTO mysql_servers (hostgroup_id,hostname,port,status,weight,max_connections,max_replication_lag,use_ssl,comment) VALUES ")
 	for i, s := range d.MySQLServers {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, "(%d,%s,%d,%s,%s,%s,%s,%s)",
+		status := s.Status
+		if status == "" {
+			status = statusOnline // mysql_servers.status NOT NULL DEFAULT 'ONLINE'
+		}
+		fmt.Fprintf(&b, "(%d,%s,%d,%s,%s,%s,%s,%s,%s)",
 			s.Hostgroup,
 			quote(s.Hostname),
 			defaultInt32(s.Port, 3306),
+			quote(status),
 			defInt32(s.Weight, 1),            // mysql_servers.weight NOT NULL DEFAULT 1
 			defInt32(s.MaxConnections, 1000), // NOT NULL DEFAULT 1000
 			defInt32(s.MaxReplicationLag, 0), // NOT NULL DEFAULT 0

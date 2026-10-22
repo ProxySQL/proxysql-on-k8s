@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,7 +38,8 @@ type Querier interface {
 // max_connections, ...) are carried by the spec-hash path in the controller,
 // so read-back deliberately compares just the identities — server
 // "hostgroup:hostname:port", username, rule id. Server maps additionally
-// carry the runtime status so callers can count SHUNNED backends.
+// carry the runtime status so callers can count SHUNNED backends, and so
+// Drift can check servers whose spec sets an explicit OFFLINE_* status.
 //
 // Passwords are never read back; the queries below select identity columns
 // only.
@@ -246,6 +248,13 @@ func (rs *RuntimeState) ShunnedCount() int32 {
 // present, not drifted — shunning is ProxySQL's own health reaction, not a
 // config divergence.
 //
+// The one exception is an explicit administrative mysql_servers status
+// (MySQLServer.Status = OFFLINE_SOFT or OFFLINE_HARD): that is desired state,
+// and losing it (e.g. an out-of-band reset back to ONLINE) is drift. Only
+// explicit OFFLINE_* participates; ONLINE/unset never compares status, so a
+// monitor-SHUNNED (or otherwise non-ONLINE) server whose spec says ONLINE is
+// still not drift. See mysqlStatusDrift for the exact rule.
+//
 // Servers are compared as MEMBERSHIP, not placement: for every hostgroup
 // covered by a mysql_replication_hostgroups pair, a desired server counts as
 // present when runtime holds it in ANY hostgroup of that pair's equivalence
@@ -268,10 +277,26 @@ func (rs *RuntimeState) ShunnedCount() int32 {
 func (d *Desired) Drift(rs *RuntimeState) []string {
 	classes := replicationClasses(d.MySQLReplicationHostgroups)
 	diffs := make([]string, 0, 8)
-	diffs = append(diffs, diffServers("mysql_servers", mysqlServerKeys(d.MySQLServers, classes), runtimeServerKeys(rs.MySQLServers, classes))...)
+	wantServers := mysqlServerKeys(d.MySQLServers, classes)
+	haveServers, haveStatus := runtimeServerStatuses(rs.MySQLServers, classes)
+	wantStatus := mysqlDesiredStatuses(d.MySQLServers, classes)
+	// A server whose desired status is OFFLINE_HARD is legitimately absent
+	// from runtime: ProxySQL omits OFFLINE_HARD rows from
+	// runtime_mysql_servers (verified on proxysql/proxysql:3.0.11). Take it
+	// out of the membership check so it is never reported "missing"; its
+	// presence is judged by mysqlStatusDrift instead.
+	membership := make(map[string]string, len(wantServers))
+	for canon, display := range wantServers {
+		if wantStatus[canon] != statusOfflineHard {
+			membership[canon] = display
+		}
+	}
+	diffs = append(diffs, diffServers("mysql_servers", membership, haveServers, wantServers)...)
+	diffs = append(diffs, mysqlStatusDrift(wantServers, wantStatus, haveStatus)...)
 	diffs = append(diffs, diffKeys("mysql_users", userKeys(mysqlUsernames(d.MySQLUsers)), rs.MySQLUsers)...)
 	diffs = append(diffs, diffKeys("mysql_query_rules", ruleKeys(mysqlRuleIDs(d.MySQLQueryRules)), rs.MySQLRules)...)
-	diffs = append(diffs, diffServers("pgsql_servers", pgsqlServerKeys(d.PostgreSQLServers), runtimeServerKeys(rs.PgSQLServers, nil))...)
+	pgWant := pgsqlServerKeys(d.PostgreSQLServers)
+	diffs = append(diffs, diffServers("pgsql_servers", pgWant, runtimeServerKeys(rs.PgSQLServers, nil), pgWant)...)
 	diffs = append(diffs, diffKeys("pgsql_users", userKeys(pgsqlUsernames(d.PostgreSQLUsers)), rs.PgSQLUsers)...)
 	diffs = append(diffs, diffKeys("pgsql_query_rules", ruleKeys(pgsqlRuleIDs(d.PostgreSQLQueryRules)), rs.PgSQLRules)...)
 	sort.Strings(diffs)
@@ -366,8 +391,17 @@ func pgsqlServerKeys(servers []PostgreSQLServer) map[string]string {
 // comparison. Only the leading hostgroup id is parsed — the host:port tail is
 // carried verbatim, so IPv6 hostnames survive.
 func runtimeServerKeys(have map[string]string, classes map[int32]int32) map[string]string {
+	keys, _ := runtimeServerStatuses(have, classes)
+	return keys
+}
+
+// runtimeServerStatuses is runtimeServerKeys that additionally returns, per
+// canonical key, the sorted runtime statuses of every row collapsing onto it
+// (several rows under writer_is_also_reader or a mid-move monitor).
+func runtimeServerStatuses(have map[string]string, classes map[int32]int32) (map[string]string, map[string][]string) {
 	keys := make(map[string]string, len(have))
-	for k := range have {
+	statuses := make(map[string][]string, len(have))
+	for k, status := range have {
 		canon := k
 		if len(classes) > 0 {
 			if i := strings.IndexByte(k, ':'); i > 0 {
@@ -379,8 +413,85 @@ func runtimeServerKeys(have map[string]string, classes map[int32]int32) map[stri
 		if prev, ok := keys[canon]; !ok || k < prev {
 			keys[canon] = k
 		}
+		statuses[canon] = append(statuses[canon], status)
 	}
-	return keys
+	for _, v := range statuses {
+		sort.Strings(v)
+	}
+	return keys, statuses
+}
+
+// Administrative mysql_servers.status values the operator writes. SHUNNED
+// is absent on purpose: it is ProxySQL's monitor verdict, never desired state.
+const (
+	statusOnline      = "ONLINE"
+	statusOfflineSoft = "OFFLINE_SOFT"
+	statusOfflineHard = "OFFLINE_HARD"
+)
+
+// isAdminOffline reports whether status is an explicit administrative
+// OFFLINE_* status — the only statuses that participate in drift.
+func isAdminOffline(status string) bool {
+	return status == statusOfflineSoft || status == statusOfflineHard
+}
+
+// mysqlDesiredStatuses maps each canonical server key to the explicit
+// OFFLINE_* status it must carry at runtime. A key is included only when
+// EVERY desired row collapsing onto it sets the same OFFLINE_* status; a key
+// whose rows are unset/ONLINE, or disagree, is left out and compared on
+// membership only (the pre-status behaviour), which can never cause a
+// re-push loop.
+func mysqlDesiredStatuses(servers []MySQLServer, classes map[int32]int32) map[string]string {
+	want := map[string]string{}
+	mixed := map[string]bool{}
+	for _, s := range servers {
+		canon := canonServerKey(s.Hostgroup, fmt.Sprintf("%s:%d", s.Hostname, defaultInt32(s.Port, 3306)), classes)
+		if mixed[canon] {
+			continue
+		}
+		prev, seen := want[canon]
+		switch {
+		case !isAdminOffline(s.Status):
+			mixed[canon] = true
+			delete(want, canon)
+		case seen && prev != s.Status:
+			mixed[canon] = true
+			delete(want, canon)
+		default:
+			want[canon] = s.Status
+		}
+	}
+	return want
+}
+
+// mysqlStatusDrift reports desired servers whose explicit OFFLINE_* status
+// is not reflected at runtime:
+//
+//   - OFFLINE_SOFT: drift when the server is present but NO runtime row of
+//     its canonical key reports OFFLINE_SOFT (e.g. reset to ONLINE, or reset
+//     and then monitor-SHUNNED). Absence is already reported as "missing".
+//     "No row" rather than "any row" keeps a partially-mirrored pair from
+//     looping; the realistic out-of-band reset flips every row anyway.
+//   - OFFLINE_HARD: ProxySQL hides OFFLINE_HARD rows from
+//     runtime_mysql_servers, so absence is the converged state and ANY
+//     runtime row for the key (ONLINE, SHUNNED, OFFLINE_SOFT) is drift.
+func mysqlStatusDrift(display map[string]string, want map[string]string, have map[string][]string) []string {
+	diffs := make([]string, 0, len(want))
+	for canon, status := range want {
+		got, present := have[canon]
+		switch status {
+		case statusOfflineSoft:
+			if !present || slices.Contains(got, statusOfflineSoft) {
+				continue
+			}
+		case statusOfflineHard:
+			if !present {
+				continue
+			}
+		}
+		diffs = append(diffs, fmt.Sprintf("mysql_servers: status %s want %s have %s", display[canon], status, strings.Join(got, ",")))
+	}
+	return diffs
 }
 
 func mysqlUsernames(users []MySQLUser) []string {
@@ -452,8 +563,14 @@ func diffKeys(table string, want, have map[string]bool) []string {
 
 // diffServers is diffKeys over canonical-key → display-key maps: membership
 // is decided on the canonical keys, messages carry the display keys. Runtime
-// status never participates — presence is what matters.
-func diffServers(table string, want, have map[string]string) []string {
+// status never participates here — presence is what matters (explicit
+// OFFLINE_* status is judged separately by mysqlStatusDrift).
+//
+// want is the set that must be present; known is the set that may be present
+// without counting as "extra" (a superset of want — it additionally holds
+// desired OFFLINE_HARD servers, which are expected absent but are not
+// unknown when seen).
+func diffServers(table string, want, have, known map[string]string) []string {
 	var diffs []string
 	for canon, display := range want {
 		if _, ok := have[canon]; !ok {
@@ -461,7 +578,7 @@ func diffServers(table string, want, have map[string]string) []string {
 		}
 	}
 	for canon, display := range have {
-		if _, ok := want[canon]; !ok {
+		if _, ok := known[canon]; !ok {
 			diffs = append(diffs, table+": extra "+display)
 		}
 	}

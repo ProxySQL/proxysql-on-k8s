@@ -312,6 +312,21 @@ spec:
                       description: Port defaults to 3306.
                       format: int32
                       type: integer
+                    status:
+                      description: |-
+                        Status is the administrative mysql_servers.status the operator writes
+                        for this row. Omitted means ONLINE (the pre-existing behaviour).
+                        OFFLINE_SOFT drains the server (no new connections, existing
+                        transactions finish); OFFLINE_HARD removes it from routing at once.
+                        SHUNNED is deliberately not accepted: it is ProxySQL's own monitor
+                        verdict, not configuration. An explicit OFFLINE_* status is desired
+                        state for runtime drift detection; ONLINE/omitted never flags a
+                        monitor-SHUNNED server as drift.
+                      enum:
+                      - ONLINE
+                      - OFFLINE_SOFT
+                      - OFFLINE_HARD
+                      type: string
                     useSSL:
                       type: boolean
                     weight:

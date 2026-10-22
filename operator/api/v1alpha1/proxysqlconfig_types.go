@@ -198,6 +198,17 @@ type MySQLServer struct {
 	MaxReplicationLag *int32 `json:"maxReplicationLag,omitempty"`
 	// +optional
 	UseSSL *bool `json:"useSSL,omitempty"`
+	// Status is the administrative mysql_servers.status the operator writes
+	// for this row. Omitted means ONLINE (the pre-existing behaviour).
+	// OFFLINE_SOFT drains the server (no new connections, existing
+	// transactions finish); OFFLINE_HARD removes it from routing at once.
+	// SHUNNED is deliberately not accepted: it is ProxySQL's own monitor
+	// verdict, not configuration. An explicit OFFLINE_* status is desired
+	// state for runtime drift detection; ONLINE/omitted never flags a
+	// monitor-SHUNNED server as drift.
+	// +optional
+	// +kubebuilder:validation:Enum=ONLINE;OFFLINE_SOFT;OFFLINE_HARD
+	Status string `json:"status,omitempty"`
 	// +optional
 	Comment string `json:"comment,omitempty"`
 }

@@ -53,7 +53,12 @@ type MySQLServer struct {
 	MaxConnections    *int32
 	MaxReplicationLag *int32
 	UseSSL            *bool
-	Comment           string
+	// Status is the administrative mysql_servers.status ("" = ONLINE).
+	// The explicit JSON tag with omitempty keeps the controller's sync
+	// fingerprint byte-identical for specs that never set it, so upgrading
+	// the operator does not force a one-time re-push to every cluster.
+	Status  string `json:"Status,omitempty"`
+	Comment string
 }
 
 // MySQLUser is the resolved form of a mysql_users row.
