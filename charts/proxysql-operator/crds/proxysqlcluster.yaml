@@ -1215,6 +1215,16 @@ spec:
                       Enabled installs a preStop hook that pauses new client connections and
                       waits for in-flight ones to drain before the pod is terminated.
                     type: boolean
+                  preStopDelaySeconds:
+                    default: 0
+                    description: |-
+                      PreStopDelaySeconds waits before PROXYSQL PAUSE so EndpointSlice /
+                      kube-proxy can stop routing new connections to the terminating pod.
+                      Included in terminationGracePeriodSeconds.
+                    format: int32
+                    maximum: 120
+                    minimum: 0
+                    type: integer
                 type: object
               image:
                 description: Image is the ProxySQL container image to run.

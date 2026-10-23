@@ -1828,6 +1828,37 @@ func TestPodTemplate_GracefulShutdown_Enabled(t *testing.T) {
 	}
 }
 
+// TestPodTemplate_GracefulShutdown_PreStopDelay verifies that
+// spec.gracefulShutdown.preStopDelaySeconds delays PROXYSQL PAUSE and is
+// included in terminationGracePeriodSeconds.
+func TestPodTemplate_GracefulShutdown_PreStopDelay(t *testing.T) {
+	b := New(newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.GracefulShutdown = &proxysqlv1alpha1.GracefulShutdownSpec{
+			Enabled:             true,
+			DrainTimeoutSeconds: int32Ptr(45),
+			PreStopDelaySeconds: int32Ptr(5),
+		}
+	}), newScheme(t), Passwords{})
+
+	podSpec := b.StatefulSet("checksum").Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	if container.Lifecycle == nil || container.Lifecycle.PreStop == nil || container.Lifecycle.PreStop.Exec == nil {
+		t.Fatalf("container.Lifecycle.PreStop.Exec = nil, want a drain hook")
+	}
+	script := strings.Join(container.Lifecycle.PreStop.Exec.Command, " ")
+	for _, want := range []string{"sleep 5", "PROXYSQL PAUSE", "Client_Connections_connected"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("preStop script %q missing %q", script, want)
+		}
+	}
+
+	wantGrace := ptrInt64(60) // 5 + 45 + 10
+	if podSpec.TerminationGracePeriodSeconds == nil || *podSpec.TerminationGracePeriodSeconds != *wantGrace {
+		t.Errorf("terminationGracePeriodSeconds = %v, want %v", podSpec.TerminationGracePeriodSeconds, wantGrace)
+	}
+}
+
 // TestPodTemplate_GracefulShutdown_CustomAdminPasswordKey verifies that the
 // MYSQL_PWD env follows a customized spec.auth.keys.adminPassword rather
 // than the hardcoded "admin-password" constant — a cluster with a custom
