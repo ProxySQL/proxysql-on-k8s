@@ -1828,6 +1828,35 @@ func TestPodTemplate_GracefulShutdown_Enabled(t *testing.T) {
 	}
 }
 
+// TestPodTemplate_GracefulShutdown_PreStopOverride verifies that a set
+// spec.gracefulShutdown.preStop replaces the built-in drain command wholesale.
+func TestPodTemplate_GracefulShutdown_PreStopOverride(t *testing.T) {
+	custom := []string{"/bin/sh", "-c", "sleep 5; mysql --no-defaults --connect-timeout=2 -h127.0.0.1 -P6032 -uadmin -e 'PROXYSQL PAUSE' 2>/dev/null || true"}
+	b := New(newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.GracefulShutdown = &proxysqlv1alpha1.GracefulShutdownSpec{
+			Enabled:             true,
+			DrainTimeoutSeconds: int32Ptr(45),
+			PreStop: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{Command: custom},
+			},
+		}
+	}), newScheme(t), Passwords{})
+
+	container := b.StatefulSet("checksum").Spec.Template.Spec.Containers[0]
+	if container.Lifecycle == nil || container.Lifecycle.PreStop == nil || container.Lifecycle.PreStop.Exec == nil {
+		t.Fatalf("container.Lifecycle.PreStop.Exec = nil, want the override")
+	}
+	got := container.Lifecycle.PreStop.Exec.Command
+	if len(got) != len(custom) {
+		t.Fatalf("preStop command = %v, want %v", got, custom)
+	}
+	for i := range custom {
+		if got[i] != custom[i] {
+			t.Fatalf("preStop command = %v, want %v", got, custom)
+		}
+	}
+}
+
 // TestPodTemplate_GracefulShutdown_CustomAdminPasswordKey verifies that the
 // MYSQL_PWD env follows a customized spec.auth.keys.adminPassword rather
 // than the hardcoded "admin-password" constant — a cluster with a custom
