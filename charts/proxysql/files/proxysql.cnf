@@ -62,7 +62,7 @@ pgsql_variables=
 mysql_servers=
 (
 {{- range $i, $b := .Values.backends.mysql }}
-  { address="{{ $b.host }}", port={{ $b.port | default 3306 }}, hostgroup={{ $b.hostgroup | default 0 }}, max_connections={{ $b.maxConnections | default 1000 }}{{ if $b.comment }}, comment="{{ include "proxysql.cnfEscape" $b.comment }}"{{ end }} }{{ if lt (add $i 1) (len $.Values.backends.mysql) }},{{ end }}
+  { address="{{ $b.host }}", port={{ $b.port | default 3306 }}, hostgroup={{ $b.hostgroup | default 0 }}, max_connections={{ $b.maxConnections | default 1000 }}{{ if $b.maxReplicationLag }}, max_replication_lag={{ $b.maxReplicationLag }}{{ end }}{{ if $b.comment }}, comment="{{ include "proxysql.cnfEscape" $b.comment }}"{{ end }} }{{ if lt (add $i 1) (len $.Values.backends.mysql) }},{{ end }}
 {{- end }}
 )
 {{- end }}
