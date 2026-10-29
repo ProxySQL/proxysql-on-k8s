@@ -19,7 +19,10 @@ package controller
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 	"github.com/ProxySQL/kubernetes/operator/internal/controller/builders"
@@ -302,6 +305,41 @@ func TestClassifyCnfChange_MonitorUsernameRotationOnBothProtocols(t *testing.T) 
 	}
 	if len(changed) != 2 || changed["mysql-monitor_username"] != "monitor_ro" || changed["pgsql-monitor_username"] != "monitor_ro" {
 		t.Errorf("changed = %v, want both monitor username variables only", changed)
+	}
+}
+
+func TestResolveRestartChecksum_MonitorRotationRestartsWhenReplicaNotReady(t *testing.T) {
+	replicas := int32(2)
+	cluster := &proxysqlv1alpha1.ProxySQLCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "rc-test", Namespace: "default"},
+	}
+	cluster.Spec.Replicas = &replicas
+	readyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "rc-test-0", Namespace: "default",
+			Labels: map[string]string{"proxysql.com/cluster": "rc-test"},
+		},
+		Status: corev1.PodStatus{
+			PodIP:      "10.0.0.1",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	r := &ProxySQLClusterReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(readyPod).Build()}
+	oldCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "r", Monitor: "m", MonitorUsername: "monitor"},
+		func(c *proxysqlv1alpha1.ProxySQLCluster) { c.Spec.Replicas = &replicas })
+	newCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "r", Monitor: "m", MonitorUsername: "monitor_ro"},
+		func(c *proxysqlv1alpha1.ProxySQLCluster) { c.Spec.Replicas = &replicas })
+	annotation, _, _, summary, err := r.resolveRestartChecksum(t.Context(), cluster,
+		secretData(oldCnf), secretData(newCnf), "previous", "new-hash", "", "", "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotation != "new-hash" || summary != "RestartRequired: monitor credentials could not reach every replica" {
+		t.Fatalf("one of two replicas Ready: annotation=%q summary=%q, want restart fallback", annotation, summary)
 	}
 }
 

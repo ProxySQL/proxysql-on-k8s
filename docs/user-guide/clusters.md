@@ -49,7 +49,8 @@ backends). They live in one Secret.
 creates a Secret named after the cluster with random 32-character
 passwords under keys `admin-password`, `radmin-password`,
 `monitor-password`. Existing values are preserved across reconciles;
-missing keys are backfilled.
+missing password keys are backfilled. The optional `monitor_username` key is
+absent by default, so ProxySQL uses the username `monitor`.
 
 **Bring your own.** Set `spec.auth.secretName` to an existing Secret.
 Two data schemas are accepted:
@@ -64,23 +65,27 @@ stringData:
   admin-password: "..."
   radmin-password: "..."
   monitor-password: "..."
+  monitor_username: monitor_ro # optional; omit to use monitor
 ---
 # Schema 2 — platform schema (what most platform tooling emits).
 # admin and radmin share the password; monitor-password is an optional
 # extra key. A username other than admin/radmin becomes an additional
 # remote-capable admin login.
+# monitor_username is optional here too; username is an admin login.
 apiVersion: v1
 kind: Secret
 metadata: {name: my-proxysql-auth}
 stringData:
   username: platform
   password: "plat-secret"
+  monitor_username: monitor_ro
 ```
 
 A *partial* operator schema (e.g. `admin-password` present without the
 other two) is rejected outright rather than silently falling through to
 schema 2. Passwords must not contain `"`, `;`, or control characters,
-and usernames must match `[A-Za-z0-9_.-]+` — these values are rendered
+and usernames must match `[A-Za-z0-9_.-]+`. An explicit empty
+`monitor_username` also fails. These values are rendered
 into the cnf grammar and could never work otherwise. If the referenced
 Secret is missing or invalid the cluster goes `Degraded` with reason
 `AuthSecretError`. Details in [Security](./security.md).

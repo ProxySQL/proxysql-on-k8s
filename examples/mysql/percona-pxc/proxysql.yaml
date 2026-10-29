@@ -53,14 +53,6 @@ spec:
       passwordSecretRef:
         name: cluster1-secrets
         key: root
-  # ProxySQL's monitor pings each node and watches its health. PXC images
-  # ship a `monitor` user whose password is the `monitor` key of
-  # cluster1-secrets — these are admin variables (plain strings, no
-  # secretRef), so the value must match that secret. Both ship with the same
-  # REPLACE-ME placeholder; change them together.
-  mysqlVariables:
-    mysql-monitor_username: "monitor"
-    mysql-monitor_password: "REPLACE-ME-monitor"
   mysqlQueryRules:
     - ruleId: 100
       active: true

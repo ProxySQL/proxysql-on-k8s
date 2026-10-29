@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -195,7 +196,11 @@ func (r *ProxySQLConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// union, so they converge. User passwords are resolved from Secrets here.
 	desired, _, err := r.buildUnionedDesired(ctx, &cluster, b, "")
 	if err != nil {
-		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, "UserSecretError", err.Error())
+		reason := "UserSecretError"
+		if errors.Is(err, errOperatorOwnedMonitorVariable) {
+			reason = "InvalidVariables"
+		}
+		r.setCfgCondition(&cfg, cfgCondReady, metav1.ConditionFalse, reason, err.Error())
 		_ = r.Status().Update(ctx, &cfg)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
@@ -368,11 +373,30 @@ func (r *ProxySQLConfigReconciler) reconcileReadyReplicas(
 // from the target cluster's StatefulSet pods (spec.proxysqlServers was empty).
 const autoPopulatedPeerComment = "operator-populated from ProxySQLCluster pods"
 
+var errOperatorOwnedMonitorVariable = errors.New("operator-owned monitor variable")
+
 // configToDesired translates ONE ProxySQLConfig's spec into the resolved Desired struct the
 // proxysqlclient package operates on (user passwords pulled from Secrets). It does NOT
 // auto-populate proxysql_servers: peer auto-population is a cluster-wide concern applied once
 // by buildUnionedDesired after merging all configs, so a second config can't wipe it (#956).
 func (r *ProxySQLConfigReconciler) configToDesired(ctx context.Context, cfg *proxysqlv1alpha1.ProxySQLConfig) (*proxysqlclient.Desired, error) {
+	for _, group := range []struct {
+		field string
+		vars  map[string]string
+	}{
+		{field: "adminVariables", vars: cfg.Spec.AdminVariables},
+		{field: "mysqlVariables", vars: cfg.Spec.MySQLVariables},
+		{field: "pgsqlVariables", vars: cfg.Spec.PostgreSQLVariables},
+	} {
+		for _, key := range []string{
+			"mysql-monitor_username", "mysql-monitor_password",
+			"pgsql-monitor_username", "pgsql-monitor_password",
+		} {
+			if _, exists := group.vars[key]; exists {
+				return nil, fmt.Errorf("%w: spec.%s key %q; set monitor credentials in the cluster auth Secret", errOperatorOwnedMonitorVariable, group.field, key)
+			}
+		}
+	}
 	d := &proxysqlclient.Desired{
 		AdminVariables:      cfg.Spec.AdminVariables,
 		MySQLVariables:      cfg.Spec.MySQLVariables,

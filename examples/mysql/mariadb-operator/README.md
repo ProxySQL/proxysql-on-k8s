@@ -17,16 +17,10 @@ flag automatically.
     `read_only` on a new primary, ProxySQL moves the row between
     hostgroups within seconds.
 
-> ⚠️ **Monitor password — keep two places in sync.** ProxySQL's monitor
-> credentials live in admin variables, which the `ProxySQLConfig` exposes as
-> plain strings under `mysqlVariables` (no `secretRef` there). So the monitor
-> password is entered in **two** spots that must match exactly:
-> `mysqlVariables.mysql-monitor_password` in `proxysql.yaml` **and** the
-> `mariadb-monitor` Secret consumed by the `User` CR in `backend.yaml`. Both
-> ship with the same `REPLACE-ME-monitor-pw` placeholder; if you change one,
-> change the other, or the monitor gets "Access denied", can't read each
-> backend's `read_only`, and parks every server in the reader hostgroup
-> (leaving the writer hostgroup empty, so writes fail).
+The `User` CR in `backend.yaml` gets the backend `monitor` account
+password from the `mariadb-monitor` Secret. Copy that password to the
+ProxySQLCluster auth Secret after the operator creates it. If the
+passwords differ, ProxySQL cannot check each backend's `read_only` flag.
 
 ## Install order
 
@@ -46,6 +40,16 @@ kubectl -n mariadb-demo wait mariadb/mariadb --for=condition=Ready --timeout=10m
 
 # 5. ProxySQL cluster + config.
 kubectl apply -f proxysql.yaml
+```
+
+After the operator creates `secret/proxysql`, copy the backend monitor
+password into it. The operator applies the Secret change to running pods:
+
+```bash
+MONITOR_B64=$(kubectl -n mariadb-demo get secret mariadb-monitor -o jsonpath='{.data.password}')
+kubectl -n mariadb-demo patch secret proxysql --type=merge \
+  -p "{\"data\":{\"monitor-password\":\"$MONITOR_B64\"}}"
+unset MONITOR_B64
 ```
 
 ## Smoke test

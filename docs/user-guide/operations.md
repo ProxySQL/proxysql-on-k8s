@@ -240,12 +240,14 @@ variable.
 ## Rotating the monitor credential
 
 The [monitor-credential exception](#what-restarts-pods-what-doesnt) above
-means a `spec.auth` monitor-password rotation is restart-free: the operator
-re-renders the `<cluster>-cnf` Secret, then pushes `mysql-monitor_password`
-(and `pgsql-monitor_password`, when `protocols.pgsql` is on) to every
-**Ready** replica over the admin port with no pod restart. This section is
-the full backend-to-ProxySQL rotation runbook, MySQL and PostgreSQL, using
-each engine's own credential-rotation primitive.
+means a `spec.auth` monitor-credential rotation can avoid a restart: the operator
+re-renders the `<cluster>-cnf` Secret, then pushes the changed
+`mysql-monitor_username` and `mysql-monitor_password` values (and their
+`pgsql` equivalents, when `protocols.pgsql` is on) to every
+**Ready** replica over the admin port. If every replica is Ready and the
+read-back matches, no pod restarts. Otherwise, the operator rolls the pods
+to load the new Secret. This section covers rotation for MySQL and
+PostgreSQL. Each engine uses its own method to rotate credentials.
 
 **One password drives both protocols.** The auth Secret has a single
 `monitor-password` key (default; overridable via `spec.auth.keys.monitorPassword`),
@@ -256,6 +258,18 @@ no separate key per protocol. If a single `ProxySQLCluster` fronts both
 MySQL and PostgreSQL backends, plan the two backends' monitor-user rotations
 around the same Secret update; you can't dual-password-rotate one protocol's
 backends while leaving the other on the old password.
+
+**One username drives both protocols.** Add the optional literal
+`monitor_username` key to the same auth Secret when the backend account is
+not `monitor`. If the key is absent, the operator uses `monitor`. The key
+cannot be empty and must match `^[A-Za-z0-9_.-]+$`. To change the username,
+create the new account on every backend first. Then update
+`monitor_username` and, if needed, `monitor-password` in the auth Secret.
+The Secret watch reconciles the cluster. The operator applies the changed
+values to Ready replicas and reads them back. A replica that is not Ready or
+a read-back mismatch triggers a rolling restart. After every replica uses
+the new account, remove the old backend account. Keep the values out of all
+`ProxySQLConfig` variable maps. The operator owns those settings.
 
 ### MySQL: dual-password rotation
 

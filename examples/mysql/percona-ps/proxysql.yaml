@@ -46,13 +46,6 @@ spec:
   # Variable keys are the full ProxySQL global_variables names (the operator
   # applies them verbatim), so MySQL variables carry the `mysql-` prefix.
   mysqlVariables:
-    # The PS operator pre-creates a `monitor` user; its password lives in
-    # cluster1-secrets under the `monitor` key. ProxySQL's monitor credentials
-    # are admin variables (plain strings — no secretRef), so this value must
-    # match that secret. Both ship with the same REPLACE-ME placeholder; if
-    # you change one, change the other.
-    mysql-monitor_username: "monitor"
-    mysql-monitor_password: "REPLACE-ME-monitor"
     mysql-monitor_read_only_interval: "1500"
     mysql-monitor_read_only_timeout: "500"
 

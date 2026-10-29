@@ -108,6 +108,13 @@ create IAM roles or long-lived AWS credentials.
 | `auth.keys.radminPassword` | `string` | `radmin-password` (CRD + operator) | — | Secret key holding the `radmin` password (the remote-capable admin account; ProxySQL restricts `admin` to localhost). |
 | `auth.keys.monitorPassword` | `string` | `monitor-password` (CRD + operator) | — | Secret key holding the `monitor` password. |
 
+The auth Secret can also contain the literal key `monitor_username`.
+This key is optional and is not configured through `auth.keys`. When it is
+absent, the operator uses `monitor`. When it is present, its value must be
+non-empty and match `^[A-Za-z0-9_.-]+$`. An invalid value sets the cluster's
+`Degraded` condition with reason `AuthSecretError`. The operator-managed
+Secret omits this key by default and preserves it if you add it later.
+
 #### Accepted Secret schemas and precedence
 
 An externally managed Secret (and the cluster's admin Secret as read by the
@@ -127,7 +134,13 @@ An externally managed Secret (and the cluster's admin Secret as read by the
    same password unless the Secret also carries the monitor key
    (`monitor-password` by default). If `username` is anything other than
    `admin` or `radmin`, it is added to the bootstrap cnf as an **extra**
-   remote-capable admin credential alongside `admin`/`radmin`.
+   remote-capable admin credential alongside `admin`/`radmin`. This
+   `username` is never the monitor username.
+
+Both schemas accept the optional literal `monitor_username` key. The
+operator renders it into `mysql-monitor_username` and
+`pgsql-monitor_username` for each enabled protocol. Both protocols use
+the same `monitor-password` value.
 
 A Secret matching neither schema fails with
 `auth secret matches neither schema: need <adminKey>/<radminKey>/<monitorKey>, or username/password`.
@@ -140,7 +153,10 @@ that would corrupt it:
 
 - **Passwords** (all schemas, all three roles): must not contain `"`, `;`,
   any control character below 0x20, or DEL (0x7f).
-- **Username** (schema 2): must match `^[A-Za-z0-9_.-]+$`.
+- **Usernames** (the schema 2 admin `username` and optional
+  `monitor_username`): must match `^[A-Za-z0-9_.-]+$`.
+- **Explicit empty `monitor_username`**: rejected. Omit the key to use
+  the `monitor` default.
 
 ### Persistence
 
@@ -817,17 +833,21 @@ reference](annotations.md)).
   the intended values once it comes up — a fresh datadir reads the cnf
   outright, and a PVC-backed pod merges the updated cnf over its existing
   `proxysql.db` via `--reload` (removed keys excepted — see the
-  persistence note above). No restart is *triggered* by this path
-  specifically, but nothing runtime-applies either until pods exist.
+  persistence note above). Ordinary variables do not trigger a restart on
+  this path. A monitor username or password change does: the operator rolls
+  pods when any replica is not Ready, so it cannot retain stale monitor
+  credentials after recovery.
 
 **The monitor-credential exception.** Credential rotation normally always
 restarts, because `admin`/`radmin` live in the bootstrap-structural
 `admin-admin_credentials` line. The `monitor` user's credentials are
-different: `mysql-monitor_password` and `pgsql-monitor_password` are
+different: `mysql-monitor_username`, `pgsql-monitor_username`,
+`mysql-monitor_password`, and `pgsql-monitor_password` are
 ordinary variable lines rendered from `spec.auth` (reserved only against
 `spec.variables` *overrides*, not bootstrap-structural for classification),
-so rotating the monitor password is just a variable-value change like any
-other — it goes through the runtime-apply path above and is restart-free.
+so changing the monitor username or password uses the runtime-apply path.
+The operator reads back each applied value and uses a restart if a value
+does not take effect or any replica is not Ready.
 
 **Progressing condition messages.** The reconciler surfaces the outcome in
 the `Progressing` condition (see the [status reference](status.md)):

@@ -81,6 +81,7 @@ backoff.
 | `Ready` | `False` | `AdminSecretMissing` | The cluster's admin Secret could not be read. | 5s |
 | `Ready` | `False` | `AdminSecretIncomplete` | The admin Secret matches no accepted credential schema (see [auth schemas](proxysqlcluster.md#accepted-secret-schemas-and-precedence)). | 5s |
 | `Ready` | `False` | `UserSecretError` | A `passwordSecretRef` Secret or key is missing (message names the user). | 5s |
+| `Ready` | `False` | `InvalidVariables` | A `ProxySQLConfig` tries to set a monitor username or password that belongs in the cluster auth Secret. The message names the key, not its value. | 5s |
 | `Ready` | `False` | `NoReadyReplicas` | No ready ProxySQL pods to push to. | 5s |
 | `Ready` | `False` | `ClusterPaused` | The target `ProxySQLCluster` has `spec.pause: true` (0 ready pods by design — the StatefulSet is intentionally scaled to 0). Takes precedence over `NoReadyReplicas` so it reads as intentional, not an outage. | 5s |
 | `Ready` | `False` | `PartialSync` | Some replicas failed the push. Message: `synced n/N replicas (k re-push targets, m succeeded)`. `Degraded=True/SyncErrors` is set alongside. | 5s |

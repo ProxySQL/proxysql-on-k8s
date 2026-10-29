@@ -282,6 +282,14 @@ either way.
 | `mysqlVariables` | `map[string]string` | none | Same, with `LOAD/SAVE MYSQL VARIABLES`. |
 | `pgsqlVariables` | `map[string]string` | none | Same, with `LOAD/SAVE PGSQL VARIABLES`. |
 
+The monitor username and password are owned by the `ProxySQLCluster` auth
+Secret. The operator rejects `mysql-monitor_username`,
+`mysql-monitor_password`, `pgsql-monitor_username`, and
+`pgsql-monitor_password` in any `ProxySQLConfig` variable map, including
+`adminVariables`.
+Set the optional `monitor_username` and the `monitor-password` in the auth
+Secret instead. See [Auth](./proxysqlcluster.md#auth).
+
 Variable semantics:
 
 - Keys use ProxySQL's full variable names **including the prefix**

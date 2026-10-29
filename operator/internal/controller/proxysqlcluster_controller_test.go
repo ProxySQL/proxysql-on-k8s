@@ -385,11 +385,66 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 			Expect(pw.Monitor).To(Equal("m"))
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, sec)).To(Succeed())
+			delete(sec.Data, builders.SecretKeyAdminPassword)
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+			pw, err = reconciler.resolvePasswords(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pw.MonitorUsername).To(Equal("monitor_ro"), "password backfill must preserve the optional username")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, sec)).To(Succeed())
+			Expect(sec.Data).To(HaveKey(builders.SecretKeyAdminPassword))
+			Expect(string(sec.Data[builders.SecretKeyMonitorUsername])).To(Equal("monitor_ro"))
+
 			sec.Data["monitor_username"] = []byte("")
 			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
 			_, err = reconciler.resolvePasswords(ctx, cluster)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("monitor_username"))
+		})
+	})
+
+	When("an external auth Secret has an invalid monitor username", func() {
+		It("sets AuthSecretError without rendering a cnf Secret", func() {
+			ctx := context.Background()
+			for _, tc := range []struct {
+				name  string
+				value string
+			}{
+				{name: "empty", value: ""},
+				{name: "unsafe", value: `bad";`},
+			} {
+				name := "pxc-bad-monitor-" + tc.name
+				secretName := name + "-auth"
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+					Data: map[string][]byte{
+						builders.SecretKeyAdminPassword:   []byte("a"),
+						builders.SecretKeyRadminPassword:  []byte("r"),
+						builders.SecretKeyMonitorPassword: []byte("m"),
+						builders.SecretKeyMonitorUsername: []byte(tc.value),
+					},
+				}
+				Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+				cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+					c.Spec.Auth.SecretName = secretName
+				})
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+				})
+				Expect(err).To(HaveOccurred())
+				var got proxysqlv1alpha1.ProxySQLCluster
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+				degraded := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+				Expect(degraded).NotTo(BeNil())
+				Expect(degraded.Reason).To(Equal("AuthSecretError"))
+				Expect(degraded.Message).To(ContainSubstring(builders.SecretKeyMonitorUsername))
+				if tc.value != "" {
+					Expect(degraded.Message).NotTo(ContainSubstring(tc.value))
+				}
+				var cnfSec corev1.Secret
+				Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+					types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec))).To(BeTrue())
+			}
 		})
 	})
 
@@ -415,6 +470,9 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 				c.Spec.Protocols.PostgreSQL.Enabled = new(true)
 			})
 			reconcileAndExpectSuccess(name)
+			var beforeSTS appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &beforeSTS)).To(Succeed())
+			checksumBefore := beforeSTS.Spec.Template.Annotations[annotationCnfChecksum]
 
 			var cnfSec corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec)).To(Succeed())
@@ -436,6 +494,10 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 				Expect(after[prefix+"-monitor_username"]).To(Equal("monitor_next"))
 				Expect(after[prefix+"-monitor_password"]).To(Equal("new-monitor-pass"))
 			}
+			var afterSTS appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &afterSTS)).To(Succeed())
+			Expect(afterSTS.Spec.Template.Annotations[annotationCnfChecksum]).NotTo(Equal(checksumBefore),
+				"without Ready pods, rotation must schedule a restart to avoid stale runtime credentials")
 		})
 	})
 
