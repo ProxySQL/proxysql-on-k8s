@@ -21,7 +21,7 @@ spec:
 YAML
   wait_pod_ready "$ns" pxc-0 || { fail "monitor credentials: pxc-0 not Ready"; dump_ns "$ns"; return 1; }
 
-  local count uid_before uid_after hash_before hash_after i reason
+  local count uid_before uid_after hash_before hash_after reason
   # kubectl run can return the same single-row result twice through attach
   # and logs. The query returns one count, so use its final output line.
   count="$(admin_query "$ns" pxc demo-radmin \
@@ -34,7 +34,7 @@ YAML
   # made: the Secret watch must enqueue the cluster.
   kubectl -n "$ns" patch secret pxc-auth --type=merge \
     -p "{\"data\":{\"monitor_username\":\"$(printf %s monitor_ro | base64 -w0)\",\"monitor-password\":\"$(printf %s demo-monitor-new | base64 -w0)\"}}" >/dev/null
-  for i in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     count="$(admin_query "$ns" pxc demo-radmin \
       "SELECT COUNT(*) FROM runtime_global_variables WHERE variable_name IN ('mysql-monitor_username','pgsql-monitor_username') AND variable_value='monitor_ro'" | tail -n 1)"
     [[ "$count" == "2" ]] && break
@@ -53,7 +53,7 @@ YAML
   kubectl -n "$ns" patch secret pxc-auth --type=merge \
     -p '{"data":{"monitor_username":""}}' >/dev/null
   reason=""
-  for i in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     reason="$(kubectl -n "$ns" get proxysqlcluster pxc -o jsonpath='{.status.conditions[?(@.type=="Degraded")].reason}')"
     [[ "$reason" == "AuthSecretError" ]] && break
     sleep 3
