@@ -63,7 +63,7 @@ func TestReferencedSecretWatchEnqueuesExternalAuthCluster(t *testing.T) {
 	r := &ProxySQLClusterReconciler{Client: cl, Scheme: scheme}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "shared-auth", Namespace: "one"}}
 	reqs := r.clustersForReferencedSecret(context.Background(), secret)
-	if len(reqs) != 1 || reqs[0].NamespacedName.Name != "matching" || reqs[0].NamespacedName.Namespace != "one" {
+	if len(reqs) != 1 || reqs[0].Name != "matching" || reqs[0].Namespace != "one" {
 		t.Fatalf("auth Secret event enqueued %v, want one matching cluster in the same namespace", reqs)
 	}
 }
