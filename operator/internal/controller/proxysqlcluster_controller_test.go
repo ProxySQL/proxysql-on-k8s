@@ -359,6 +359,40 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 		})
 	})
 
+	When("the operator-managed auth Secret has a monitor username", func() {
+		const name = "pxc-managed-monitor-name"
+
+		It("preserves a valid name and rejects an explicit empty name", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			sec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Data: map[string][]byte{
+					builders.SecretKeyAdminPassword:   []byte("a"),
+					builders.SecretKeyRadminPassword:  []byte("r"),
+					builders.SecretKeyMonitorPassword: []byte("m"),
+					"monitor_username":                []byte("monitor_ro"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, sec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, sec) })
+
+			pw, err := reconciler.resolvePasswords(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pw.MonitorUsername).To(Equal("monitor_ro"))
+			Expect(pw.Admin).To(Equal("a"))
+			Expect(pw.Radmin).To(Equal("r"))
+			Expect(pw.Monitor).To(Equal("m"))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, sec)).To(Succeed())
+			sec.Data["monitor_username"] = []byte("")
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+			_, err = reconciler.resolvePasswords(ctx, cluster)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("monitor_username"))
+		})
+	})
+
 	When("the user provides a username/password-shaped auth Secret", func() {
 		const name = "pxc-platform-secret"
 		const secretName = "platform-admin-creds"

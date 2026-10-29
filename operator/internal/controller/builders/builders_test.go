@@ -768,6 +768,58 @@ func TestPasswordsFromSecret_Validation(t *testing.T) {
 	}
 }
 
+func TestPasswordsFromSecret_MonitorUsername(t *testing.T) {
+	keys := proxysqlv1alpha1.AuthKeys{
+		AdminPassword:   "admin-password",
+		RadminPassword:  "radmin-password",
+		MonitorPassword: "monitor-password",
+	}
+	operatorData := map[string][]byte{
+		"admin-password": []byte("a"), "radmin-password": []byte("r"), "monitor-password": []byte("m"),
+	}
+	platformData := map[string][]byte{
+		"username": []byte("platform_admin"), "password": []byte("p"),
+	}
+	for _, tc := range []struct {
+		name string
+		data map[string][]byte
+		want string
+	}{
+		{name: "operator schema defaults", data: operatorData, want: "monitor"},
+		{name: "operator schema override", data: map[string][]byte{
+			"admin-password": []byte("a"), "radmin-password": []byte("r"), "monitor-password": []byte("m"),
+			"monitor_username": []byte("monitor_ro"),
+		}, want: "monitor_ro"},
+		{name: "platform username remains admin only", data: platformData, want: "monitor"},
+		{name: "platform schema override", data: map[string][]byte{
+			"username": []byte("platform_admin"), "password": []byte("p"),
+			"monitor_username": []byte("monitor_ro"),
+		}, want: "monitor_ro"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pw, err := PasswordsFromSecret(tc.data, keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pw.MonitorUsername != tc.want {
+				t.Errorf("monitor username = %q, want %q", pw.MonitorUsername, tc.want)
+			}
+		})
+	}
+	for _, value := range []string{"", `evil";`, "bad name", "bad\nname", "μonitor"} {
+		t.Run("invalid "+value, func(t *testing.T) {
+			data := map[string][]byte{
+				"admin-password": []byte("a"), "radmin-password": []byte("r"), "monitor-password": []byte("m"),
+				"monitor_username": []byte(value),
+			}
+			_, err := PasswordsFromSecret(data, keys)
+			if err == nil || !strings.Contains(err.Error(), "monitor_username") {
+				t.Errorf("invalid monitor username %q: got %v, want key-naming error", value, err)
+			}
+		})
+	}
+}
+
 func TestBootstrapCnf_ExtraAdminCredential(t *testing.T) {
 	c := newCluster("extra")
 	b := New(c, newScheme(t), Passwords{Admin: "a", Radmin: "r", Monitor: "m",

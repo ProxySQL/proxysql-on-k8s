@@ -400,6 +400,10 @@ func (r *ProxySQLClusterReconciler) resolvePasswords(ctx context.Context, cluste
 		Radmin:  string(sec.Data[keys.RadminPassword]),
 		Monitor: string(sec.Data[keys.MonitorPassword]),
 	}
+	pw.MonitorUsername, err = builders.MonitorUsernameFromSecret(sec.Data)
+	if err != nil {
+		return builders.Passwords{}, err
+	}
 
 	// Backfill any missing fields when the operator owns the Secret.
 	if b.ManagesAuthSecret() {
@@ -457,7 +461,7 @@ func mintPasswords() (builders.Passwords, error) {
 	if err != nil {
 		return builders.Passwords{}, err
 	}
-	return builders.Passwords{Admin: admin, Radmin: radmin, Monitor: monitor}, nil
+	return builders.Passwords{Admin: admin, Radmin: radmin, Monitor: monitor, MonitorUsername: "monitor"}, nil
 }
 
 func (r *ProxySQLClusterReconciler) ensureCnfSecret(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *corev1.Secret) error {

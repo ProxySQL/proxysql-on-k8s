@@ -79,6 +79,7 @@ const (
 	SecretKeyAdminPassword   = "admin-password"
 	SecretKeyRadminPassword  = "radmin-password"
 	SecretKeyMonitorPassword = "monitor-password"
+	SecretKeyMonitorUsername = "monitor_username"
 )
 
 // Passwords holds the plaintext credentials the operator renders into the
@@ -86,9 +87,10 @@ const (
 // remote-capable admin credential derived from a username/password-shaped
 // external Secret (empty when unused).
 type Passwords struct {
-	Admin   string
-	Radmin  string
-	Monitor string
+	Admin           string
+	Radmin          string
+	Monitor         string
+	MonitorUsername string
 
 	ExtraAdminUser     string
 	ExtraAdminPassword string
@@ -98,6 +100,21 @@ type Passwords struct {
 // admin_credentials value (a double-quoted string of ';'-separated
 // "user:pass" pairs). Only conservative identifier characters are allowed.
 var cnfUsernameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// MonitorUsernameFromSecret resolves the optional literal username key.
+// A present but empty or unsafe value is an error, not a request to use the
+// default. This is shared by externally and operator-managed auth Secrets.
+func MonitorUsernameFromSecret(data map[string][]byte) (string, error) {
+	raw, present := data[SecretKeyMonitorUsername]
+	if !present {
+		return "monitor", nil
+	}
+	name := string(raw)
+	if !cnfUsernameRe.MatchString(name) {
+		return "", fmt.Errorf("auth secret key %q must match %s", SecretKeyMonitorUsername, cnfUsernameRe.String())
+	}
+	return name, nil
+}
 
 // validCnfPassword rejects passwords that cannot be represented safely in
 // the bootstrap proxysql.cnf. Cnf grammar: values live inside double-quoted
@@ -162,7 +179,11 @@ func PasswordsFromSecret(data map[string][]byte, keys proxysqlv1alpha1.AuthKeys)
 				return Passwords{}, fmt.Errorf("auth secret key %q: %w", key, err)
 			}
 		}
-		return Passwords{Admin: admin, Radmin: radmin, Monitor: monitor}, nil
+		monitorUsername, err := MonitorUsernameFromSecret(data)
+		if err != nil {
+			return Passwords{}, err
+		}
+		return Passwords{Admin: admin, Radmin: radmin, Monitor: monitor, MonitorUsername: monitorUsername}, nil
 	}
 
 	user := string(data["username"])
@@ -175,7 +196,11 @@ func PasswordsFromSecret(data map[string][]byte, keys proxysqlv1alpha1.AuthKeys)
 		if err := validCnfPassword(pass); err != nil {
 			return Passwords{}, fmt.Errorf("auth secret key \"password\": %w", err)
 		}
-		pw := Passwords{Admin: pass, Radmin: pass, Monitor: pass}
+		monitorUsername, err := MonitorUsernameFromSecret(data)
+		if err != nil {
+			return Passwords{}, err
+		}
+		pw := Passwords{Admin: pass, Radmin: pass, Monitor: pass, MonitorUsername: monitorUsername}
 		if monitor != "" {
 			if err := validCnfPassword(monitor); err != nil {
 				return Passwords{}, fmt.Errorf("auth secret key %q: %w", keys.MonitorPassword, err)
