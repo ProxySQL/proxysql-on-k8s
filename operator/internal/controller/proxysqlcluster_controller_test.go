@@ -393,6 +393,52 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 		})
 	})
 
+	When("an external auth Secret changes its monitor credentials", func() {
+		const name = "pxc-monitor-rotation"
+		const secretName = "pxc-monitor-rotation-auth"
+
+		It("renders both protocols from the Secret before and after rotation", func() {
+			ctx := context.Background()
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+				Data: map[string][]byte{
+					builders.SecretKeyAdminPassword:   []byte("a"),
+					builders.SecretKeyRadminPassword:  []byte("r"),
+					builders.SecretKeyMonitorPassword: []byte("old-monitor-pass"),
+					builders.SecretKeyMonitorUsername: []byte("monitor_ro"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Auth.SecretName = secretName
+				c.Spec.Protocols.PostgreSQL.Enabled = new(true)
+			})
+			reconcileAndExpectSuccess(name)
+
+			var cnfSec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec)).To(Succeed())
+			before := builders.ParseCnfVariables(string(cnfSec.Data["proxysql.cnf"]))
+			for _, prefix := range []string{"mysql", "pgsql"} {
+				Expect(before[prefix+"-monitor_username"]).To(Equal("monitor_ro"))
+				Expect(before[prefix+"-monitor_password"]).To(Equal("old-monitor-pass"))
+			}
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: ns}, secret)).To(Succeed())
+			secret.Data[builders.SecretKeyMonitorUsername] = []byte("monitor_next")
+			secret.Data[builders.SecretKeyMonitorPassword] = []byte("new-monitor-pass")
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec)).To(Succeed())
+			after := builders.ParseCnfVariables(string(cnfSec.Data["proxysql.cnf"]))
+			for _, prefix := range []string{"mysql", "pgsql"} {
+				Expect(after[prefix+"-monitor_username"]).To(Equal("monitor_next"))
+				Expect(after[prefix+"-monitor_password"]).To(Equal("new-monitor-pass"))
+			}
+		})
+	})
+
 	When("the user provides a username/password-shaped auth Secret", func() {
 		const name = "pxc-platform-secret"
 		const secretName = "platform-admin-creds"

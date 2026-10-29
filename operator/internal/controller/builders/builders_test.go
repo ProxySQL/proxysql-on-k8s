@@ -268,6 +268,40 @@ func TestBuilder_CnfSecret_PostgreSQLMonitorCreds(t *testing.T) {
 	}
 }
 
+func TestBuilder_CnfSecret_CustomMonitorUsernameOnBothProtocols(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.PostgreSQL.Enabled = boolPtr(true)
+	})
+	b := New(c, newScheme(t), Passwords{
+		Admin: "a", Radmin: "r", Monitor: "monitorpw", MonitorUsername: "monitor_ro",
+	})
+	sec, err := b.CnfSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := ParseCnfVariables(string(sec.Data["proxysql.cnf"]))
+	for _, key := range []string{"mysql-monitor_username", "pgsql-monitor_username"} {
+		if got := vars[key]; got != "monitor_ro" {
+			t.Errorf("%s = %q, want monitor_ro", key, got)
+		}
+	}
+	for _, key := range []string{"mysql-monitor_password", "pgsql-monitor_password"} {
+		if got := vars[key]; got != "monitorpw" {
+			t.Errorf("%s = %q, want monitorpw", key, got)
+		}
+	}
+}
+
+func TestBuilder_CnfSecret_RejectsUnsafeMonitorUsername(t *testing.T) {
+	b := New(newCluster(clusterName), newScheme(t), Passwords{
+		Admin: "a", Radmin: "r", Monitor: "m", MonitorUsername: `bad";`,
+	})
+	_, err := b.CnfSecret()
+	if err == nil || !strings.Contains(err.Error(), "monitor username") {
+		t.Fatalf("unsafe monitor username: got %v, want validation error", err)
+	}
+}
+
 func TestBuilder_CnfSecret_NoClusterSyncOnSingleReplica(t *testing.T) {
 	one := int32(1)
 	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) { c.Spec.Replicas = &one })

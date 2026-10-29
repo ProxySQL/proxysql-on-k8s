@@ -989,16 +989,16 @@ func (r *ProxySQLClusterReconciler) setCondition(cluster *proxysqlv1alpha1.Proxy
 // backend Secrets. Registered in SetupWithManager, consumed by
 // clustersForTLSSecret.
 const (
+	authSecretNameIndex       = ".spec.auth.secretName"
 	tlsSecretNameIndex        = ".spec.tls.secretName"
 	tlsBackendCASecretIndex   = ".spec.tls.backend.caSecretName"
 	tlsBackendCertSecretIndex = ".spec.tls.backend.clientCertSecretName"
 )
 
 // SetupWithManager wires the controller into the manager with watches on
-// the owned resources, plus a name-based watch on ALL Secrets: tier-1 user
-// Secrets and the tier-2 cert-manager-issued Secret carry no owner
-// reference to the cluster, so Owns() alone would leave their content
-// changes (rotation!) invisible until the multi-hour informer resync.
+// owned resources and a name-based watch on all Secrets. External auth and
+// TLS Secrets carry no cluster owner reference, so Owns() alone would leave
+// credential and certificate rotations invisible until informer resync.
 func (r *ProxySQLClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	indexer := mgr.GetFieldIndexer()
 	type indexed struct {
@@ -1006,6 +1006,9 @@ func (r *ProxySQLClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		extract func(*proxysqlv1alpha1.ProxySQLCluster) string
 	}
 	for _, idx := range []indexed{
+		{authSecretNameIndex, func(c *proxysqlv1alpha1.ProxySQLCluster) string {
+			return c.Spec.Auth.SecretName
+		}},
 		{tlsSecretNameIndex, func(c *proxysqlv1alpha1.ProxySQLCluster) string {
 			if c.Spec.TLS == nil {
 				return ""
@@ -1043,7 +1046,7 @@ func (r *ProxySQLClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.clustersForTLSSecret)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.clustersForReferencedSecret)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.clustersForAWSBootstrapConfigMap)).
 		Named("proxysqlcluster").
 		Complete(r)
@@ -1071,14 +1074,14 @@ func (r *ProxySQLClusterReconciler) clustersForAWSBootstrapConfigMap(ctx context
 	return requests
 }
 
-// clustersForTLSSecret maps a Secret event to the clusters that must
-// re-reconcile: every cluster whose spec REFERENCES the Secret by name
-// (via the three field indexes), plus — by naming convention — the
+// clustersForReferencedSecret maps a Secret event to the clusters that must
+// re-reconcile: every cluster whose auth or TLS spec references the Secret
+// by name (via field indexes), plus — by naming convention — the
 // cluster behind an operator-managed "<name>-tls"/"<name>-tls-ca" Secret.
 // The convention covers the tier-2 Secret, which is owned by the
 // cert-manager Certificate rather than the cluster, so Owns() never fires
 // for it. Enqueueing a non-existent cluster is a cheap no-op reconcile.
-func (r *ProxySQLClusterReconciler) clustersForTLSSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+func (r *ProxySQLClusterReconciler) clustersForReferencedSecret(ctx context.Context, obj client.Object) []reconcile.Request {
 	seen := map[types.NamespacedName]bool{}
 	var reqs []reconcile.Request
 	add := func(name string) {
@@ -1092,12 +1095,12 @@ func (r *ProxySQLClusterReconciler) clustersForTLSSecret(ctx context.Context, ob
 		}
 	}
 
-	for _, index := range []string{tlsSecretNameIndex, tlsBackendCASecretIndex, tlsBackendCertSecretIndex} {
+	for _, index := range []string{authSecretNameIndex, tlsSecretNameIndex, tlsBackendCASecretIndex, tlsBackendCertSecretIndex} {
 		var list proxysqlv1alpha1.ProxySQLClusterList
 		if err := r.List(ctx, &list,
 			client.InNamespace(obj.GetNamespace()),
 			client.MatchingFields{index: obj.GetName()}); err != nil {
-			logf.FromContext(ctx).Error(err, "listing clusters for TLS secret", "index", index, "secret", obj.GetName())
+			logf.FromContext(ctx).Error(err, "listing clusters for referenced secret", "index", index, "secret", obj.GetName())
 			continue
 		}
 		for i := range list.Items {

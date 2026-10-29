@@ -289,6 +289,22 @@ func TestClassifyCnfChange_MonitorRotationStaysRuntimeAppliable(t *testing.T) {
 	}
 }
 
+func TestClassifyCnfChange_MonitorUsernameRotationOnBothProtocols(t *testing.T) {
+	withPostgreSQL := func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.PostgreSQL.Enabled = new(true)
+	}
+	oldCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "r", Monitor: "m", MonitorUsername: "monitor"}, withPostgreSQL)
+	newCnf := renderCnf(t, builders.Passwords{Admin: "a", Radmin: "r", Monitor: "m", MonitorUsername: "monitor_ro"}, withPostgreSQL)
+
+	verdict, changed, _, _ := classifyCnfChange(secretData(oldCnf), secretData(newCnf), "prev-hash", "new-hash", "", "")
+	if verdict != verdictRuntimeTry {
+		t.Fatalf("verdict = %v, want runtime apply", verdict)
+	}
+	if len(changed) != 2 || changed["mysql-monitor_username"] != "monitor_ro" || changed["pgsql-monitor_username"] != "monitor_ro" {
+		t.Errorf("changed = %v, want both monitor username variables only", changed)
+	}
+}
+
 // TestClassifyCnfChange_ExtraSecretKeyChangeIsStructural pins the regression
 // fix: the restart decision guards the WHOLE cnf Secret, not just the
 // proxysql.cnf key. A change confined to another key — concretely

@@ -183,7 +183,7 @@ admin_variables=
 mysql_variables=
 {
   interfaces="0.0.0.0:{{ .MySQLPort }}"
-  monitor_username="monitor"
+  monitor_username="{{ .MonitorUsername }}"
   monitor_password="{{ .MonitorPassword }}"
 {{- range .MySQLExtra }}
   {{ .Name }}="{{ .Value }}"
@@ -196,7 +196,7 @@ mysql_variables=
 pgsql_variables=
 {
   interfaces="0.0.0.0:{{ .PostgreSQLPort }}"
-  monitor_username="monitor"
+  monitor_username="{{ .MonitorUsername }}"
   monitor_password="{{ .MonitorPassword }}"
 {{- range .PgSQLExtra }}
   {{ .Name }}="{{ .Value }}"
@@ -223,6 +223,7 @@ type cnfData struct {
 	AdminPassword      string
 	RadminPassword     string
 	MonitorPassword    string
+	MonitorUsername    string
 	ExtraAdminUser     string
 	ExtraAdminPassword string
 	AdminPort          int32
@@ -341,6 +342,9 @@ func (b *Builder) addBackendTLSVars(d map[string]string) {
 // proxysqlServers is the list of peer pod DNS names for ProxySQL Cluster sync
 // (only populated when replicas > 1).
 func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
+	if !cnfUsernameRe.MatchString(b.Pw.MonitorUsername) {
+		return "", fmt.Errorf("monitor username must match %s", cnfUsernameRe.String())
+	}
 	for _, m := range []struct {
 		vars   map[string]string
 		prefix string
@@ -364,6 +368,7 @@ func (b *Builder) BootstrapCnf(proxysqlServers []string) (string, error) {
 		AdminPassword:      b.Pw.Admin,
 		RadminPassword:     b.Pw.Radmin,
 		MonitorPassword:    b.Pw.Monitor,
+		MonitorUsername:    b.Pw.MonitorUsername,
 		ExtraAdminUser:     b.Pw.ExtraAdminUser,
 		ExtraAdminPassword: b.Pw.ExtraAdminPassword,
 		AdminPort:          b.Spec.Protocols.Admin.Port,

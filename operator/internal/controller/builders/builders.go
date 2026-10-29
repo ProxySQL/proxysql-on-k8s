@@ -83,9 +83,9 @@ const (
 )
 
 // Passwords holds the plaintext credentials the operator renders into the
-// bootstrap ConfigMap. ExtraAdminUser/ExtraAdminPassword carry an additional
+// bootstrap cnf Secret. ExtraAdminUser/ExtraAdminPassword carry an additional
 // remote-capable admin credential derived from a username/password-shaped
-// external Secret (empty when unused).
+// external Secret (empty when unused). MonitorUsername defaults to monitor.
 type Passwords struct {
 	Admin           string
 	Radmin          string
@@ -268,8 +268,11 @@ type Builder struct {
 }
 
 // New returns a Builder with .Spec already defaulted. Pass the resolved
-// admin/radmin/monitor passwords (read from the operator-managed Secret).
+// admin/radmin/monitor credentials from the auth Secret.
 func New(cluster *proxysqlv1alpha1.ProxySQLCluster, scheme *runtime.Scheme, pw Passwords) *Builder {
+	if pw.MonitorUsername == "" {
+		pw.MonitorUsername = "monitor"
+	}
 	return &Builder{
 		Cluster: cluster,
 		Scheme:  scheme,
