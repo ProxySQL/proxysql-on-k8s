@@ -359,6 +359,148 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 		})
 	})
 
+	When("the operator-managed auth Secret has a monitor username", func() {
+		const name = "pxc-managed-monitor-name"
+
+		It("preserves a valid name and rejects an explicit empty name", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			sec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Data: map[string][]byte{
+					builders.SecretKeyAdminPassword:   []byte("a"),
+					builders.SecretKeyRadminPassword:  []byte("r"),
+					builders.SecretKeyMonitorPassword: []byte("m"),
+					"monitor_username":                []byte("monitor_ro"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, sec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, sec) })
+
+			pw, err := reconciler.resolvePasswords(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pw.MonitorUsername).To(Equal("monitor_ro"))
+			Expect(pw.Admin).To(Equal("a"))
+			Expect(pw.Radmin).To(Equal("r"))
+			Expect(pw.Monitor).To(Equal("m"))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, sec)).To(Succeed())
+			delete(sec.Data, builders.SecretKeyAdminPassword)
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+			pw, err = reconciler.resolvePasswords(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pw.MonitorUsername).To(Equal("monitor_ro"), "password backfill must preserve the optional username")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, sec)).To(Succeed())
+			Expect(sec.Data).To(HaveKey(builders.SecretKeyAdminPassword))
+			Expect(string(sec.Data[builders.SecretKeyMonitorUsername])).To(Equal("monitor_ro"))
+
+			sec.Data["monitor_username"] = []byte("")
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+			_, err = reconciler.resolvePasswords(ctx, cluster)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("monitor_username"))
+		})
+	})
+
+	When("an external auth Secret has an invalid monitor username", func() {
+		It("sets AuthSecretError without rendering a cnf Secret", func() {
+			ctx := context.Background()
+			for _, tc := range []struct {
+				name  string
+				value string
+			}{
+				{name: "empty", value: ""},
+				{name: "unsafe", value: `bad";`},
+			} {
+				name := "pxc-bad-monitor-" + tc.name
+				secretName := name + "-auth"
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+					Data: map[string][]byte{
+						builders.SecretKeyAdminPassword:   []byte("a"),
+						builders.SecretKeyRadminPassword:  []byte("r"),
+						builders.SecretKeyMonitorPassword: []byte("m"),
+						builders.SecretKeyMonitorUsername: []byte(tc.value),
+					},
+				}
+				Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+				cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+					c.Spec.Auth.SecretName = secretName
+				})
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+				})
+				Expect(err).To(HaveOccurred())
+				var got proxysqlv1alpha1.ProxySQLCluster
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+				degraded := meta.FindStatusCondition(got.Status.Conditions, condTypeDegraded)
+				Expect(degraded).NotTo(BeNil())
+				Expect(degraded.Reason).To(Equal("AuthSecretError"))
+				Expect(degraded.Message).To(ContainSubstring(builders.SecretKeyMonitorUsername))
+				if tc.value != "" {
+					Expect(degraded.Message).NotTo(ContainSubstring(tc.value))
+				}
+				var cnfSec corev1.Secret
+				Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+					types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec))).To(BeTrue())
+			}
+		})
+	})
+
+	When("an external auth Secret changes its monitor credentials", func() {
+		const name = "pxc-monitor-rotation"
+		const secretName = "pxc-monitor-rotation-auth"
+
+		It("renders both protocols from the Secret before and after rotation", func() {
+			ctx := context.Background()
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+				Data: map[string][]byte{
+					builders.SecretKeyAdminPassword:   []byte("a"),
+					builders.SecretKeyRadminPassword:  []byte("r"),
+					builders.SecretKeyMonitorPassword: []byte("old-monitor-pass"),
+					builders.SecretKeyMonitorUsername: []byte("monitor_ro"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.Auth.SecretName = secretName
+				c.Spec.Protocols.PostgreSQL.Enabled = new(true)
+			})
+			reconcileAndExpectSuccess(name)
+			var beforeSTS appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &beforeSTS)).To(Succeed())
+			checksumBefore := beforeSTS.Spec.Template.Annotations[annotationCnfChecksum]
+
+			var cnfSec corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec)).To(Succeed())
+			before := builders.ParseCnfVariables(string(cnfSec.Data["proxysql.cnf"]))
+			for _, prefix := range []string{"mysql", "pgsql"} {
+				Expect(before[prefix+"-monitor_username"]).To(Equal("monitor_ro"))
+				Expect(before[prefix+"-monitor_password"]).To(Equal("old-monitor-pass"))
+			}
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: ns}, secret)).To(Succeed())
+			secret.Data[builders.SecretKeyMonitorUsername] = []byte("monitor_next")
+			secret.Data[builders.SecretKeyMonitorPassword] = []byte("new-monitor-pass")
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &cnfSec)).To(Succeed())
+			after := builders.ParseCnfVariables(string(cnfSec.Data["proxysql.cnf"]))
+			for _, prefix := range []string{"mysql", "pgsql"} {
+				Expect(after[prefix+"-monitor_username"]).To(Equal("monitor_next"))
+				Expect(after[prefix+"-monitor_password"]).To(Equal("new-monitor-pass"))
+			}
+			var afterSTS appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &afterSTS)).To(Succeed())
+			Expect(afterSTS.Spec.Template.Annotations[annotationCnfChecksum]).NotTo(Equal(checksumBefore),
+				"without Ready pods, rotation must schedule a restart to avoid stale runtime credentials")
+		})
+	})
+
 	When("the user provides a username/password-shaped auth Secret", func() {
 		const name = "pxc-platform-secret"
 		const secretName = "platform-admin-creds"

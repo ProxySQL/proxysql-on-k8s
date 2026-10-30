@@ -44,6 +44,20 @@ kubectl -n percona-pxc-demo wait perconaxtradbclusters.pxc.percona.com/cluster1 
 kubectl apply -f proxysql.yaml
 ```
 
+The PXC operator stores the backend `monitor` account password in
+`cluster1-secrets`. After the ProxySQL operator creates `secret/proxysql`,
+set its monitor credentials to match the backend account. Replace both
+placeholders before running the command. The username is `monitor` in this
+example; the password is the `monitor` value in `cluster1-secrets`:
+
+```bash
+MONITOR_USERNAME='<monitor-username>'
+MONITOR_PASSWORD='<monitor-password>'
+kubectl -n percona-pxc-demo patch secret proxysql --type=merge \
+  -p "{\"data\":{\"monitor_username\":\"$(printf '%s' "$MONITOR_USERNAME" | base64 -w0)\",\"monitor-password\":\"$(printf '%s' "$MONITOR_PASSWORD" | base64 -w0)\"}}"
+unset MONITOR_USERNAME MONITOR_PASSWORD
+```
+
 ## Smoke test
 
 ```bash

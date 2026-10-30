@@ -13,14 +13,10 @@ hostgroups automatically — the same pattern as the
 > the proxy layer here). For production use `mysql.size: 3` and enable
 > orchestrator — the ProxySQL wiring below does not change.
 
-> ⚠️ **Monitor password — keep two places in sync.** ProxySQL's monitor
-> credentials are admin variables, which the `ProxySQLConfig` exposes as plain
-> strings under `mysqlVariables` (no `secretRef` there). The PS operator
-> pre-creates a `monitor` user whose password is the `monitor` key of
-> `cluster1-secrets`. Both ship with the same `REPLACE-ME-monitor`
-> placeholder; if you change one, change the other, or ProxySQL's monitor
-> gets "Access denied", can't read each node's `read_only` flag, and parks
-> every server in the reader hostgroup.
+The PS operator creates a `monitor` user. Its password is the `monitor`
+key in `cluster1-secrets`. Copy that value to the ProxySQLCluster auth
+Secret after the operator creates it. If the passwords differ, ProxySQL
+cannot check each node's `read_only` flag.
 
 ## What this example creates
 
@@ -48,6 +44,20 @@ kubectl -n percona-ps-demo wait perconaservermysqls.ps.percona.com/cluster1 --fo
 
 # 5. ProxySQL cluster + config.
 kubectl apply -f proxysql.yaml
+```
+
+After the operator creates `secret/proxysql`, set its monitor credentials
+to match the backend account. Replace both placeholders before running the
+command. The username is `monitor` in this example; the password is the
+`monitor` value in `cluster1-secrets`. The operator applies the Secret
+change to running pods:
+
+```bash
+MONITOR_USERNAME='<monitor-username>'
+MONITOR_PASSWORD='<monitor-password>'
+kubectl -n percona-ps-demo patch secret proxysql --type=merge \
+  -p "{\"data\":{\"monitor_username\":\"$(printf '%s' "$MONITOR_USERNAME" | base64 -w0)\",\"monitor-password\":\"$(printf '%s' "$MONITOR_PASSWORD" | base64 -w0)\"}}"
+unset MONITOR_USERNAME MONITOR_PASSWORD
 ```
 
 ## Smoke test

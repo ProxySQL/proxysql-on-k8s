@@ -268,6 +268,40 @@ func TestBuilder_CnfSecret_PostgreSQLMonitorCreds(t *testing.T) {
 	}
 }
 
+func TestBuilder_CnfSecret_CustomMonitorUsernameOnBothProtocols(t *testing.T) {
+	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+		c.Spec.Protocols.PostgreSQL.Enabled = boolPtr(true)
+	})
+	b := New(c, newScheme(t), Passwords{
+		Admin: "a", Radmin: "r", Monitor: "monitorpw", MonitorUsername: "monitor_ro",
+	})
+	sec, err := b.CnfSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := ParseCnfVariables(string(sec.Data["proxysql.cnf"]))
+	for _, key := range []string{"mysql-monitor_username", "pgsql-monitor_username"} {
+		if got := vars[key]; got != "monitor_ro" {
+			t.Errorf("%s = %q, want monitor_ro", key, got)
+		}
+	}
+	for _, key := range []string{"mysql-monitor_password", "pgsql-monitor_password"} {
+		if got := vars[key]; got != "monitorpw" {
+			t.Errorf("%s = %q, want monitorpw", key, got)
+		}
+	}
+}
+
+func TestBuilder_CnfSecret_RejectsUnsafeMonitorUsername(t *testing.T) {
+	b := New(newCluster(clusterName), newScheme(t), Passwords{
+		Admin: "a", Radmin: "r", Monitor: "m", MonitorUsername: `bad";`,
+	})
+	_, err := b.CnfSecret()
+	if err == nil || !strings.Contains(err.Error(), "monitor username") {
+		t.Fatalf("unsafe monitor username: got %v, want validation error", err)
+	}
+}
+
 func TestBuilder_CnfSecret_NoClusterSyncOnSingleReplica(t *testing.T) {
 	one := int32(1)
 	c := newCluster(clusterName, func(c *proxysqlv1alpha1.ProxySQLCluster) { c.Spec.Replicas = &one })
@@ -765,6 +799,58 @@ func TestPasswordsFromSecret_Validation(t *testing.T) {
 	}, keys)
 	if err != nil || pw.ExtraAdminUser != "plat-form_user.1" || pw.Admin != platformPass {
 		t.Fatalf("clean username/password schema should pass: pw=%+v err=%v", pw, err)
+	}
+}
+
+func TestPasswordsFromSecret_MonitorUsername(t *testing.T) {
+	keys := proxysqlv1alpha1.AuthKeys{
+		AdminPassword:   "admin-password",
+		RadminPassword:  "radmin-password",
+		MonitorPassword: "monitor-password",
+	}
+	operatorData := map[string][]byte{
+		"admin-password": []byte("a"), "radmin-password": []byte("r"), "monitor-password": []byte("m"),
+	}
+	platformData := map[string][]byte{
+		"username": []byte("platform_admin"), "password": []byte("p"),
+	}
+	for _, tc := range []struct {
+		name string
+		data map[string][]byte
+		want string
+	}{
+		{name: "operator schema defaults", data: operatorData, want: "monitor"},
+		{name: "operator schema override", data: map[string][]byte{
+			"admin-password": []byte("a"), "radmin-password": []byte("r"), "monitor-password": []byte("m"),
+			"monitor_username": []byte("monitor_ro"),
+		}, want: "monitor_ro"},
+		{name: "platform username remains admin only", data: platformData, want: "monitor"},
+		{name: "platform schema override", data: map[string][]byte{
+			"username": []byte("platform_admin"), "password": []byte("p"),
+			"monitor_username": []byte("monitor_ro"),
+		}, want: "monitor_ro"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pw, err := PasswordsFromSecret(tc.data, keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pw.MonitorUsername != tc.want {
+				t.Errorf("monitor username = %q, want %q", pw.MonitorUsername, tc.want)
+			}
+		})
+	}
+	for _, value := range []string{"", `evil";`, "bad name", "bad\nname", "μonitor"} {
+		t.Run("invalid "+value, func(t *testing.T) {
+			data := map[string][]byte{
+				"admin-password": []byte("a"), "radmin-password": []byte("r"), "monitor-password": []byte("m"),
+				"monitor_username": []byte(value),
+			}
+			_, err := PasswordsFromSecret(data, keys)
+			if err == nil || !strings.Contains(err.Error(), "monitor_username") {
+				t.Errorf("invalid monitor username %q: got %v, want key-naming error", value, err)
+			}
+		})
 	}
 }
 

@@ -15,8 +15,8 @@ guide](./tls.md).
 auth Secret (<cluster> or spec.auth.secretName)
   admin-password ─┐
   radmin-password ─┼─► rendered into proxysql.cnf ─► <cluster>-cnf Secret
-  monitor-password┘        (admin_credentials,          mounted read-only at
-                            monitor_username/password)  /etc/proxysql/
+  monitor-password┤        (admin_credentials,          mounted read-only at
+  monitor_username┘        monitor_username/password)  /etc/proxysql/
 
 user Secrets (passwordSecretRef per mysqlUsers/pgsqlUsers entry)
   └─► read by the ProxySQLConfig reconciler ─► INSERT INTO mysql_users/
@@ -29,7 +29,7 @@ Three operator-level credentials per cluster, one Secret:
 | --- | --- | --- |
 | `admin` | humans, inside the pod only | ProxySQL hardcodes `admin` to localhost — a remote login is rejected with "User 'admin' can only connect locally". |
 | `radmin` | the operator (config pushes, runtime read-back) and ProxySQL Cluster sync | The remote-capable admin account. Use it for any admin access over the pod network. |
-| `monitor` | ProxySQL's monitor module, *toward your backends* | The same user must exist on the backend databases for health/read_only checks — see [Backends](./backends.md#the-monitor-user). One Secret key drives both `mysql-monitor_password` and `pgsql-monitor_password`; end-to-end rotation runbook (MySQL dual passwords, PostgreSQL's no-dual-password window) in [Operations](./operations.md#rotating-the-monitor-credential). |
+| `monitor` by default | ProxySQL's monitor module, *toward your backends* | The same user must exist on the backend databases for health/read_only checks. The optional `monitor_username` Secret key selects another user for both protocols. See [Backends](./backends.md#the-monitor-user) and the rotation steps in [Operations](./operations.md#rotating-the-monitor-credential). |
 
 When the operator mints the Secret, passwords are random 32-character
 hex strings (~128 bits of entropy), preserved across reconciles.
@@ -75,11 +75,18 @@ remote-capable admin credential — so a platform's own login keeps
 working against the admin port. A partial operator schema is an explicit
 error, never a silent fall-through.
 
+Both schemas can contain the optional literal key `monitor_username`.
+If the key is absent, the operator uses `monitor`. The platform schema's
+`username` key is an admin username and does not set the monitor username.
+The operator-managed Secret also accepts `monitor_username` and preserves
+it when it backfills missing password keys.
+
 Because cnf values live inside double-quoted strings and
 `admin_credentials` is split on `;`, credentials are validated **before
 rendering**:
 
-- usernames must match `^[A-Za-z0-9_.-]+$`;
+- usernames must match `^[A-Za-z0-9_.-]+$`. An explicit empty
+  `monitor_username` fails; omit it to use `monitor`;
 - passwords must not contain `"`, `;`, or any control character.
 
 Values violating this would corrupt the rendered config and could never
@@ -214,13 +221,13 @@ scraper's egress range rather than leaving it wide open.
 
 ## The monitor user
 
-The monitor credential closes the loop between ProxySQL and your
-backends: the bootstrap cnf sets `monitor_username="monitor"` with the
-password from the auth Secret, and ProxySQL uses it for connect, ping,
-and `read_only` checks against every backend server. Either create that
-user on the backends, override the monitor credentials via
-`mysqlVariables` to match an existing backend user, or disable the
-monitor (`mysql-monitor_enabled: "false"`) — an unauthenticated monitor
-eventually **shuns** otherwise-healthy backends. Setup details in
+The monitor credential connects ProxySQL to your backends. The bootstrap
+cnf uses `monitor` unless the auth Secret contains `monitor_username`.
+The password comes from `monitor-password`. ProxySQL uses the pair for
+connect, ping, and `read_only` checks against each backend server. Create
+that user on the backends, or set `monitor_username` and
+`monitor-password` to match an existing backend user. You can disable
+the monitor with `mysql-monitor_enabled: "false"`. An unauthenticated
+monitor eventually **shuns** otherwise-healthy backends. Setup details in
 [Backends](./backends.md#the-monitor-user); symptoms in
 [Operations](./operations.md#troubleshooting).

@@ -113,8 +113,9 @@ trade-off analysis in the
 ## The monitor user
 
 ProxySQL's monitor module logs into every backend to run connect, ping,
-and `read_only` checks. The bootstrap cnf configures it as user
-`monitor` with the `monitor-password` from the cluster's auth Secret.
+and `read_only` checks. The bootstrap cnf uses the auth Secret's
+`monitor-password` and the optional `monitor_username`. Without the
+username key, it uses `monitor`.
 A single failed check does not shun a backend: ProxySQL requires
 consecutive failures (`mysql-monitor_ping_max_failures` /
 `pgsql-monitor_ping_max_failures`, default 3) before it marks an
@@ -132,15 +133,19 @@ Three ways to make it work, in order of preference:
    #   GRANT USAGE, REPLICATION CLIENT ON *.* TO 'monitor'@'%';
    ```
 
-2. **Point ProxySQL at an existing backend user** by overriding the
-   monitor variables in the `ProxySQLConfig` (these are plain strings —
-   keep them in sync with the backend's secret yourself):
+2. **Point ProxySQL at an existing backend user** by setting the
+   username and password in the cluster's auth Secret. Keep the Secret
+   values in sync with the backend account:
 
    ```yaml
-   mysqlVariables:
-     mysql-monitor_username: "monitor"
-     mysql-monitor_password: "<the backend's monitor password>"
+   stringData:
+     monitor_username: monitor_ro
+     monitor-password: "<the backend's monitor password>"
    ```
+
+   The operator uses this pair for both MySQL and PostgreSQL when both
+   protocols are enabled. `ProxySQLConfig` variable maps cannot set the
+   monitor username or password.
 
 3. **Disable the monitor** (`mysql-monitor_enabled: "false"`) — only
    sensible without replication hostgroups, e.g. a single backend behind

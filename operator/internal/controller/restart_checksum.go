@@ -336,15 +336,28 @@ func (r *ProxySQLClusterReconciler) resolveRestartChecksum(
 	}
 
 	// verdictRuntimeTry: dial every ready pod and push `changed` at runtime.
-	adminPort := builders.DefaultedSpec(cluster).Protocols.Admin.Port
+	resolvedSpec := builders.DefaultedSpec(cluster)
+	adminPort := resolvedSpec.Protocols.Admin.Port
 	endpoints, derr := discoverPodEndpoints(ctx, r.Client, cluster, adminPort)
 	if derr != nil {
 		return "", "", "", "", derr
 	}
+	// A monitor credential change must reach every existing replica. A pod
+	// that is not Ready cannot receive the runtime push, and advancing the
+	// applied marker would leave it stale when it recovers. Roll the cnf
+	// checksum instead, so the pod loads the new Secret on restart.
+	for _, key := range []string{
+		"mysql-monitor_username", "mysql-monitor_password",
+		"pgsql-monitor_username", "pgsql-monitor_password",
+	} {
+		if _, changedMonitor := changed[key]; changedMonitor && len(endpoints) < int(*resolvedSpec.Replicas) {
+			return newHash, newVarsHash, newStructuralHash,
+				"RestartRequired: monitor credentials could not reach every replica", nil
+		}
+	}
 	if len(endpoints) == 0 {
-		// Nothing running yet; pods will bootstrap straight from the
-		// (already-updated) Secret. Keep the annotation as-is — no restart
-		// needed once pods do come up, they'll read newCnf from the volume.
+		// No ready pod can receive an ordinary variable change. New pods
+		// bootstrap from the already-updated cnf Secret when they come up.
 		return prev, newVarsHash, newStructuralHash, "", nil
 	}
 	// TLS-wired clusters dial the admin port over TLS (CA pool from the

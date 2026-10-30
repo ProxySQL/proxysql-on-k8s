@@ -58,7 +58,7 @@ Owned objects (all with `OwnerReference{controller=true, blockOwnerDeletion=true
 
 | Object | Name | Purpose |
 | --- | --- | --- |
-| `Secret` | `<cluster>` *or* `spec.auth.secretName` | `admin-password`, `radmin-password`, `monitor-password`. Operator-minted when `spec.auth.secretName` is empty; user-managed otherwise. |
+| `Secret` | `<cluster>` *or* `spec.auth.secretName` | `admin-password`, `radmin-password`, `monitor-password`, and optional `monitor_username` (defaults to `monitor`). Operator-minted when `spec.auth.secretName` is empty; user-managed otherwise. |
 | `Secret` | `<cluster>-cnf` | Bootstrap `proxysql.cnf` — only enough to start the admin port. A Secret because the rendered cnf embeds the admin/radmin/monitor passwords. Backends, users, query rules all come from `ProxySQLConfig`. When `spec.logging.enabled`, a second key `fluent-bit.conf` carries the sidecar config (no secrets in it — sink credentials reach the sidecar as env vars from `secretKeyRef`). |
 | `Service` | `<cluster>` | ClusterIP. Exposes the enabled protocol ports + metrics + the stats web UI (when enabled). `spec.service.annotations` (cloud LB configuration) and `spec.service.sessionAffinityTimeoutSeconds` (ClientIP session affinity) apply to this Service only, never the headless one. Annotations are owned wholesale by the spec — out-of-band edits are overwritten, mirroring label handling. |
 | `Service` | `<cluster>-headless` | `ClusterIP=None`, `publishNotReadyAddresses=true`. Used as the StatefulSet's `serviceName` so pods get stable DNS for ProxySQL Cluster sync. |

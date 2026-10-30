@@ -240,12 +240,16 @@ variable.
 ## Rotating the monitor credential
 
 The [monitor-credential exception](#what-restarts-pods-what-doesnt) above
-means a `spec.auth` monitor-password rotation is restart-free: the operator
-re-renders the `<cluster>-cnf` Secret, then pushes `mysql-monitor_password`
-(and `pgsql-monitor_password`, when `protocols.pgsql` is on) to every
-**Ready** replica over the admin port with no pod restart. This section is
-the full backend-to-ProxySQL rotation runbook, MySQL and PostgreSQL, using
-each engine's own credential-rotation primitive.
+means a `spec.auth` monitor-credential rotation can avoid a restart: the operator
+re-renders the `<cluster>-cnf` Secret, then pushes the changed
+`mysql-monitor_username` and `mysql-monitor_password` values (and their
+`pgsql` equivalents, when `protocols.pgsql` is on) to every
+**Ready** replica over the admin port. If every replica is Ready and the
+read-back matches, no pod restarts. A Not-Ready replica or successful
+read-back mismatch makes the operator roll the pods to load the new Secret.
+A failed push or read-back operation is retried without advancing the
+checksum. This section covers rotation for MySQL and PostgreSQL. Each
+engine uses its own method to rotate credentials.
 
 **One password drives both protocols.** The auth Secret has a single
 `monitor-password` key (default; overridable via `spec.auth.keys.monitorPassword`),
@@ -256,6 +260,18 @@ no separate key per protocol. If a single `ProxySQLCluster` fronts both
 MySQL and PostgreSQL backends, plan the two backends' monitor-user rotations
 around the same Secret update; you can't dual-password-rotate one protocol's
 backends while leaving the other on the old password.
+
+**One username drives both protocols.** Add the optional literal
+`monitor_username` key to the same auth Secret when the backend account is
+not `monitor`. If the key is absent, the operator uses `monitor`. The key
+cannot be empty and must match `^[A-Za-z0-9_.-]+$`. To change the username,
+create the new account on every backend first. Then update
+`monitor_username` and, if needed, `monitor-password` in the auth Secret.
+The Secret watch reconciles the cluster. The operator applies the changed
+values to Ready replicas and reads them back. A replica that is not Ready or
+a read-back mismatch triggers a rolling restart. After every replica uses
+the new account, remove the old backend account. Keep the values out of all
+`ProxySQLConfig` variable maps. The operator owns those settings.
 
 ### MySQL: dual-password rotation
 
@@ -288,22 +304,25 @@ out.
    The Secret watch fires the next reconcile immediately (see [drift
    self-healing](#drift-self-healing-what-to-expect)): the `<cluster>-cnf`
    Secret is re-rendered first, then the new password is pushed to every
-   Ready replica at runtime — no restart, no manual `LOAD`/`SAVE`.
+   Ready replica at runtime. If every replica is Ready and read-back matches,
+   no pod restarts and no manual `LOAD`/`SAVE` is needed. A Not-Ready replica
+   or successful read-back mismatch triggers a restart. A failed push or
+   read-back operation reports `RuntimeApplyError` and is retried.
 
-3. **Verify before discarding the old password.** Two independent signals,
-   both worth checking — don't rely on either alone:
+3. **Verify before discarding the old password.** Check the rollout and
+   every replica:
 
-   - The `Progressing` condition confirms the runtime push landed:
+   - Check the `Progressing` condition, then wait for any rollout:
 
      ```bash
-     kubectl get pxc $CLUSTER -o jsonpath='{.status.conditions[?(@.type=="Progressing")]}'
-     # reason: RuntimeApplied, message: "RuntimeApplied: mysql-monitor_password"
+     kubectl -n "$NS" get pxc "$CLUSTER" -o jsonpath='{.status.conditions[?(@.type=="Progressing")]}'
+     kubectl -n "$NS" rollout status statefulset/"$CLUSTER" --timeout=5m
      ```
 
-     This only reflects replicas that were **Ready** at push time (the
-     [Not-Ready-replica gap](#what-restarts-pods-what-doesnt) applies here
-     too) — if a replica was down or failing readiness during the push, it
-     didn't get the new password and this message won't tell you that.
+     `RuntimeApplied` means every replica was Ready at push time and read
+     back the new value. A restart instead reports `Rolling`. A later
+     reconcile can replace either reason with `Steady`, so neither the
+     condition nor rollout status alone confirms the backend login works.
    - On the admin port (see [manual admin-port
      access](#manual-admin-port-access)), confirm every replica actually has
      the new value and is connecting successfully:
@@ -327,9 +346,9 @@ out.
      per-replica confirmation.
 
    Repeat the admin-port check against **every** replica — `radmin` on
-   6032 only shows you the one pod you connected to, and the Not-Ready-replica
-   gap means a healthy-looking `Progressing` message can still leave one pod
-   behind.
+   6032 only shows you the one pod you connected to. Confirm the new value
+   and successful backend checks on each replica before removing the old
+   password.
 
 4. **Once every replica confirms**, discard the old password on the
    backend:
@@ -392,14 +411,10 @@ as possible, not to eliminate it.
    rotation reached them. There's no step 4: with no second password to
    discard, this is the whole rotation.
 
-A **Not-Ready replica at push time** is worth calling out specifically
-here: without a dual-password grace window, that replica keeps trying the
-*old* password against a backend that no longer accepts it until the next
-reconcile reaches it — a longer, but still self-recovering, version of the
-same gap [documented above](#what-restarts-pods-what-doesnt). It clears up
-the moment that replica becomes Ready and picks up the new password from
-the next resync; nothing to do but be aware it can outlast the "quick
-succession" window if a replica is down for a while.
+If a replica is **Not-Ready at push time**, the operator restarts the pods
+so each replica loads the new Secret. Without a dual-password grace window,
+the rollout can still take longer than the "quick succession" window if a
+replica is down for a while.
 
 ## Manual admin-port access
 
