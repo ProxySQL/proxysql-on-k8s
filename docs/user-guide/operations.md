@@ -309,19 +309,20 @@ out.
    or successful read-back mismatch triggers a restart. A failed push or
    read-back operation reports `RuntimeApplyError` and is retried.
 
-3. **Verify before discarding the old password.** Two independent signals,
-   both worth checking — don't rely on either alone:
+3. **Verify before discarding the old password.** Check the rollout and
+   every replica:
 
-   - The `Progressing` condition confirms the runtime push landed:
+   - Check the `Progressing` condition, then wait for any rollout:
 
      ```bash
-     kubectl get pxc $CLUSTER -o jsonpath='{.status.conditions[?(@.type=="Progressing")]}'
-     # reason: RuntimeApplied, message: "RuntimeApplied: mysql-monitor_password"
+     kubectl -n "$NS" get pxc "$CLUSTER" -o jsonpath='{.status.conditions[?(@.type=="Progressing")]}'
+     kubectl -n "$NS" rollout status statefulset/"$CLUSTER" --timeout=5m
      ```
 
      `RuntimeApplied` means every replica was Ready at push time and read
-     back the new value. If any replica was not Ready, the operator restarts
-     the pods instead and does not emit this message.
+     back the new value. A restart instead reports `Rolling`. A later
+     reconcile can replace either reason with `Steady`, so neither the
+     condition nor rollout status alone confirms the backend login works.
    - On the admin port (see [manual admin-port
      access](#manual-admin-port-access)), confirm every replica actually has
      the new value and is connecting successfully:
@@ -345,9 +346,9 @@ out.
      per-replica confirmation.
 
    Repeat the admin-port check against **every** replica — `radmin` on
-   6032 only shows you the one pod you connected to, and the Not-Ready-replica
-   gap means a healthy-looking `Progressing` message can still leave one pod
-   behind.
+   6032 only shows you the one pod you connected to. Confirm the new value
+   and successful backend checks on each replica before removing the old
+   password.
 
 4. **Once every replica confirms**, discard the old password on the
    backend:
