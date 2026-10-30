@@ -846,8 +846,11 @@ different: `mysql-monitor_username`, `pgsql-monitor_username`,
 ordinary variable lines rendered from `spec.auth` (reserved only against
 `spec.variables` *overrides*, not bootstrap-structural for classification),
 so changing the monitor username or password uses the runtime-apply path.
-The operator reads back each applied value and uses a restart if a value
-does not take effect or any replica is not Ready.
+If read-back succeeds but a value does not match, or any replica is not
+Ready, the operator restarts the pods. If a runtime push or read-back
+operation fails, it keeps the previous checksum and applied markers,
+reports `RuntimeApplyError`, and retries. An unrelated pod-template change
+can still cause a rollout during that retry.
 
 **Progressing condition messages.** The reconciler surfaces the outcome in
 the `Progressing` condition (see the [status reference](status.md)):
@@ -855,11 +858,12 @@ the `Progressing` condition (see the [status reference](status.md)):
 | Outcome | Condition | Message |
 |---|---|---|
 | Runtime apply succeeded | `Progressing=False`, reason `RuntimeApplied` | `RuntimeApplied: <sorted variable names>` |
-| Runtime apply failed read-back / restart needed for a variable change | `Progressing=True`, reason `Rolling` | `RestartRequired: <sorted variable names> (runtime read-back mismatch)` |
+| Runtime read-back mismatch / restart needed for a variable change | `Progressing=True`, reason `Rolling` | `RestartRequired: <sorted variable names> (runtime read-back mismatch)` |
+| Monitor credential change with a Not-Ready replica | `Progressing=True`, reason `Rolling` | `RestartRequired: monitor credentials could not reach every replica` |
 | Structural `proxysql.cnf` change | `Progressing=True`, reason `Rolling` | `RestartRequired: structural cnf change` |
 | Change confined to non-`proxysql.cnf` Secret keys (e.g. `fluent-bit.conf`) | `Progressing=True`, reason `Rolling` | `RestartRequired: structural cnf change (<keys>)` |
 | Interrupted reconcile left a structural restart pending (`structural-applied-hash` mismatch) | `Progressing=True`, reason `Rolling` | `RestartRequired: structural change pending from interrupted reconcile` |
-| Runtime push failed on a replica | `Degraded=True`, reason `RuntimeApplyError` | the push error, naming the replica address (retried on requeue; StatefulSet updates are not blocked) |
+| Runtime push or read-back operation failed on a replica | `Degraded=True`, reason `RuntimeApplyError` | the operation error, naming the replica address (retried on requeue; unrelated StatefulSet updates are not blocked) |
 | Normal rollout, no variables-specific reason | `Progressing=True`, reason `Rolling` | `waiting for replicas` |
 
 A `RuntimeApplied` outcome is reported even though `Progressing=False` —

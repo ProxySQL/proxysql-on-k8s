@@ -46,14 +46,18 @@ kubectl -n percona-ps-demo wait perconaservermysqls.ps.percona.com/cluster1 --fo
 kubectl apply -f proxysql.yaml
 ```
 
-After the operator creates `secret/proxysql`, copy the backend monitor
-password into it. The operator applies the Secret change to running pods:
+After the operator creates `secret/proxysql`, set its monitor credentials
+to match the backend account. Replace both placeholders before running the
+command. The username is `monitor` in this example; the password is the
+`monitor` value in `cluster1-secrets`. The operator applies the Secret
+change to running pods:
 
 ```bash
-MONITOR_B64=$(kubectl -n percona-ps-demo get secret cluster1-secrets -o jsonpath='{.data.monitor}')
+MONITOR_USERNAME='<monitor-username>'
+MONITOR_PASSWORD='<monitor-password>'
 kubectl -n percona-ps-demo patch secret proxysql --type=merge \
-  -p "{\"data\":{\"monitor-password\":\"$MONITOR_B64\"}}"
-unset MONITOR_B64
+  -p "{\"data\":{\"monitor_username\":\"$(printf '%s' "$MONITOR_USERNAME" | base64 -w0)\",\"monitor-password\":\"$(printf '%s' "$MONITOR_PASSWORD" | base64 -w0)\"}}"
+unset MONITOR_USERNAME MONITOR_PASSWORD
 ```
 
 ## Smoke test

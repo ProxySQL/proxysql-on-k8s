@@ -42,14 +42,18 @@ kubectl -n mariadb-demo wait mariadb/mariadb --for=condition=Ready --timeout=10m
 kubectl apply -f proxysql.yaml
 ```
 
-After the operator creates `secret/proxysql`, copy the backend monitor
-password into it. The operator applies the Secret change to running pods:
+After the operator creates `secret/proxysql`, set its monitor credentials
+to match the backend account. Replace both placeholders before running the
+command. The username is `monitor` in this example; the password is the
+value in `mariadb-monitor`. The operator applies the Secret change to
+running pods:
 
 ```bash
-MONITOR_B64=$(kubectl -n mariadb-demo get secret mariadb-monitor -o jsonpath='{.data.password}')
+MONITOR_USERNAME='<monitor-username>'
+MONITOR_PASSWORD='<monitor-password>'
 kubectl -n mariadb-demo patch secret proxysql --type=merge \
-  -p "{\"data\":{\"monitor-password\":\"$MONITOR_B64\"}}"
-unset MONITOR_B64
+  -p "{\"data\":{\"monitor_username\":\"$(printf '%s' "$MONITOR_USERNAME" | base64 -w0)\",\"monitor-password\":\"$(printf '%s' "$MONITOR_PASSWORD" | base64 -w0)\"}}"
+unset MONITOR_USERNAME MONITOR_PASSWORD
 ```
 
 ## Smoke test

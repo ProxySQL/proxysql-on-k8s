@@ -245,9 +245,11 @@ re-renders the `<cluster>-cnf` Secret, then pushes the changed
 `mysql-monitor_username` and `mysql-monitor_password` values (and their
 `pgsql` equivalents, when `protocols.pgsql` is on) to every
 **Ready** replica over the admin port. If every replica is Ready and the
-read-back matches, no pod restarts. Otherwise, the operator rolls the pods
-to load the new Secret. This section covers rotation for MySQL and
-PostgreSQL. Each engine uses its own method to rotate credentials.
+read-back matches, no pod restarts. A Not-Ready replica or successful
+read-back mismatch makes the operator roll the pods to load the new Secret.
+A failed push or read-back operation is retried without advancing the
+checksum. This section covers rotation for MySQL and PostgreSQL. Each
+engine uses its own method to rotate credentials.
 
 **One password drives both protocols.** The auth Secret has a single
 `monitor-password` key (default; overridable via `spec.auth.keys.monitorPassword`),
@@ -302,7 +304,10 @@ out.
    The Secret watch fires the next reconcile immediately (see [drift
    self-healing](#drift-self-healing-what-to-expect)): the `<cluster>-cnf`
    Secret is re-rendered first, then the new password is pushed to every
-   Ready replica at runtime — no restart, no manual `LOAD`/`SAVE`.
+   Ready replica at runtime. If every replica is Ready and read-back matches,
+   no pod restarts and no manual `LOAD`/`SAVE` is needed. A Not-Ready replica
+   or successful read-back mismatch triggers a restart. A failed push or
+   read-back operation reports `RuntimeApplyError` and is retried.
 
 3. **Verify before discarding the old password.** Two independent signals,
    both worth checking — don't rely on either alone:
@@ -314,10 +319,9 @@ out.
      # reason: RuntimeApplied, message: "RuntimeApplied: mysql-monitor_password"
      ```
 
-     This only reflects replicas that were **Ready** at push time (the
-     [Not-Ready-replica gap](#what-restarts-pods-what-doesnt) applies here
-     too) — if a replica was down or failing readiness during the push, it
-     didn't get the new password and this message won't tell you that.
+     `RuntimeApplied` means every replica was Ready at push time and read
+     back the new value. If any replica was not Ready, the operator restarts
+     the pods instead and does not emit this message.
    - On the admin port (see [manual admin-port
      access](#manual-admin-port-access)), confirm every replica actually has
      the new value and is connecting successfully:
@@ -406,14 +410,10 @@ as possible, not to eliminate it.
    rotation reached them. There's no step 4: with no second password to
    discard, this is the whole rotation.
 
-A **Not-Ready replica at push time** is worth calling out specifically
-here: without a dual-password grace window, that replica keeps trying the
-*old* password against a backend that no longer accepts it until the next
-reconcile reaches it — a longer, but still self-recovering, version of the
-same gap [documented above](#what-restarts-pods-what-doesnt). It clears up
-the moment that replica becomes Ready and picks up the new password from
-the next resync; nothing to do but be aware it can outlast the "quick
-succession" window if a replica is down for a while.
+If a replica is **Not-Ready at push time**, the operator restarts the pods
+so each replica loads the new Secret. Without a dual-password grace window,
+the rollout can still take longer than the "quick succession" window if a
+replica is down for a while.
 
 ## Manual admin-port access
 
