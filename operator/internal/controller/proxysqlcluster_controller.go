@@ -128,6 +128,19 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// A cluster that is being deleted is left alone (#105). With foreground
+	// cascade the CR stays visible — deletionTimestamp set, foregroundDeletion
+	// finalizer — until the garbage collector has removed every dependent. Each
+	// removal is an owned-object event that lands here; re-ensuring the cnf
+	// Secret, Services and StatefulSet would recreate the dependents as fast as
+	// the collector deletes them, so the finalizer never clears and the delete
+	// hangs. The operator holds no finalizer of its own on ProxySQLCluster, so
+	// there is nothing to clean up: return and let the collector finish.
+	if !cluster.DeletionTimestamp.IsZero() {
+		log.V(1).Info("ProxySQLCluster is being deleted; not reconciling", "deletionTimestamp", cluster.DeletionTimestamp.Time)
+		return ctrl.Result{}, nil
+	}
+
 	// 1) Resolve passwords (from existing Secret or mint + create).
 	pw, err := r.resolvePasswords(ctx, &cluster)
 	if err != nil {

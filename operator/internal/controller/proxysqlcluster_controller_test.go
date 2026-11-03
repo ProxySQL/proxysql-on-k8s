@@ -114,6 +114,52 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 		return c
 	}
 
+	When("a ProxySQLCluster is being deleted (#105)", func() {
+		const name = "pxc-deleting"
+		// A finalizer of the test's own keeps the CR visible after Delete, the
+		// way the garbage collector's foregroundDeletion finalizer does in a
+		// real cluster (envtest runs no garbage collector).
+		const holdFinalizer = "test.proxysql.com/hold"
+
+		It("does not recreate the dependents the garbage collector removed", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Finalizers = []string{holdFinalizer}
+			})
+			DeferCleanup(func() {
+				var c proxysqlv1alpha1.ProxySQLCluster
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &c); err == nil {
+					c.Finalizers = nil
+					_ = k8sClient.Update(ctx, &c)
+				}
+			})
+			reconcileAndExpectSuccess(name)
+
+			key := types.NamespacedName{Name: name, Namespace: ns}
+			var sts appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, key, &sts)).To(Succeed(), "precondition: the first reconcile creates the StatefulSet")
+
+			// Delete the CR, then remove its dependents the way the garbage
+			// collector would.
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			var deleting proxysqlv1alpha1.ProxySQLCluster
+			Expect(k8sClient.Get(ctx, key, &deleting)).To(Succeed())
+			Expect(deleting.DeletionTimestamp.IsZero()).To(BeFalse(), "precondition: the CR is under deletion")
+			Expect(k8sClient.Delete(ctx, &sts)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name + "-cnf", Namespace: ns}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}})).To(Succeed())
+
+			reconcileAndExpectSuccess(name)
+
+			err := k8sClient.Get(ctx, key, &appsv1.StatefulSet{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the StatefulSet must not be recreated for a cluster under deletion, got %v", err)
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cnf", Namespace: ns}, &corev1.Secret{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the cnf Secret must not be recreated for a cluster under deletion, got %v", err)
+			err = k8sClient.Get(ctx, key, &corev1.Service{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the Service must not be recreated for a cluster under deletion, got %v", err)
+		})
+	})
+
 	When("a ProxySQLCluster is created with defaults", func() {
 		const name = "pxc-defaults"
 
