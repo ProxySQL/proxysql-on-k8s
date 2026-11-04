@@ -119,6 +119,7 @@ exist either way) but sets a `Degraded` condition with reason
 
 ```
 fetch CR
+  └─► being deleted (deletionTimestamp set)? → return, ensure nothing (#105)
   └─► resolve admin Secret
         ├─ exists, operator-owned   → read passwords (backfill any missing keys)
         ├─ exists, externally owned → match against one of the two accepted
