@@ -47,7 +47,7 @@ data-plane and control-plane pods via CRDs.
 [`examples/`](./examples) has six end-to-end cookbooks — apply the backend
 operator's CR + a ProxySQL CR pair, get a working stack:
 
-- **MySQL family:** [Oracle MySQL Operator](./examples/mysql/oracle-mysql-operator/) (InnoDB Cluster), [Percona PS](./examples/mysql/percona-ps/) (GR), [Percona PXC](./examples/mysql/percona-pxc/) (Galera), [mariadb-operator](./examples/mysql/mariadb-operator/) (async replication)
+- **MySQL family:** [Oracle MySQL Operator](./examples/mysql/oracle-mysql-operator/) (InnoDB Cluster), [Percona PS](./examples/mysql/percona-ps/) (async replication), [Percona PXC](./examples/mysql/percona-pxc/) (Galera), [mariadb-operator](./examples/mysql/mariadb-operator/) (async replication)
 - **PostgreSQL family:** [CloudNativePG](./examples/postgresql/cloudnativepg/), [Crunchy PGO](./examples/postgresql/crunchy-pgo/)
 - **Loadgen:** sysbench (MySQL) + pgbench (PostgreSQL) under [`examples/loadgen/`](./examples/loadgen/)
 
