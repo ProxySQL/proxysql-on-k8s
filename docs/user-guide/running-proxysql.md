@@ -118,15 +118,16 @@ You apply two objects: a `ProxySQLCluster` for the pods and a
 `ProxySQLConfig` for what ProxySQL should route. Keep them in the same
 namespace, since `clusterRef` doesn't cross namespaces.
 
-First, the backend user's password goes in a Secret:
+First, create the namespace and put the backend user's password in a Secret:
 
 ```bash
+kubectl create namespace app
 kubectl -n app create secret generic app-db-credentials \
   --from-literal=password='S3cret-not-this'
 ```
 
-Then the cluster. Everything here except `replicas` is optional and shown
-so you know where the knobs live:
+Then the cluster, saved as `proxysql-cluster.yaml`. Everything here
+except `replicas` is optional and shown so you know where the knobs live:
 
 ```yaml
 apiVersion: proxysql.com/v1alpha1
@@ -145,6 +146,7 @@ spec:
   persistence:
     enabled: true
     size: 1Gi
+    # storageClass: gp3        # omit to use the cluster's default StorageClass
   protocols:
     mysql: { enabled: true }   # 6033
     pgsql: { enabled: false }  # 6133
@@ -158,7 +160,11 @@ spec:
       whenUnsatisfiable: ScheduleAnyway
 ```
 
-And the config. This is a classic primary/replica split: writes to
+Persistence creates one PVC per pod, so the cluster needs a default
+StorageClass, or set `persistence.storageClass` to one backed by a
+provisioner ([persistence trade-offs](clusters.md#persistence-trade-offs)).
+
+And the config, saved as `proxysql-config.yaml`. This is a classic primary/replica split: writes to
 hostgroup 10, reads to 20, with ProxySQL's monitor moving servers between
 them based on `read_only`:
 
@@ -186,8 +192,8 @@ spec:
         name: app-db-credentials
         key: password
   mysqlQueryRules:
-    - ruleId: 100
-      matchDigest: '^SELECT .* FOR UPDATE'
+    - ruleId: 100            # locking reads must hit the writer
+      matchDigest: '^SELECT .* (FOR UPDATE|FOR SHARE|LOCK IN SHARE MODE)'
       destinationHostgroup: 10
       apply: true
     - ruleId: 200
@@ -196,6 +202,18 @@ spec:
       apply: true
   mysqlVariables:
     mysql-max_connections: "4096"
+```
+
+Rule order matters: rule 100 sends locking reads (`FOR UPDATE`,
+`FOR SHARE`, `LOCK IN SHARE MODE`) to the writer before rule 200 sends
+every other `SELECT` to the readers. Anything that must read its own
+writes belongs on the writer too: add a rule for it, or keep it inside a
+transaction.
+
+Apply both:
+
+```bash
+kubectl apply -f proxysql-cluster.yaml -f proxysql-config.yaml
 ```
 
 A few things that bite on first use:
@@ -240,9 +258,18 @@ For the admin interface, use radmin. ProxySQL only lets `admin` log in
 from localhost, so remote sessions (and the operator itself) go through
 `radmin`:
 
+In a second terminal, forward the admin and data ports in one command, so
+both connections reach the same pod. Leave it running:
+
+```bash
+kubectl -n app port-forward svc/proxysql 6032:6032 6033:6033
+```
+
+Wait until it prints `Forwarding from 127.0.0.1:6032` and
+`Forwarding from 127.0.0.1:6033`. Then, in the first terminal:
+
 ```bash
 RADMIN=$(kubectl -n app get secret proxysql -o jsonpath='{.data.radmin-password}' | base64 -d)
-kubectl -n app port-forward svc/proxysql 6032:6032 &
 mysql -h127.0.0.1 -P6032 -uradmin -p"$RADMIN" --prompt 'admin> '
 ```
 
@@ -257,10 +284,9 @@ SELECT hostname, port, connect_error FROM monitor.mysql_server_connect_log ORDER
 SELECT hostgroup, digest_text, count_star FROM stats_mysql_query_digest ORDER BY count_star DESC LIMIT 10;
 ```
 
-Finally, a real query through the data port:
+Finally, a real query through the data port, over the same port-forward:
 
 ```bash
-kubectl -n app port-forward svc/proxysql 6033:6033 &
 mysql -h127.0.0.1 -P6033 -uapp -p -e 'SELECT @@hostname, @@read_only'
 ```
 
@@ -310,14 +336,16 @@ queries a backend through the proxy marks every replica NotReady during a
 single backend outage.
 
 **Upgrading the operator.** Helm never upgrades CRDs, so apply them
-yourself before `helm upgrade`, using the tag that matches the chart (e.g.
-`proxysql-operator-0.8.2`):
+yourself before `helm upgrade`, using the tag that matches the chart version you are upgrading to (e.g.
+tag `proxysql-operator-0.8.2` for chart `0.8.2`), and pin `helm upgrade` to
+that same version:
 
 ```bash
 helm repo update
 kubectl apply -f https://raw.githubusercontent.com/ProxySQL/proxysql-on-k8s/<tag>/charts/proxysql-operator/crds/proxysqlcluster.yaml
 kubectl apply -f https://raw.githubusercontent.com/ProxySQL/proxysql-on-k8s/<tag>/charts/proxysql-operator/crds/proxysqlconfig.yaml
-helm upgrade proxysql-operator proxysql/proxysql-operator -n proxysql-system
+helm upgrade proxysql-operator proxysql/proxysql-operator \
+  -n proxysql-system --version <chart-version>
 ```
 
 Skip the CRD step and new spec fields get stripped at admission, because
