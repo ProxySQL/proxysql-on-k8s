@@ -60,13 +60,18 @@ namespace-restricted mode. Install it once per Kubernetes cluster.
 ## Images and private registries
 
 The manager image is `ghcr.io/proxysql/proxysql-operator`; the tag
-defaults to the chart's `appVersion`. To pin or mirror it:
+defaults to the chart's `appVersion`. To mirror it, push the build of
+that `appVersion` into your registry so the manager matches the CRDs the
+chart installs. Read it from the chart version you are installing:
+`helm show chart proxysql/proxysql-operator --version <chart-version>`.
+Leave `tag` empty if the mirror keeps the upstream tag; set it only if
+your registry names that build differently:
 
 ```yaml
 # values.yaml for the operator chart
 image:
   repository: my-registry.example.com/proxysql/proxysql-operator
-  tag: "0.2.5"
+  tag: ""   # empty = the chart's appVersion; set only if your mirror renames it
   pullPolicy: IfNotPresent
 imagePullSecrets:
   - name: my-registry-creds

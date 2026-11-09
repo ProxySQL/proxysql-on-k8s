@@ -19,7 +19,7 @@ server lists.
 | Cookbook | Backend | One-liner |
 | --- | --- | --- |
 | [`mysql/oracle-mysql-operator/`](../../examples/mysql/oracle-mysql-operator/) | Oracle MySQL Operator (InnoDB Cluster) | ProxySQL replaces MySQL Router, targeting per-pod DNS of the instances. |
-| [`mysql/percona-ps/`](../../examples/mysql/percona-ps/) | Percona Operator for MySQL Server (Group Replication) | Per-pod DNS + replication hostgroups; writer/reader split follows `read_only`. |
+| [`mysql/percona-ps/`](../../examples/mysql/percona-ps/) | Percona Operator for MySQL Server (async replication) | Per-pod DNS + replication hostgroups; writer/reader split follows `read_only`. |
 | [`mysql/percona-pxc/`](../../examples/mysql/percona-pxc/) | Percona Operator for PXC (Galera) | Multi-primary Galera behind the `<name>-pxc` Service. |
 | [`mysql/mariadb-operator/`](../../examples/mysql/mariadb-operator/) | mariadb-operator (async replication) | `<name>-primary` / `<name>-secondary` Services as writer/reader hostgroups. |
 | [`postgresql/cloudnativepg/`](../../examples/postgresql/cloudnativepg/) | CloudNativePG | `-rw` Service is always the primary (CNPG repoints it on failover), `-ro` the standbys. |
