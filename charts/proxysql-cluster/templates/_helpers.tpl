@@ -44,6 +44,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "proxysql-cluster.passwords" -}}
+{{- /*
+Resolved once per render and cached on .Values, which every template in the
+release shares. Without the cache the Secret and the cnf each called
+randAlphaNum separately on a fresh install, so the passwords in the Secret did
+not match the ones ProxySQL was started with.
+*/ -}}
+{{- if not (hasKey .Values "__proxysqlPasswords") -}}
 {{- $existing := (lookup "v1" "Secret" .Release.Namespace (include "proxysql-cluster.fullname" .)) | default (dict "data" (dict)) -}}
 {{- $data := $existing.data | default (dict) -}}
 {{- $admin := .Values.auth.adminPassword -}}
@@ -55,7 +62,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $monitor := .Values.auth.monitorPassword -}}
 {{- if not $monitor -}}{{- $monitor = (get $data "monitor-password" | default "" | b64dec) -}}{{- end -}}
 {{- if not $monitor -}}{{- $monitor = randAlphaNum 32 -}}{{- end -}}
-{{- dict "admin" $admin "radmin" $radmin "monitor" $monitor | toYaml -}}
+{{- $_ := set .Values "__proxysqlPasswords" (dict "admin" $admin "radmin" $radmin "monitor" $monitor) -}}
+{{- end -}}
+{{- get .Values "__proxysqlPasswords" | toYaml -}}
 {{- end -}}
 
 {{/*

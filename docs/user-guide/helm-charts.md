@@ -300,6 +300,11 @@ and `proxysql-cluster` in the samples) with keys `admin-password`,
 `radmin-password` and `monitor-password`. Use `radmin` for remote admin
 sessions: ProxySQL accepts `admin` only from localhost.
 
+Those Secret passwords match the ones in `proxysql.cnf` from `proxysql`
+0.1.1 and `proxysql-cluster` 0.2.1. Earlier versions generated the two
+separately on a fresh install with blank `auth.*`, so the Secret's
+passwords were refused: set `auth.*Password` explicitly there.
+
 ```bash
 helm test proxysql -n app                       # TCP check of the admin port
 kubectl -n app port-forward svc/proxysql 6032:6032
