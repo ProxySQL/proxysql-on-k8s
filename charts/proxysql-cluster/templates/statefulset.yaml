@@ -48,6 +48,13 @@ spec:
             - "/etc/proxysql/proxysql.cnf"
             - "-D"
             - "/var/lib/proxysql"
+            # --reload merges proxysql.cnf over the proxysql.db persisted on the
+            # PVC on every start. Without it ProxySQL reads the cnf only when no
+            # proxysql.db exists, so values changes made after the first boot
+            # (backends, users, rules, variables) roll the pods but never take
+            # effect. cnf wins for entries present in both; entries removed from
+            # the cnf survive in proxysql.db. Same fix as the operator (#50).
+            - "--reload"
           ports:
             - name: admin
               containerPort: {{ .Values.admin.port }}

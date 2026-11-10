@@ -1,0 +1,30 @@
+# Three ProxySQL Cluster peers. Install as release "proxysql-cluster" in
+# namespace "app" (another release name changes every hostname below):
+# pods are proxysql-cluster-{0,1,2}, headless Service proxysql-cluster-headless.
+# users[].password is inline in the rendered proxysql.cnf. Keep real passwords
+# in a separate values file you don't commit (helm install -f this -f secrets.yaml).
+replicaCount: 3
+
+proxysqlServers:
+  - { hostname: proxysql-cluster-0.proxysql-cluster-headless.app.svc, port: 6032 }
+  - { hostname: proxysql-cluster-1.proxysql-cluster-headless.app.svc, port: 6032 }
+  - { hostname: proxysql-cluster-2.proxysql-cluster-headless.app.svc, port: 6032 }
+
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""   # empty = the cluster's default StorageClass
+
+backends:
+  mysql:
+    - { host: mysql-0.mysql.db.svc, port: 3306, hostgroup: 10 }
+    - { host: mysql-1.mysql.db.svc, port: 3306, hostgroup: 20 }
+mysqlReplicationHostgroups:
+  - { writer: 10, reader: 20, checkType: read_only }
+users:
+  mysql:
+    - { username: app, password: change-me, defaultHostgroup: 10 }
+queryRules:
+  mysql:
+    - { ruleId: 100, active: true, matchDigest: '^SELECT .* FOR UPDATE', destinationHostgroup: 10, apply: 1 }
+    - { ruleId: 200, active: true, matchDigest: '^SELECT', destinationHostgroup: 20, apply: 1 }

@@ -1,0 +1,20 @@
+# PostgreSQL only: writes to the primary Service, reads to the replicas Service.
+# users[].password is inline in the rendered proxysql.cnf. Keep real passwords
+# in a separate values file you don't commit (helm install -f this -f secrets.yaml).
+protocols:
+  mysql: { enabled: false }   # Service drops 6033; ProxySQL still binds it in the pod
+  pgsql: { enabled: true, port: 6133 }
+
+backends:
+  pgsql:
+    - { host: pg-rw.db.svc, port: 5432, hostgroup: 10, maxConnections: 500 }
+    - { host: pg-ro.db.svc, port: 5432, hostgroup: 20, maxConnections: 500 }
+
+users:
+  pgsql:
+    - { username: app, password: change-me, defaultHostgroup: 10 }
+
+queryRules:
+  pgsql:
+    - { ruleId: 100, active: true, matchDigest: '^SELECT .* FOR (UPDATE|SHARE)', destinationHostgroup: 10, apply: 1 }
+    - { ruleId: 200, active: true, matchDigest: '^SELECT', destinationHostgroup: 20, apply: 1 }

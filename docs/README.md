@@ -50,6 +50,7 @@ guide tells you *how*, the reference tells you *exactly what*.
 | Page | Covers |
 | --- | --- |
 | [Running ProxySQL with the operator](user-guide/running-proxysql.md) | End-to-end walkthrough — install, deploy a read/write split, verify, day-2, troubleshooting. Start here. |
+| [Helm charts](user-guide/helm-charts.md) | Operating the operator chart with Helm; classic `proxysql.cnf` configuration with the standalone `proxysql` / `proxysql-cluster` charts, with samples. |
 | [Installation](user-guide/installation.md) | Helm install/upgrade/uninstall, CRD handling, HA for the operator itself. |
 | [Clusters](user-guide/clusters.md) | Sizing, auth Secrets, persistence trade-offs, protocols, exposure, rolling updates. |
 | [Configuration](user-guide/configuration.md) | The write-to-all sync model, servers/users/rules, variables, drift, deletion semantics. |
