@@ -29,6 +29,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1030,6 +1031,193 @@ var _ = Describe("ProxySQLCluster Controller", func() {
 				Expect(err).To(HaveOccurred(), "sinkType=%s without %s block must be rejected", sink, sink)
 				Expect(err.Error()).To(ContainSubstring(sink))
 			}
+		})
+	})
+
+	When("the user sets updateStrategy and priorityClassName", func() {
+		const name = "pxc-strategy"
+
+		It("copies both onto the StatefulSet and restores the default strategy when updateStrategy is removed", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.PriorityClassName = "system-cluster-critical"
+				c.Spec.UpdateStrategy = &appsv1.StatefulSetUpdateStrategy{
+					Type:          appsv1.RollingUpdateStatefulSetStrategyType,
+					RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{Partition: new(int32(2))},
+				}
+			})
+			reconcileAndExpectSuccess(name)
+
+			key := types.NamespacedName{Name: name, Namespace: ns}
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(ss.Spec.Template.Spec.PriorityClassName).To(Equal("system-cluster-critical"))
+			Expect(ss.Spec.UpdateStrategy.Type).To(Equal(appsv1.RollingUpdateStatefulSetStrategyType))
+			Expect(ss.Spec.UpdateStrategy.RollingUpdate).NotTo(BeNil())
+			Expect(*ss.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(2)))
+			Expect(ss.Annotations).To(HaveKeyWithValue(annotationUpdateStrategyManaged, "true"))
+
+			// A second reconcile with an unchanged spec must not write the
+			// StatefulSet again (the apiserver-defaulted fields compare equal).
+			rv := ss.ResourceVersion
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(ss.ResourceVersion).To(Equal(rv), "unchanged spec must not rewrite the StatefulSet")
+
+			// Switch to OnDelete.
+			Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+			cluster.Spec.UpdateStrategy = &appsv1.StatefulSetUpdateStrategy{Type: appsv1.OnDeleteStatefulSetStrategyType}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(ss.Spec.UpdateStrategy.Type).To(Equal(appsv1.OnDeleteStatefulSetStrategyType))
+			Expect(ss.Spec.UpdateStrategy.RollingUpdate).To(BeNil())
+
+			// Remove it: the StatefulSet goes back to the Kubernetes default
+			// instead of staying stuck on OnDelete.
+			Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+			cluster.Spec.UpdateStrategy = nil
+			cluster.Spec.PriorityClassName = ""
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(ss.Spec.UpdateStrategy.Type).To(Equal(appsv1.RollingUpdateStatefulSetStrategyType))
+			Expect(ss.Spec.UpdateStrategy.RollingUpdate).NotTo(BeNil())
+			Expect(*ss.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(0)))
+			Expect(ss.Annotations).NotTo(HaveKey(annotationUpdateStrategyManaged))
+			Expect(ss.Spec.Template.Spec.PriorityClassName).To(BeEmpty())
+		})
+
+		It("leaves the StatefulSet's default strategy alone when updateStrategy is unset", func() {
+			ctx := context.Background()
+			const plain = name + "-unset"
+			cluster = makeCluster(plain)
+			reconcileAndExpectSuccess(plain)
+
+			key := types.NamespacedName{Name: plain, Namespace: ns}
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(ss.Spec.UpdateStrategy.Type).To(Equal(appsv1.RollingUpdateStatefulSetStrategyType), "apiserver default")
+			Expect(ss.Annotations).NotTo(HaveKey(annotationUpdateStrategyManaged))
+			rv := ss.ResourceVersion
+			reconcileAndExpectSuccess(plain)
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(ss.ResourceVersion).To(Equal(rv), "unset strategy must not cause a StatefulSet write")
+
+			// A strategy patched onto the StatefulSet by hand (the only way to
+			// hold a canary before spec.updateStrategy existed) survives an
+			// operator that does not manage it: upgrading must not roll the
+			// held pods.
+			ss.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{Partition: new(int32(1))}
+			Expect(k8sClient.Update(ctx, &ss)).To(Succeed())
+			reconcileAndExpectSuccess(plain)
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(*ss.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(1)))
+		})
+
+		It("reports Running, not Updating, once a held partition has rolled every pod it allows", func() {
+			ctx := context.Background()
+			const canary = name + "-canary"
+			cluster = makeCluster(canary, func(c *proxysqlv1alpha1.ProxySQLCluster) {
+				c.Spec.UpdateStrategy = &appsv1.StatefulSetUpdateStrategy{
+					Type:          appsv1.RollingUpdateStatefulSetStrategyType,
+					RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{Partition: new(int32(2))},
+				}
+			})
+			reconcileAndExpectSuccess(canary)
+
+			key := types.NamespacedName{Name: canary, Namespace: ns}
+			setSS := func(ready, updated int32, current, update string) {
+				var ss appsv1.StatefulSet
+				Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+				ss.Status.Replicas = 3
+				ss.Status.ReadyReplicas = ready
+				ss.Status.UpdatedReplicas = updated
+				ss.Status.CurrentRevision = current
+				ss.Status.UpdateRevision = update
+				Expect(k8sClient.Status().Update(ctx, &ss)).To(Succeed())
+			}
+			phase := func() string {
+				Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+				b := builders.New(cluster, k8sClient.Scheme(), builders.Passwords{})
+				Expect(reconciler.updateStatus(ctx, cluster, b, "", nil, nil, nil)).To(Succeed())
+				return cluster.Status.Phase
+			}
+
+			// Canary pod (ordinal 2) still rolling.
+			setSS(3, 0, "rev-1", "rev-2")
+			Expect(phase()).To(Equal(proxysqlv1alpha1.PhaseUpdating))
+			// Ordinal 2 moved; ordinals 0-1 stay on rev-1 by design.
+			setSS(3, 1, "rev-1", "rev-2")
+			Expect(phase()).To(Equal(proxysqlv1alpha1.PhaseRunning),
+				"partition=2 of 3: one updated pod is everything the strategy allows")
+			Expect(cluster.Status.UpdatedReplicas).To(Equal(int32(1)))
+			// A canary pod not ready is still Updating.
+			setSS(2, 1, "rev-1", "rev-2")
+			Expect(phase()).To(Equal(proxysqlv1alpha1.PhaseUpdating))
+		})
+	})
+
+	When("the cluster is scaled through the /scale subresource", func() {
+		const name = "pxc-scale-sub"
+
+		It("publishes status.selector, scales via spec.replicas, and never lets pause rewrite spec.replicas", func() {
+			ctx := context.Background()
+			cluster = makeCluster(name)
+			reconcileAndExpectSuccess(name)
+
+			key := types.NamespacedName{Name: name, Namespace: ns}
+			var ss appsv1.StatefulSet
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+			Expect(cluster.Status.Selector).To(Equal(metav1.FormatLabelSelector(ss.Spec.Selector)))
+			Expect(cluster.Status.Selector).NotTo(BeEmpty())
+
+			// What `kubectl scale` and the HPA read.
+			scale := &autoscalingv1.Scale{}
+			Expect(k8sClient.SubResource("scale").Get(ctx, cluster, scale)).To(Succeed())
+			Expect(scale.Spec.Replicas).To(Equal(int32(3)))
+			Expect(scale.Status.Replicas).To(Equal(int32(3)))
+			Expect(scale.Status.Selector).To(Equal(cluster.Status.Selector))
+
+			// What `kubectl scale --replicas=5` writes.
+			scale.Spec.Replicas = 5
+			Expect(k8sClient.SubResource("scale").Update(ctx, cluster, client.WithSubResourceBody(scale))).To(Succeed())
+			Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+			Expect(*cluster.Spec.Replicas).To(Equal(int32(5)))
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(int32(5)))
+
+			// Pause, then scale while paused: spec.replicas takes the new
+			// value, the StatefulSet stays at 0, and reconciling never
+			// rewrites spec.replicas.
+			Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+			cluster.Spec.Pause = true
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+			Expect(*cluster.Spec.Replicas).To(Equal(int32(5)), "pause must not rewrite spec.replicas")
+
+			Expect(k8sClient.SubResource("scale").Get(ctx, cluster, scale)).To(Succeed())
+			scale.Spec.Replicas = 4
+			Expect(k8sClient.SubResource("scale").Update(ctx, cluster, client.WithSubResourceBody(scale))).To(Succeed())
+			reconcileAndExpectSuccess(name)
+
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(int32(0)), "paused StatefulSet stays at 0 after a scale")
+			Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+			Expect(*cluster.Spec.Replicas).To(Equal(int32(4)))
+			Expect(cluster.Status.Replicas).To(Equal(int32(4)))
+			Expect(cluster.Status.Phase).To(Equal(proxysqlv1alpha1.PhasePaused))
+			Expect(cluster.Status.Selector).NotTo(BeEmpty(), "selector is published while paused too")
+
+			// Resume: the StatefulSet picks up the replica count set while paused.
+			cluster.Spec.Pause = false
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileAndExpectSuccess(name)
+			Expect(k8sClient.Get(ctx, key, &ss)).To(Succeed())
+			Expect(*ss.Spec.Replicas).To(Equal(int32(4)))
 		})
 	})
 
@@ -2190,6 +2378,62 @@ func TestDerivePhase(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := derivePhase(tc.ss, tc.missing, tc.desired, tc.paused); got != tc.want {
+				t.Errorf("derivePhase() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDerivePhase_UpdateStrategy covers spec.updateStrategy: a held
+// partition or an OnDelete strategy leaves pods on the old revision by
+// design, so the revision mismatch alone must not keep the phase at Updating.
+func TestDerivePhase_UpdateStrategy(t *testing.T) {
+	now := metav1.Now()
+	ss := func(strategy appsv1.StatefulSetUpdateStrategy, ready, updated int32, current, update string) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{CreationTimestamp: now},
+			Spec:       appsv1.StatefulSetSpec{UpdateStrategy: strategy},
+			Status: appsv1.StatefulSetStatus{
+				ReadyReplicas:   ready,
+				UpdatedReplicas: updated,
+				CurrentRevision: current,
+				UpdateRevision:  update,
+			},
+		}
+	}
+	partition := func(p int32) appsv1.StatefulSetUpdateStrategy {
+		return appsv1.StatefulSetUpdateStrategy{
+			Type:          appsv1.RollingUpdateStatefulSetStrategyType,
+			RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{Partition: new(p)},
+		}
+	}
+	onDelete := appsv1.StatefulSetUpdateStrategy{Type: appsv1.OnDeleteStatefulSetStrategyType}
+
+	cases := []struct {
+		name string
+		ss   *appsv1.StatefulSet
+		want string
+	}{
+		// partition 0 (explicit) keeps today's rule exactly.
+		{"partition 0, revision mismatch", ss(partition(0), 3, 3, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseUpdating},
+		{"partition 0, settled", ss(partition(0), 3, 3, "rev-2", "rev-2"), proxysqlv1alpha1.PhaseRunning},
+		// partition 2 of 3: only ordinal 2 may move.
+		{"partition 2, canary not yet moved", ss(partition(2), 3, 0, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseUpdating},
+		{"partition 2, canary moved and ready", ss(partition(2), 3, 1, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseRunning},
+		{"partition 2, canary moved but not ready", ss(partition(2), 2, 1, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseUpdating},
+		{"partition 1, one of two moved", ss(partition(1), 3, 1, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseUpdating},
+		{"partition 1, both moved", ss(partition(1), 3, 2, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseRunning},
+		// partition >= replicas: nothing may move.
+		{"partition 5 of 3, nothing moved", ss(partition(5), 3, 0, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseRunning},
+		{"partition 2, no pending revision", ss(partition(2), 3, 3, "rev-1", "rev-1"), proxysqlv1alpha1.PhaseRunning},
+		// OnDelete: pods move only when deleted, so all-ready is Running.
+		{"OnDelete, revision pending, all ready", ss(onDelete, 3, 0, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseRunning},
+		{"OnDelete, revision pending, one deleted pod not ready", ss(onDelete, 2, 1, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseUpdating},
+		{"OnDelete, zero ready", ss(onDelete, 0, 0, "rev-1", "rev-2"), proxysqlv1alpha1.PhaseCreating},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := derivePhase(tc.ss, false, 3, false); got != tc.want {
 				t.Errorf("derivePhase() = %q, want %q", got, tc.want)
 			}
 		})

@@ -65,7 +65,8 @@ spec:
               clusterRef:
                 description: |-
                   ClusterRef points to the ProxySQLCluster this config applies to.
-                  Must exist in the same namespace.
+                  Must exist in the same namespace. Immutable: to target another
+                  cluster, delete and recreate the ProxySQLConfig.
                 properties:
                   name:
                     default: ""
@@ -78,6 +79,10 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: clusterRef is immutable; delete and recreate the ProxySQLConfig
+                    to target another cluster
+                  rule: self == oldSelf
               mysqlHostgroupAttributes:
                 items:
                   description: |-

@@ -54,7 +54,14 @@ explicit-vs-defaulted port are still distinct rows.
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `clusterRef.name` | `string` | — | required | Name of the target `ProxySQLCluster` in the **same namespace**. A missing cluster sets `ClusterFound=False` and retries every 5s. |
+| `clusterRef.name` | `string` | — | required; **immutable** (CEL `self == oldSelf` on `clusterRef`) | Name of the target `ProxySQLCluster` in the **same namespace**. A missing cluster sets `ClusterFound=False` and retries every 5s. |
+
+`clusterRef` cannot change after creation. An update that changes it is
+rejected at admission with `clusterRef is immutable; delete and recreate the
+ProxySQLConfig to target another cluster`; updates to any other field are
+accepted. To point a config at another cluster, delete it and create a new
+one. Deletion runs the `proxysql.com/config-cleanup` finalizer against the
+**old** cluster, so the managed tables there are cleared first.
 
 ### version and RDS-compatible config
 

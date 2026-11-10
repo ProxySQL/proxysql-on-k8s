@@ -1478,6 +1478,134 @@ spec:
                         additionalProperties:
                           type: string
                         type: object
+                      metricRelabelings:
+                        description: |-
+                          MetricRelabelings are applied to scraped samples before ingestion.
+                          Rendered verbatim as the ServiceMonitor endpoint's metricRelabelings;
+                          omitted when empty.
+                        items:
+                          description: |-
+                            RelabelConfig mirrors prometheus-operator's monitoring.coreos.com/v1
+                            RelabelConfig, with the same JSON field names, so entries render into the
+                            ServiceMonitor unchanged. See
+                            https://prometheus.io/docs/prometheus/latest/configuration/configuration/#relabel_config
+                          properties:
+                            action:
+                              description: |-
+                                Action to perform based on the regex matching. Prometheus default:
+                                replace.
+                              enum:
+                              - replace
+                              - keep
+                              - drop
+                              - hashmod
+                              - labelmap
+                              - labeldrop
+                              - labelkeep
+                              - lowercase
+                              - uppercase
+                              - keepequal
+                              - dropequal
+                              type: string
+                            modulus:
+                              description: |-
+                                Modulus to take of the hash of the source label values. Only
+                                meaningful for action hashmod.
+                              format: int64
+                              type: integer
+                            regex:
+                              description: |-
+                                Regex matched against the concatenated SourceLabels. Prometheus
+                                default: "(.*)".
+                              type: string
+                            replacement:
+                              description: |-
+                                Replacement value against which a regex replace is performed when the
+                                regex matches. Prometheus default: "$1".
+                              type: string
+                            separator:
+                              description: |-
+                                Separator placed between concatenated SourceLabels. Prometheus
+                                default: ";".
+                              type: string
+                            sourceLabels:
+                              description: |-
+                                SourceLabels selects values from existing labels. Their content is
+                                concatenated using Separator and matched against Regex.
+                              items:
+                                type: string
+                              type: array
+                            targetLabel:
+                              description: |-
+                                TargetLabel is the label the result is written to. Mandatory for
+                                replace, hashmod, lowercase, uppercase, keepequal and dropequal.
+                              type: string
+                          type: object
+                        type: array
+                      relabelings:
+                        description: |-
+                          Relabelings are applied to the scrape target before scraping. Rendered
+                          verbatim as the ServiceMonitor endpoint's relabelings; omitted when
+                          empty.
+                        items:
+                          description: |-
+                            RelabelConfig mirrors prometheus-operator's monitoring.coreos.com/v1
+                            RelabelConfig, with the same JSON field names, so entries render into the
+                            ServiceMonitor unchanged. See
+                            https://prometheus.io/docs/prometheus/latest/configuration/configuration/#relabel_config
+                          properties:
+                            action:
+                              description: |-
+                                Action to perform based on the regex matching. Prometheus default:
+                                replace.
+                              enum:
+                              - replace
+                              - keep
+                              - drop
+                              - hashmod
+                              - labelmap
+                              - labeldrop
+                              - labelkeep
+                              - lowercase
+                              - uppercase
+                              - keepequal
+                              - dropequal
+                              type: string
+                            modulus:
+                              description: |-
+                                Modulus to take of the hash of the source label values. Only
+                                meaningful for action hashmod.
+                              format: int64
+                              type: integer
+                            regex:
+                              description: |-
+                                Regex matched against the concatenated SourceLabels. Prometheus
+                                default: "(.*)".
+                              type: string
+                            replacement:
+                              description: |-
+                                Replacement value against which a regex replace is performed when the
+                                regex matches. Prometheus default: "$1".
+                              type: string
+                            separator:
+                              description: |-
+                                Separator placed between concatenated SourceLabels. Prometheus
+                                default: ";".
+                              type: string
+                            sourceLabels:
+                              description: |-
+                                SourceLabels selects values from existing labels. Their content is
+                                concatenated using Separator and matched against Regex.
+                              items:
+                                type: string
+                              type: array
+                            targetLabel:
+                              description: |-
+                                TargetLabel is the label the result is written to. Mandatory for
+                                replace, hashmod, lowercase, uppercase, keepequal and dropequal.
+                              type: string
+                          type: object
+                        type: array
                       scrapeTimeout:
                         default: 10s
                         type: string
@@ -1862,6 +1990,11 @@ spec:
                         type: string
                     type: object
                 type: object
+              priorityClassName:
+                description: |-
+                  PriorityClassName is copied to the ProxySQL pod template. When empty,
+                  the pods get the cluster's default priority (if any).
+                type: string
               probes:
                 description: |-
                   Probes overrides the proxysql container's startup/readiness/liveness
@@ -2959,6 +3092,54 @@ spec:
                   - whenUnsatisfiable
                   type: object
                 type: array
+              updateStrategy:
+                description: |-
+                  UpdateStrategy is copied verbatim to the StatefulSet's
+                  spec.updateStrategy. When unset, the operator leaves the StatefulSet's
+                  updateStrategy unset and Kubernetes applies its default
+                  (RollingUpdate, partition 0).
+
+                  Use rollingUpdate.partition for canary rollouts: only pods with an
+                  ordinal >= partition move to a new revision; lower ordinals stay on the
+                  old one until the partition is lowered. Use type OnDelete to roll pods
+                  only when you delete them. Either way, status.phase reports Running
+                  once every pod the strategy allows to move has moved and all replicas
+                  are ready, so a held partition or an OnDelete cluster does not read
+                  Updating forever; status.updatedReplicas shows how many pods run the
+                  new revision.
+                properties:
+                  rollingUpdate:
+                    description: RollingUpdate is used to communicate parameters when
+                      Type is RollingUpdateStatefulSetStrategyType.
+                    properties:
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          The maximum number of pods that can be unavailable during the update.
+                          Value can be an absolute number (ex: 5) or a percentage of desired pods (ex: 10%).
+                          Absolute number is calculated from percentage by rounding up. This can not be 0.
+                          Defaults to 1. This field is beta-level and is enabled by default. The field applies to all pods in the range 0 to
+                          Replicas-1. That means if there is any unavailable pod in the range 0 to Replicas-1, it
+                          will be counted towards MaxUnavailable.
+                          This setting might not be effective for the OrderedReady podManagementPolicy. That policy ensures pods are created and become ready one at a time.
+                        x-kubernetes-int-or-string: true
+                      partition:
+                        description: |-
+                          Partition indicates the ordinal at which the StatefulSet should be partitioned
+                          for updates. During a rolling update, all pods from ordinal Replicas-1 to
+                          Partition are updated. All pods from ordinal Partition-1 to 0 remain untouched.
+                          This is helpful in being able to do a canary based deployment. The default value is 0.
+                        format: int32
+                        type: integer
+                    type: object
+                  type:
+                    description: |-
+                      Type indicates the type of the StatefulSetUpdateStrategy.
+                      Default is RollingUpdate.
+                    type: string
+                type: object
               variables:
                 description: |-
                   Variables sets extra ProxySQL global variables baked into the
@@ -3113,6 +3294,13 @@ spec:
                 description: Replicas is the desired replica count.
                 format: int32
                 type: integer
+              selector:
+                description: |-
+                  Selector is the serialized label selector of the cluster's pods
+                  (the StatefulSet selector, in metav1.FormatLabelSelector form). It
+                  backs the /scale subresource so kubectl scale and the
+                  HorizontalPodAutoscaler can find the pods.
+                type: string
               updatedReplicas:
                 description: |-
                   UpdatedReplicas is the number of pods at the current StatefulSet
@@ -3126,4 +3314,8 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
       status: {}

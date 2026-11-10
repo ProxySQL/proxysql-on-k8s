@@ -59,9 +59,22 @@ and external pollers; conditions are the source of truth.
 | `Paused` | `spec.pause: true` and `readyReplicas == 0` (including when the StatefulSet doesn't exist yet). Wins over everything below. |
 | `Pending` | StatefulSet missing / not yet created. |
 | `Creating` | StatefulSet exists, `readyReplicas == 0`. Deliberately coarse: a previously running cluster in total outage also reads `Creating`. |
-| `Running` | `readyReplicas == replicas` and update revision == current revision (or no update revision). |
+| `Running` | `readyReplicas == replicas` and the rollout has settled for the StatefulSet's update strategy (see below). |
 | `Updating` | Everything else (partial readiness, rollout in flight). |
 | `Failed` | Reserved for future positively-identified terminal states; never currently emitted. |
+
+When the rollout counts as settled depends on `spec.updateStrategy` (read
+from the live StatefulSet):
+
+| Update strategy | Settled when | Why |
+|---|---|---|
+| unset, or `RollingUpdate` with partition `0` | update revision == current revision (or no update revision) | The default rule: every pod moves to the new revision. |
+| `RollingUpdate`, `partition: P > 0` | as above, **or** `updatedReplicas >= replicas - P` | Pods with an ordinal below `P` stay on the old revision on purpose, so the current revision never catches up. Once every pod at or above the partition has moved and all replicas are ready, the cluster reads `Running`, not `Updating` forever. Lower the partition to continue the rollout. |
+| `OnDelete` | always | The StatefulSet controller never replaces a pod by itself; a pending revision waits for you to delete pods. With all replicas ready the cluster reads `Running`; `updatedReplicas` shows how many pods run the new revision. A deleted pod that is not ready yet reads `Updating`. |
+
+`status.selector` is the serialized label selector of the cluster's pods,
+used by the `/scale` subresource. It is set on every status write,
+including the early `Degraded` ones and while paused.
 
 ### ProxySQLCluster requeues and watches
 

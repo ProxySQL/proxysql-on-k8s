@@ -100,6 +100,19 @@ user-configurable.
 Cleared once the window resolves — either every ready replica verifies, or
 the window expires into the restart fallback. Not user-configurable.
 
+### `proxysql.com/update-strategy-managed` (operator-set, on the StatefulSet object)
+
+| | |
+|---|---|
+| Set on | the StatefulSet's own `metadata.annotations` — never the pod template, so it never triggers a rollout |
+| Value | `"true"` |
+| Purpose | records that the StatefulSet's `spec.updateStrategy` came from the cluster's `spec.updateStrategy`. When that field is later removed, the marker tells the operator to reset the StatefulSet to the Kubernetes default (`RollingUpdate`, partition 0) instead of leaving it on `OnDelete` or a partition |
+
+Absent while `spec.updateStrategy` is unset. A StatefulSet without the
+marker keeps whatever strategy it has, so a strategy patched onto the
+StatefulSet by hand before `spec.updateStrategy` existed survives an operator
+upgrade. Not user-configurable.
+
 ### `proxysql.com/tls-restart` (operator-set, on the pod template)
 
 | | |

@@ -377,11 +377,22 @@ func (b *Builder) Labels() map[string]string {
 // SelectorLabels returns the subset of labels used for pod selectors. Must
 // stay stable across upgrades; do not add fields here.
 func (b *Builder) SelectorLabels() map[string]string {
+	return selectorLabels(b.Cluster.Name)
+}
+
+func selectorLabels(clusterName string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":     proxySQLName,
-		"app.kubernetes.io/instance": b.Cluster.Name,
-		"proxysql.com/cluster":       b.Cluster.Name,
+		"app.kubernetes.io/instance": clusterName,
+		"proxysql.com/cluster":       clusterName,
 	}
+}
+
+// PodSelector returns the serialized label selector of a cluster's pods —
+// metav1.FormatLabelSelector of the StatefulSet's selector. It backs
+// status.selector and so the /scale subresource (kubectl scale, HPA).
+func PodSelector(clusterName string) string {
+	return metav1.FormatLabelSelector(&metav1.LabelSelector{MatchLabels: selectorLabels(clusterName)})
 }
 
 // DefaultedSpec returns a copy of the cluster spec with operator defaults

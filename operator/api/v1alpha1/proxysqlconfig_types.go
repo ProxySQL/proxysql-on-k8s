@@ -29,8 +29,10 @@ import (
 // variables.
 type ProxySQLConfigSpec struct {
 	// ClusterRef points to the ProxySQLCluster this config applies to.
-	// Must exist in the same namespace.
+	// Must exist in the same namespace. Immutable: to target another
+	// cluster, delete and recreate the ProxySQLConfig.
 	// +required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="clusterRef is immutable; delete and recreate the ProxySQLConfig to target another cluster"
 	ClusterRef corev1.LocalObjectReference `json:"clusterRef"`
 
 	// Version is the product configuration version supplied by the control
