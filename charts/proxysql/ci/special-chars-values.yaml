@@ -21,6 +21,12 @@ backends:
       port: 3306
       hostgroup: 0
       comment: 'has a "quote" and a \backslash'
+    # Reader carrying maxReplicationLag, so `ct install` proves ProxySQL actually
+    # parses the rendered mysql_servers row rather than only that Helm renders it.
+    - host: replica-does-not-resolve.example.invalid
+      port: 3306
+      hostgroup: 1
+      maxReplicationLag: 5
 
 users:
   mysql:
