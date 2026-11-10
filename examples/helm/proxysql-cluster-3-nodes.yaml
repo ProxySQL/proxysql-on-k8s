@@ -26,5 +26,5 @@ users:
     - { username: app, password: change-me, defaultHostgroup: 10 }
 queryRules:
   mysql:
-    - { ruleId: 100, active: true, matchDigest: '^SELECT .* FOR UPDATE', destinationHostgroup: 10, apply: 1 }
+    - { ruleId: 100, active: true, matchDigest: '^SELECT .* (FOR UPDATE|FOR SHARE|LOCK IN SHARE MODE)', destinationHostgroup: 10, apply: 1 }
     - { ruleId: 200, active: true, matchDigest: '^SELECT', destinationHostgroup: 20, apply: 1 }

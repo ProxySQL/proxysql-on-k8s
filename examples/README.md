@@ -66,7 +66,9 @@ Values files for the operator-free `proxysql` and `proxysql-cluster` charts, whe
 | [`loadgen/sysbench.yaml`](loadgen/sysbench.yaml) | `sysbench` (`oltp_read_write`) | MySQL on port 6033 |
 | [`loadgen/pgbench.yaml`](loadgen/pgbench.yaml) | `pgbench` | PostgreSQL on port 6133 |
 
-## Conventions used in every example
+## Conventions used in every operator example
+
+The `helm/` values files above install without the operator and follow [Helm charts](../docs/user-guide/helm-charts.md) instead.
 
 - **Namespace:** each example uses its own namespace (`<flavor>-demo`) so they
   don't collide if you install several at once.

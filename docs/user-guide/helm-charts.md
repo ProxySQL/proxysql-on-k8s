@@ -87,11 +87,22 @@ installed.
 
 ### Uninstall
 
-Delete every `ProxySQLConfig` first, while the operator still runs to
-remove their finalizers, then uninstall:
+To remove only the operator, uninstall the release and leave the CRs
+alone. ProxySQL pods keep serving with the config they hold, and a
+reinstalled operator picks the CRs up again:
 
 ```bash
-kubectl delete proxysqlconfigs --all -A
+helm uninstall proxysql-operator -n proxysql-system
+```
+
+For a full teardown, delete the `ProxySQLConfig`s first, while the
+operator still runs to remove their finalizers. **This is destructive:**
+each deletion clears that config's servers, users and rules from the
+running ProxySQL pods, so clients lose their backends. Delete them one
+namespace at a time, never with `-A` on a shared cluster:
+
+```bash
+kubectl -n <namespace> delete proxysqlconfigs --all
 helm uninstall proxysql-operator -n proxysql-system
 ```
 
@@ -173,7 +184,13 @@ helm install proxysql proxysql/proxysql -n app --create-namespace \
 `secrets.yaml` holds the real `users.mysql` entries (and `auth.*` if you
 set them) and stays out of git; values files later on the command line
 win. Create the `monitor` user on the backends with the password from the
-chart's Secret (next section) so the read_only check can log in.
+chart's Secret (see Connect and verify) so the read_only check can log in.
+
+Keeping `secrets.yaml` out of git does not keep the passwords out of the
+cluster: the `proxysql` chart renders the admin, monitor and application
+passwords into `proxysql.cnf` in a **ConfigMap**, readable by anyone who
+can read ConfigMaps in that namespace. Restrict that access with RBAC, or
+use the `proxysql-cluster` chart, which keeps its cnf in a Secret.
 
 ### Sample: PostgreSQL (`proxysql` chart)
 
@@ -194,11 +211,24 @@ users:
   pgsql:
     - { username: app, password: change-me, defaultHostgroup: 10 }
 
+# auth.monitorPassword only reaches mysql_variables. The PostgreSQL monitor
+# defaults to monitor/monitor: set an account that exists on the backends.
+pgsqlVariables:
+  monitor_username: monitor
+  monitor_password: change-me
+
 queryRules:
   pgsql:
-    - { ruleId: 100, active: true, matchDigest: '^SELECT .* FOR (UPDATE|SHARE)', destinationHostgroup: 10, apply: 1 }
+    # Every row-locking clause, and sequence functions, must hit the primary:
+    # a hot standby rejects both.
+    - { ruleId: 100, active: true, matchDigest: '^SELECT .* FOR (UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)', destinationHostgroup: 10, apply: 1 }
+    - { ruleId: 150, active: true, matchDigest: '(nextval|setval|currval)\s*\(', destinationHostgroup: 10, apply: 1 }
     - { ruleId: 200, active: true, matchDigest: '^SELECT', destinationHostgroup: 20, apply: 1 }
 ```
+
+Rule 200 sends every other `SELECT` to the standbys. A `SELECT` that calls
+a function with side effects (writes, `pg_advisory_lock`, your own
+volatile functions) needs its own writer rule ahead of it.
 
 ### Sample: three-node ProxySQL Cluster (`proxysql-cluster` chart)
 
@@ -232,7 +262,7 @@ users:
     - { username: app, password: change-me, defaultHostgroup: 10 }
 queryRules:
   mysql:
-    - { ruleId: 100, active: true, matchDigest: '^SELECT .* FOR UPDATE', destinationHostgroup: 10, apply: 1 }
+    - { ruleId: 100, active: true, matchDigest: '^SELECT .* (FOR UPDATE|FOR SHARE|LOCK IN SHARE MODE)', destinationHostgroup: 10, apply: 1 }
     - { ruleId: 200, active: true, matchDigest: '^SELECT', destinationHostgroup: 20, apply: 1 }
 ```
 
@@ -240,6 +270,12 @@ queryRules:
 helm install proxysql-cluster proxysql/proxysql-cluster -n app \
   --version <chart-version> -f proxysql-cluster-3-nodes.yaml -f secrets.yaml
 ```
+
+As with the first sample, create the `monitor` user on every backend with
+the password from this release's Secret (`proxysql-cluster`, key
+`monitor-password`), or set `auth.monitorPassword` in `secrets.yaml`.
+Without it the read_only check fails and writer/reader placement stops
+following promotions.
 
 When you change `replicaCount`, change `proxysqlServers` to match in the
 same upgrade.
@@ -269,23 +305,32 @@ Edit the values file and run `helm upgrade` with the same files. A
 checksum of the rendered cnf sits on the pod template, so any config
 change rolls the pods; ProxySQL reads the new cnf when each pod starts.
 
-- **`proxysql` chart:** the datadir is an `emptyDir`, so every pod starts
-  from the cnf alone. Anything changed by hand on the admin port is gone
-  after a restart.
+- **`proxysql` chart:** the datadir is an `emptyDir`, so every new pod
+  starts from the cnf alone. Anything changed by hand on the admin port is
+  gone once the pod is replaced (any `helm upgrade` that changes config
+  replaces them). A container restart inside the same pod keeps the
+  `emptyDir`, so whatever was saved to disk survives that.
 - **`proxysql-cluster` chart (0.2.1 and later):** each pod keeps
   `proxysql.db` on its PVC and starts with `--reload`, which merges the cnf
   over it. Entries in the cnf win. **Entries you remove from values stay in
   `proxysql.db`**: deleting a backend, user or rule from values does not
   delete it from ProxySQL. Remove it on the admin port too (below), or
-  start from an empty PVC.
+  start from an empty PVC. The reverse also holds: for a row that *is* in
+  values, the cnf replaces the whole row, so columns the chart cannot
+  express (for example `use_ssl` on `mysql_servers`) go back to their
+  defaults on every pod start. Keep such rows out of values and manage them
+  on the admin port, or use the operator.
 - **`proxysql-cluster` before 0.2.1:** pods start without `--reload`, so
   ProxySQL ignores the cnf whenever `proxysql.db` already exists. A
   `helm upgrade` rolls the pods and changes nothing after the first boot.
   Upgrade the chart.
 
 To remove a row on a `proxysql-cluster` release, delete it in values and
-on the admin port, then save to disk. ProxySQL Cluster copies the change
-to the other peers:
+run `helm upgrade`. Wait for the rollout to finish
+(`kubectl -n app rollout status sts/proxysql-cluster`), so no pod can
+restart with the old cnf and bring the row back. Then delete it on the
+admin port and save to disk; ProxySQL Cluster copies the change to the
+other peers. Check `runtime_mysql_servers` on each pod afterwards:
 
 ```sql
 DELETE FROM mysql_servers WHERE hostname = 'mysql-2.mysql.db.svc';

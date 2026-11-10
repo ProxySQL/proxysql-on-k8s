@@ -14,7 +14,16 @@ users:
   pgsql:
     - { username: app, password: change-me, defaultHostgroup: 10 }
 
+# auth.monitorPassword only reaches mysql_variables. The PostgreSQL monitor
+# defaults to monitor/monitor: set an account that exists on the backends.
+pgsqlVariables:
+  monitor_username: monitor
+  monitor_password: change-me
+
 queryRules:
   pgsql:
-    - { ruleId: 100, active: true, matchDigest: '^SELECT .* FOR (UPDATE|SHARE)', destinationHostgroup: 10, apply: 1 }
+    # Every row-locking clause, and sequence functions, must hit the primary:
+    # a hot standby rejects both.
+    - { ruleId: 100, active: true, matchDigest: '^SELECT .* FOR (UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)', destinationHostgroup: 10, apply: 1 }
+    - { ruleId: 150, active: true, matchDigest: '(nextval|setval|currval)\s*\(', destinationHostgroup: 10, apply: 1 }
     - { ruleId: 200, active: true, matchDigest: '^SELECT', destinationHostgroup: 20, apply: 1 }
