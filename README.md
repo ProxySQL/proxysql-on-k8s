@@ -51,7 +51,7 @@ operator's CR + a ProxySQL CR pair, get a working stack:
 - **PostgreSQL family:** [CloudNativePG](./examples/postgresql/cloudnativepg/), [Crunchy PGO](./examples/postgresql/crunchy-pgo/)
 - **Loadgen:** sysbench (MySQL) + pgbench (PostgreSQL) under [`examples/loadgen/`](./examples/loadgen/)
 
-## Architecture at a glance
+## Architecture at a glance — the operator path
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -91,7 +91,20 @@ operator's CR + a ProxySQL CR pair, get a working stack:
         └──────────────────────────┘
 ```
 
+Two things the picture does not say out loud:
+
+- **This is the operator path only** (`charts/proxysql-operator`). The two standalone
+  charts skip all of it — no CRDs, no controller, and no `ProxySQLConfig`. They render
+  `proxysql.cnf` from their Helm values into a `ConfigMap` (`charts/proxysql`) or a
+  `Secret` (`charts/proxysql-cluster`), which ProxySQL reads on first start.
+- **The SQL push goes to every replica, not one.** The operator writes to each pod's
+  admin port directly instead of writing once and letting ProxySQL's own cluster sync
+  propagate — see [why][why-write-to-all]. Cluster sync is still enabled as a backstop
+  when `replicas > 1`.
+
 Full design notes in [`docs/architecture.md`](./docs/architecture.md).
+
+[why-write-to-all]: ./docs/architecture.md#why-write-to-all-instead-of-letting-proxysql-cluster-sync-handle-it
 
 ## Quick start
 
