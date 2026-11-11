@@ -1,0 +1,31 @@
+# Read/write split in front of one MySQL primary and two replicas.
+# users[].password is inline in the rendered proxysql.cnf. Keep real passwords
+# in a separate values file you don't commit (helm install -f this -f secrets.yaml).
+replicaCount: 2
+
+backends:
+  mysql:
+    - { host: mysql-0.mysql.db.svc, port: 3306, hostgroup: 10, maxConnections: 2000, comment: primary }
+    - { host: mysql-1.mysql.db.svc, port: 3306, hostgroup: 20, maxConnections: 2000, comment: replica }
+    - { host: mysql-2.mysql.db.svc, port: 3306, hostgroup: 20, maxConnections: 2000, comment: replica }
+
+# ProxySQL's monitor moves servers between 10 and 20 by read_only.
+mysqlReplicationHostgroups:
+  - { writer: 10, reader: 20, checkType: read_only, comment: app-cluster }
+
+users:
+  mysql:
+    - { username: app, password: change-me, defaultHostgroup: 10, maxConnections: 1000 }
+
+queryRules:
+  mysql:
+    # active: true is required: an omitted active renders active=0.
+    - { ruleId: 100, active: true, matchDigest: '^SELECT .* (FOR UPDATE|FOR SHARE|LOCK IN SHARE MODE)', destinationHostgroup: 10, apply: 1 }
+    - { ruleId: 200, active: true, matchDigest: '^SELECT', destinationHostgroup: 20, apply: 1 }
+
+# Keys WITHOUT the mysql- prefix; they land inside mysql_variables={...}.
+mysqlVariables:
+  threads: 4
+  max_connections: 4096
+  monitor_read_only_interval: 1500
+  default_query_timeout: 36000000

@@ -11,4 +11,6 @@ Three charts make up the ProxySQL-on-Kubernetes deployment:
 The two standalone charts are for environments where running an operator
 isn't desirable. Most users want `proxysql-operator`, which manages both the
 data-plane and control-plane pods via CRDs. See each chart's `values.yaml` for
-the full configuration surface.
+the full configuration surface, and
+[docs/user-guide/helm-charts.md](../docs/user-guide/helm-charts.md) for
+Helm operations and sample values for the standalone charts.

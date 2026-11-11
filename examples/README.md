@@ -49,6 +49,16 @@ kubectl apply -f proxysql.yaml
 | [`postgresql/cloudnativepg/`](postgresql/cloudnativepg/) | [CloudNativePG](https://cloudnative-pg.io) (`postgresql.cnpg.io/v1.Cluster`) | `<name>-rw` (primary), `<name>-ro` (replicas) |
 | [`postgresql/crunchy-pgo/`](postgresql/crunchy-pgo/) | [Crunchy PGO](https://access.crunchydata.com/documentation/postgres-operator/latest/) (`postgres-operator.crunchydata.com/v1beta1.PostgresCluster`) | `<name>-primary`, `<name>-replicas` |
 
+### Standalone Helm charts (no operator)
+
+Values files for the operator-free `proxysql` and `proxysql-cluster` charts, where configuration is rendered into `proxysql.cnf`. See [Helm charts](../docs/user-guide/helm-charts.md).
+
+| File | Chart | What it sets up |
+| --- | --- | --- |
+| [`helm/proxysql-mysql-rw-split.yaml`](helm/proxysql-mysql-rw-split.yaml) | `proxysql` | MySQL read/write split: replication hostgroups, locking reads to the writer |
+| [`helm/proxysql-pgsql.yaml`](helm/proxysql-pgsql.yaml) | `proxysql` | PostgreSQL only: primary and replicas Services as writer/reader hostgroups |
+| [`helm/proxysql-cluster-3-nodes.yaml`](helm/proxysql-cluster-3-nodes.yaml) | `proxysql-cluster` | Three ProxySQL Cluster peers with persistent state |
+
 ### Load generation
 
 | File | Tool | Target protocol |
@@ -56,7 +66,9 @@ kubectl apply -f proxysql.yaml
 | [`loadgen/sysbench.yaml`](loadgen/sysbench.yaml) | `sysbench` (`oltp_read_write`) | MySQL on port 6033 |
 | [`loadgen/pgbench.yaml`](loadgen/pgbench.yaml) | `pgbench` | PostgreSQL on port 6133 |
 
-## Conventions used in every example
+## Conventions used in every operator example
+
+The `helm/` values files above install without the operator and follow [Helm charts](../docs/user-guide/helm-charts.md) instead.
 
 - **Namespace:** each example uses its own namespace (`<flavor>-demo`) so they
   don't collide if you install several at once.
