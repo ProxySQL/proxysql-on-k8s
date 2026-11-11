@@ -76,6 +76,12 @@ func (b *Builder) StatefulSet(cnfChecksum string) *appsv1.StatefulSet {
 		},
 	}
 
+	// Unset leaves the strategy unset (Kubernetes default) — byte-identical
+	// to operators that predate the field.
+	if b.Spec.UpdateStrategy != nil {
+		ss.Spec.UpdateStrategy = *b.Spec.UpdateStrategy.DeepCopy()
+	}
+
 	if isTrue(b.Spec.Persistence.Enabled) {
 		ss.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{b.dataPVC()}
 	}
@@ -140,6 +146,9 @@ func (b *Builder) podSpec() corev1.PodSpec {
 	}
 	if b.Spec.ServiceAccountName != "" {
 		spec.ServiceAccountName = b.Spec.ServiceAccountName
+	}
+	if b.Spec.PriorityClassName != "" {
+		spec.PriorityClassName = b.Spec.PriorityClassName
 	}
 	if b.Spec.AWSPluginEnabled() {
 		ref := b.Spec.Plugin.AWS.Bootstrap.ConfigMapRef

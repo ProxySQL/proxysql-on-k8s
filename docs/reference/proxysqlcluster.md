@@ -13,7 +13,7 @@ runtime configuration pushed to these pods see the
 | Kind | `ProxySQLCluster` |
 | Short name | `pxc` (`kubectl get pxc`) |
 | Scope | Namespaced |
-| Subresources | `status` |
+| Subresources | `status`, `scale` (`kubectl scale pxc/<name> --replicas=N`, HPA; spec path `.spec.replicas`, status path `.status.replicas`, selector `.status.selector`) |
 | Printer columns | `Replicas`, `Ready`, `Phase`, `Age` (`Paused` at `-o wide` / priority 1) |
 
 The operator reconciles a `ProxySQLCluster` into: a StatefulSet (named after
@@ -50,6 +50,8 @@ says which.
 | `plugin` | `*ClusterPluginSpec` | `nil` | typed nested fields | Configures optional plugin startup inputs. See [AWS plugin runtime](#aws-plugin-runtime). |
 | `replicas` | `*int32` | `3` (CRD + operator) | min 1 | Number of ProxySQL control-plane pods. |
 | `pause` | `bool` | `false` | — | Scales the StatefulSet to 0 while retaining Services/Secrets/PVCs; never mutates `replicas`. See [Pausing a cluster](../user-guide/clusters.md#pausing-a-cluster). |
+| `updateStrategy` | `*appsv1.StatefulSetUpdateStrategy` | `nil` (StatefulSet default: `RollingUpdate`, partition 0) | Kubernetes StatefulSet validation | Copied verbatim to the StatefulSet's `spec.updateStrategy`. Use `rollingUpdate.partition` for canary rollouts, or `type: OnDelete` to move pods only when you delete them. Unset leaves the StatefulSet's strategy alone; removing a previously set value resets the StatefulSet to the Kubernetes default. Affects `status.phase` — see [Phase semantics](#phase-semantics). See [Canary rollouts with updateStrategy](../user-guide/clusters.md#canary-rollouts-with-updatestrategy). |
+| `priorityClassName` | `string` | none | — | PriorityClass of every ProxySQL pod. The PriorityClass must exist; unset means the cluster's default priority. |
 | `image` | `ImageSpec` | see [Image](#image) | — | ProxySQL container image. |
 | `imagePullSecrets` | `[]LocalObjectReference` | `[]` | — | Pull secrets for the pod. |
 | `auth` | `AuthSpec` | see [Auth](#auth) | — | Secret holding admin/radmin/monitor passwords. |
@@ -353,6 +355,37 @@ own fields).
 | `metrics.serviceMonitor.interval` | `string` | `"30s"` (CRD; operator falls back to `30s` if empty) | — | Scrape interval. |
 | `metrics.serviceMonitor.scrapeTimeout` | `string` | `"10s"` (CRD; operator falls back to `10s` if empty) | — | Scrape timeout. |
 | `metrics.serviceMonitor.labels` | `map[string]string` | none | — | Extra labels merged onto the ServiceMonitor (e.g. a Prometheus `release` selector). |
+| `metrics.serviceMonitor.relabelings` | `[]RelabelConfig` | none | see below | Target relabeling, rendered verbatim as the ServiceMonitor endpoint's `relabelings`. Omitted from the ServiceMonitor when empty. |
+| `metrics.serviceMonitor.metricRelabelings` | `[]RelabelConfig` | none | see below | Sample relabeling before ingestion, rendered verbatim as the endpoint's `metricRelabelings`. Omitted from the ServiceMonitor when empty. |
+
+`RelabelConfig` mirrors prometheus-operator's `RelabelConfig` field for
+field, with the same JSON names, so the operator copies entries into the
+ServiceMonitor unchanged. Unset fields are left out, so Prometheus applies
+its own defaults.
+
+| Field | Type | Default | Validation | Description |
+|---|---|---|---|---|
+| `sourceLabels` | `[]string` | none | — | Labels whose values are joined with `separator` and matched against `regex`. |
+| `separator` | `*string` | Prometheus `;` | — | Separator between joined source label values. An explicit `""` is kept. |
+| `targetLabel` | `string` | none | — | Label the result is written to (needed by `replace`, `hashmod`, `lowercase`, `uppercase`, `keepequal`, `dropequal`). |
+| `regex` | `string` | Prometheus `(.*)` | — | Regular expression matched against the joined source values. |
+| `modulus` | `uint64` | none | — | Modulus for `hashmod`. |
+| `replacement` | `*string` | Prometheus `$1` | — | Replacement value for a regex match. An explicit `""` is kept. |
+| `action` | `string` | Prometheus `replace` | enum: `replace`, `keep`, `drop`, `hashmod`, `labelmap`, `labeldrop`, `labelkeep`, `lowercase`, `uppercase`, `keepequal`, `dropequal` | Relabel action (prometheus-operator's lower-case values). |
+
+```yaml
+spec:
+  metrics:
+    serviceMonitor:
+      enabled: true
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: proxysql_debug_.*
+          action: drop
+```
 
 ### PodDisruptionBudget
 
@@ -880,6 +913,7 @@ just landed.
 | `updatedReplicas` | `int32` | Pods at the current StatefulSet revision. |
 | `phase` | `string` | Coarse single-word projection for dashboards; see table below. Conditions remain the source of truth. |
 | `endpoints` | `*ClusterEndpoints` | In-cluster DNS `host:port` per enabled surface, pointing at the regular Service: `mysql`, `pgsql`, `admin`, `web`, `metrics`, plus `external` — see below. Empty field = surface disabled (`admin` is always set). Host form: `<name>.<namespace>.svc`. |
+| `selector` | `string` | Serialized label selector of the cluster's pods (the StatefulSet selector, `metav1.FormatLabelSelector` form, e.g. `app.kubernetes.io/instance=proxysql,app.kubernetes.io/name=proxysql,proxysql.com/cluster=proxysql`). Backs the `/scale` subresource, so `kubectl scale` and the HorizontalPodAutoscaler can find the pods. Set on every status write, paused or not. |
 | `adminSecretName` | `string` | The auth Secret the operator wired in (created or referenced). |
 | `conditions` | `[]metav1.Condition` | `Available`, `Progressing`, `Degraded`, `Paused`, `ServiceMonitorReady` — full reason inventory in the [status reference](status.md). |
 
@@ -902,8 +936,8 @@ Service was just created and hasn't been provisioned yet:
 |---|---|
 | `Pending` | StatefulSet does not exist yet. |
 | `Creating` | StatefulSet exists, 0 ready replicas. Deliberately coarse: a total outage of a previously running cluster also reads `Creating`. |
-| `Running` | `readyReplicas == replicas` and the StatefulSet update revision equals the current revision (no rollout pending). |
-| `Updating` | Any other state (partial readiness or revision mismatch). |
+| `Running` | `readyReplicas == replicas` and the rollout has settled: the StatefulSet update revision equals the current revision (no rollout pending). With `updateStrategy.rollingUpdate.partition: P > 0`, settled also means `updatedReplicas >= replicas - P` — the pods below the partition stay on the old revision by design. With `updateStrategy.type: OnDelete`, a pending revision always counts as settled — pods move only when you delete them. `updatedReplicas` shows how far either has moved. |
+| `Updating` | Any other state (partial readiness, or a rollout the update strategy is still carrying out). |
 | `Degraded` | Auth-Secret resolution failed (missing external Secret, partial schema, invalid credential characters). |
 | `Failed` | Reserved; never currently emitted — the operator reports `Degraded` for error states it can observe. |
 | `Stopping` | `spec.pause: true` and at least one replica is still ready — the StatefulSet is draining down to 0. Wins over every phase above. |

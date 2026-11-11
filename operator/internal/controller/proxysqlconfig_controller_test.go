@@ -491,6 +491,36 @@ var _ = Describe("ProxySQLConfig Controller", func() {
 			Expect(k8sClient.Create(ctx, cfg)).NotTo(Succeed(),
 				"two mysqlServers rows with the same server identity must be rejected at admission")
 		})
+
+		It("rejects a clusterRef change but accepts an unrelated update", func() {
+			ctx := context.Background()
+			cfg := &proxysqlv1alpha1.ProxySQLConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "adm-immutable-ref", Namespace: ns},
+				Spec: proxysqlv1alpha1.ProxySQLConfigSpec{
+					ClusterRef: corev1.LocalObjectReference{Name: "adm-cluster"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), cfg) })
+
+			key := types.NamespacedName{Name: cfg.Name, Namespace: ns}
+			Expect(k8sClient.Get(ctx, key, cfg)).To(Succeed())
+			moved := cfg.DeepCopy()
+			moved.Spec.ClusterRef.Name = "another-cluster"
+			err := k8sClient.Update(ctx, moved)
+			Expect(err).To(HaveOccurred(), "changing clusterRef.name must be rejected at admission")
+			Expect(errors.IsInvalid(err)).To(BeTrue(), "want an Invalid error, got %v", err)
+			Expect(err.Error()).To(ContainSubstring("clusterRef is immutable"))
+
+			Expect(k8sClient.Get(ctx, key, cfg)).To(Succeed())
+			cfg.Spec.Version = 7
+			cfg.Spec.MySQLVariables = map[string]string{"mysql-max_connections": "500"}
+			Expect(k8sClient.Update(ctx, cfg)).To(Succeed(), "an update that keeps clusterRef must be accepted")
+
+			Expect(k8sClient.Get(ctx, key, cfg)).To(Succeed())
+			Expect(cfg.Spec.ClusterRef.Name).To(Equal("adm-cluster"))
+			Expect(cfg.Spec.Version).To(Equal(int64(7)))
+		})
 	})
 
 	Context("pgsql mismatch condition", func() {

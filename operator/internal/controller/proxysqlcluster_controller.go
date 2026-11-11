@@ -28,12 +28,14 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -140,6 +142,11 @@ func (r *ProxySQLClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		log.V(1).Info("ProxySQLCluster is being deleted; not reconciling", "deletionTimestamp", cluster.DeletionTimestamp.Time)
 		return ctrl.Result{}, nil
 	}
+
+	// The /scale subresource's selector depends only on the cluster name, so
+	// it is set up front and rides along on every status write below,
+	// including the early Degraded ones.
+	cluster.Status.Selector = builders.PodSelector(cluster.Name)
 
 	// 1) Resolve passwords (from existing Secret or mint + create).
 	pw, err := r.resolvePasswords(ctx, &cluster)
@@ -685,9 +692,68 @@ func (r *ProxySQLClusterReconciler) ensureStatefulSet(ctx context.Context, owner
 		}
 		existing.Spec.Replicas = desired.Spec.Replicas
 		existing.Spec.Template = desired.Spec.Template
+		reconcileUpdateStrategy(existing, desired)
 		return controllerutil.SetControllerReference(owner, existing, r.Scheme)
 	})
 	return err
+}
+
+// annotationUpdateStrategyManaged marks a StatefulSet whose
+// spec.updateStrategy the operator set from spec.updateStrategy. It is an
+// object-level annotation (never on the pod template), so it never rolls
+// pods.
+const annotationUpdateStrategyManaged = "proxysql.com/update-strategy-managed"
+
+// reconcileUpdateStrategy carries spec.updateStrategy onto the StatefulSet.
+//
+//   - Set: the strategy is copied and the StatefulSet is marked managed. The
+//     comparison runs after applying the apiserver's defaults, so an
+//     unchanged spec never rewrites the StatefulSet.
+//   - Unset, StatefulSet marked managed: the user removed the field. The
+//     strategy is cleared (the apiserver re-applies its RollingUpdate
+//     default) so the cluster does not stay stuck on OnDelete or a
+//     partition.
+//   - Unset, not marked: left alone, exactly as operators that predate the
+//     field did — including a strategy someone patched onto the StatefulSet
+//     by hand, which upgrading the operator must not roll back.
+func reconcileUpdateStrategy(existing, desired *appsv1.StatefulSet) {
+	if !equality.Semantic.DeepEqual(desired.Spec.UpdateStrategy, appsv1.StatefulSetUpdateStrategy{}) {
+		existing.Annotations[annotationUpdateStrategyManaged] = "true"
+		if !equality.Semantic.DeepEqual(
+			normalizedUpdateStrategy(existing.Spec.UpdateStrategy),
+			normalizedUpdateStrategy(desired.Spec.UpdateStrategy)) {
+			existing.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
+		}
+		return
+	}
+	if _, managed := existing.Annotations[annotationUpdateStrategyManaged]; managed {
+		delete(existing.Annotations, annotationUpdateStrategyManaged)
+		existing.Spec.UpdateStrategy = appsv1.StatefulSetUpdateStrategy{}
+	}
+}
+
+// normalizedUpdateStrategy applies the apiserver's StatefulSet defaults to a
+// copy of s: type RollingUpdate, rollingUpdate.partition 0, and
+// maxUnavailable 1 (the default the MaxUnavailableStatefulSet feature gate
+// fills in; 1 is also the behaviour when the gate is off).
+func normalizedUpdateStrategy(s appsv1.StatefulSetUpdateStrategy) appsv1.StatefulSetUpdateStrategy {
+	out := *s.DeepCopy()
+	if out.Type == "" {
+		out.Type = appsv1.RollingUpdateStatefulSetStrategyType
+	}
+	if out.Type != appsv1.RollingUpdateStatefulSetStrategyType {
+		return out
+	}
+	if out.RollingUpdate == nil {
+		out.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{}
+	}
+	if out.RollingUpdate.Partition == nil {
+		out.RollingUpdate.Partition = new(int32(0))
+	}
+	if out.RollingUpdate.MaxUnavailable == nil {
+		out.RollingUpdate.MaxUnavailable = new(intstr.FromInt32(1))
+	}
+	return out
 }
 
 func (r *ProxySQLClusterReconciler) ensurePDB(ctx context.Context, owner *proxysqlv1alpha1.ProxySQLCluster, desired *policyv1.PodDisruptionBudget) error {
@@ -806,6 +872,7 @@ func (r *ProxySQLClusterReconciler) updateStatus(ctx context.Context, cluster *p
 	cluster.Status.Replicas = desired
 	cluster.Status.ReadyReplicas = ss.Status.ReadyReplicas
 	cluster.Status.UpdatedReplicas = ss.Status.UpdatedReplicas
+	cluster.Status.Selector = builders.PodSelector(b.Name())
 	cluster.Status.AdminSecretName = b.SecretName()
 	cluster.Status.Endpoints = b.Endpoints()
 	ext, err := r.externalEndpoint(ctx, b)
@@ -967,6 +1034,9 @@ func (r *ProxySQLClusterReconciler) updatePausedStatus(ctx context.Context, clus
 // paused is spec.pause: when true it wins over everything else, projecting
 // to Stopping (still-ready replicas draining down) or Paused (fully scaled
 // to 0) instead of the usual Pending/Creating/Running/Updating ladder.
+//
+// The StatefulSet's own updateStrategy (from spec.updateStrategy) decides
+// when a pending revision counts as settled; see rolloutSettled.
 func derivePhase(ss *appsv1.StatefulSet, ssMissing bool, desired int32, paused bool) string {
 	if paused {
 		if !ssMissing && ss.Status.ReadyReplicas > 0 {
@@ -979,12 +1049,42 @@ func derivePhase(ss *appsv1.StatefulSet, ssMissing bool, desired int32, paused b
 		return proxysqlv1alpha1.PhasePending
 	case ss.Status.ReadyReplicas == 0:
 		return proxysqlv1alpha1.PhaseCreating
-	case ss.Status.ReadyReplicas == desired &&
-		(ss.Status.UpdateRevision == "" || ss.Status.UpdateRevision == ss.Status.CurrentRevision):
+	case ss.Status.ReadyReplicas == desired && rolloutSettled(ss, desired):
 		return proxysqlv1alpha1.PhaseRunning
 	default:
 		return proxysqlv1alpha1.PhaseUpdating
 	}
+}
+
+// rolloutSettled reports whether the StatefulSet has moved every pod its
+// update strategy lets it move to the update revision.
+//
+//   - Default (RollingUpdate, partition 0 or unset): settled when the update
+//     revision equals the current revision (or is not populated yet). This
+//     is the rule the operator has always used.
+//   - RollingUpdate with partition P > 0: pods with an ordinal below P stay
+//     on the old revision by design, so the current revision never catches
+//     up. Settled once max(0, desired-P) pods run the update revision.
+//   - OnDelete: the StatefulSet controller never replaces a pod by itself; a
+//     pending revision waits for the user to delete pods. Always settled, so
+//     an all-ready OnDelete cluster reads Running rather than Updating
+//     forever; status.updatedReplicas shows how many pods have moved.
+func rolloutSettled(ss *appsv1.StatefulSet, desired int32) bool {
+	if ss.Status.UpdateRevision == "" || ss.Status.UpdateRevision == ss.Status.CurrentRevision {
+		return true
+	}
+	strategy := ss.Spec.UpdateStrategy
+	if strategy.Type == appsv1.OnDeleteStatefulSetStrategyType {
+		return true
+	}
+	partition := int32(0)
+	if strategy.RollingUpdate != nil && strategy.RollingUpdate.Partition != nil {
+		partition = *strategy.RollingUpdate.Partition
+	}
+	if partition <= 0 {
+		return false
+	}
+	return ss.Status.UpdatedReplicas >= max(0, desired-partition)
 }
 
 func (r *ProxySQLClusterReconciler) setCondition(cluster *proxysqlv1alpha1.ProxySQLCluster, t string, s metav1.ConditionStatus, reason, msg string) {

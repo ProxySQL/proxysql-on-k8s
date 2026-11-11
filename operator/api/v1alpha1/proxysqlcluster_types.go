@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,27 @@ type ProxySQLClusterSpec struct {
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// UpdateStrategy is copied verbatim to the StatefulSet's
+	// spec.updateStrategy. When unset, the operator leaves the StatefulSet's
+	// updateStrategy unset and Kubernetes applies its default
+	// (RollingUpdate, partition 0).
+	//
+	// Use rollingUpdate.partition for canary rollouts: only pods with an
+	// ordinal >= partition move to a new revision; lower ordinals stay on the
+	// old one until the partition is lowered. Use type OnDelete to roll pods
+	// only when you delete them. Either way, status.phase reports Running
+	// once every pod the strategy allows to move has moved and all replicas
+	// are ready, so a held partition or an OnDelete cluster does not read
+	// Updating forever; status.updatedReplicas shows how many pods run the
+	// new revision.
+	// +optional
+	UpdateStrategy *appsv1.StatefulSetUpdateStrategy `json:"updateStrategy,omitempty"`
+
+	// PriorityClassName is copied to the ProxySQL pod template. When empty,
+	// the pods get the cluster's default priority (if any).
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 
 	// Pause stops the ProxySQL control-plane pods without deleting the
 	// cluster: the StatefulSet is scaled to 0 while the Services, Secrets,
@@ -648,6 +670,52 @@ type ServiceMonitorSpec struct {
 	ScrapeTimeout string `json:"scrapeTimeout,omitempty"`
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
+	// Relabelings are applied to the scrape target before scraping. Rendered
+	// verbatim as the ServiceMonitor endpoint's relabelings; omitted when
+	// empty.
+	// +optional
+	Relabelings []RelabelConfig `json:"relabelings,omitempty"`
+	// MetricRelabelings are applied to scraped samples before ingestion.
+	// Rendered verbatim as the ServiceMonitor endpoint's metricRelabelings;
+	// omitted when empty.
+	// +optional
+	MetricRelabelings []RelabelConfig `json:"metricRelabelings,omitempty"`
+}
+
+// RelabelConfig mirrors prometheus-operator's monitoring.coreos.com/v1
+// RelabelConfig, with the same JSON field names, so entries render into the
+// ServiceMonitor unchanged. See
+// https://prometheus.io/docs/prometheus/latest/configuration/configuration/#relabel_config
+type RelabelConfig struct {
+	// SourceLabels selects values from existing labels. Their content is
+	// concatenated using Separator and matched against Regex.
+	// +optional
+	SourceLabels []string `json:"sourceLabels,omitempty"`
+	// Separator placed between concatenated SourceLabels. Prometheus
+	// default: ";".
+	// +optional
+	Separator *string `json:"separator,omitempty"`
+	// TargetLabel is the label the result is written to. Mandatory for
+	// replace, hashmod, lowercase, uppercase, keepequal and dropequal.
+	// +optional
+	TargetLabel string `json:"targetLabel,omitempty"`
+	// Regex matched against the concatenated SourceLabels. Prometheus
+	// default: "(.*)".
+	// +optional
+	Regex string `json:"regex,omitempty"`
+	// Modulus to take of the hash of the source label values. Only
+	// meaningful for action hashmod.
+	// +optional
+	Modulus uint64 `json:"modulus,omitempty"`
+	// Replacement value against which a regex replace is performed when the
+	// regex matches. Prometheus default: "$1".
+	// +optional
+	Replacement *string `json:"replacement,omitempty"`
+	// Action to perform based on the regex matching. Prometheus default:
+	// replace.
+	// +optional
+	// +kubebuilder:validation:Enum=replace;keep;drop;hashmod;labelmap;labeldrop;labelkeep;lowercase;uppercase;keepequal;dropequal
+	Action string `json:"action,omitempty"`
 }
 
 // PDBSpec configures a PodDisruptionBudget for the StatefulSet.
@@ -827,6 +895,13 @@ type ProxySQLClusterStatus struct {
 	// +optional
 	Endpoints *ClusterEndpoints `json:"endpoints,omitempty"`
 
+	// Selector is the serialized label selector of the cluster's pods
+	// (the StatefulSet selector, in metav1.FormatLabelSelector form). It
+	// backs the /scale subresource so kubectl scale and the
+	// HorizontalPodAutoscaler can find the pods.
+	// +optional
+	Selector string `json:"selector,omitempty"`
+
 	// AdminSecretName is the Secret the operator wired in (created or referenced).
 	// +optional
 	AdminSecretName string `json:"adminSecretName,omitempty"`
@@ -884,6 +959,7 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:shortName=pxc
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`

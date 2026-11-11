@@ -21,6 +21,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	proxysqlv1alpha1 "github.com/ProxySQL/kubernetes/operator/api/v1alpha1"
 )
 
 // ServiceMonitorGVK is the GroupVersionKind of the prometheus-operator
@@ -75,6 +77,15 @@ func (b *Builder) ServiceMonitor() *unstructured.Unstructured {
 		"scrapeTimeout": scrapeTimeout,
 	}
 
+	// Omitted entirely when empty, so a spec without relabelings renders the
+	// same ServiceMonitor as before the fields existed.
+	if rc := relabelConfigs(b.Spec.Metrics.ServiceMonitor.Relabelings); rc != nil {
+		endpoint["relabelings"] = rc
+	}
+	if rc := relabelConfigs(b.Spec.Metrics.ServiceMonitor.MetricRelabelings); rc != nil {
+		endpoint["metricRelabelings"] = rc
+	}
+
 	sm.Object["spec"] = map[string]any{
 		"selector": map[string]any{
 			"matchLabels": selectorLabels,
@@ -83,4 +94,47 @@ func (b *Builder) ServiceMonitor() *unstructured.Unstructured {
 	}
 
 	return sm
+}
+
+// relabelConfigs renders RelabelConfigs into the unstructured form of
+// prometheus-operator's RelabelConfig, using its JSON field names. Unset
+// fields are omitted; an explicitly empty separator/replacement (a non-nil
+// pointer) is kept, since "" is meaningful there. Returns nil for an empty
+// list. Values are restricted to the JSON-compatible types an unstructured
+// object may hold (modulus is int64, not uint64).
+func relabelConfigs(in []proxysqlv1alpha1.RelabelConfig) []any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(in))
+	for _, rc := range in {
+		m := map[string]any{}
+		if len(rc.SourceLabels) > 0 {
+			src := make([]any, len(rc.SourceLabels))
+			for i, l := range rc.SourceLabels {
+				src[i] = l
+			}
+			m["sourceLabels"] = src
+		}
+		if rc.Separator != nil {
+			m["separator"] = *rc.Separator
+		}
+		if rc.TargetLabel != "" {
+			m["targetLabel"] = rc.TargetLabel
+		}
+		if rc.Regex != "" {
+			m["regex"] = rc.Regex
+		}
+		if rc.Modulus != 0 {
+			m["modulus"] = int64(rc.Modulus) // unstructured holds int64, never uint64
+		}
+		if rc.Replacement != nil {
+			m["replacement"] = *rc.Replacement
+		}
+		if rc.Action != "" {
+			m["action"] = rc.Action
+		}
+		out = append(out, m)
+	}
+	return out
 }

@@ -38,6 +38,14 @@ cnf checksum triggers a rolling restart (see
 [Rolling updates](#rolling-updates)). Plan scale operations like you
 would plan a restart.
 
+`ProxySQLCluster` has a `/scale` subresource, so `kubectl scale
+pxc/proxysql --replicas=5` works, and so does a HorizontalPodAutoscaler
+targeting `kind: ProxySQLCluster`. Both write `spec.replicas` (a user
+running `kubectl scale` needs RBAC on `proxysqlclusters/scale`). Because every
+scale rolls all pods (above), give an HPA a conservative
+`behavior.scaleUp`/`scaleDown` policy. Scaling a paused cluster changes
+`spec.replicas` only; the pods come back at the new count when you resume.
+
 ## Auth secrets
 
 Every cluster needs three credentials: `admin` (localhost-only inside
@@ -478,6 +486,29 @@ Watch a rollout:
 kubectl get pxc proxysql            # PHASE column: Running / Updating
 kubectl rollout status sts/proxysql
 ```
+
+### Canary rollouts with updateStrategy
+
+`spec.updateStrategy` is copied to the StatefulSet. With
+`rollingUpdate.partition: N`, only pods with an ordinal of `N` or more move
+to a new revision; the rest stay on the old one. To canary one pod of three:
+
+```yaml
+spec:
+  replicas: 3
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 2      # only proxysql-2 takes the change
+```
+
+Make the change (new image, a structural cnf change), check `proxysql-2`,
+then lower `partition` to `0` to roll the rest. While the partition holds,
+the cluster reads `Running` once the canary is ready, and
+`status.updatedReplicas` shows `1`. `type: OnDelete` is the manual variant:
+pods move only when you delete them, and the cluster reads `Running` while
+every replica is ready. Remove `updateStrategy` to go back to the default
+rolling update. See [phase derivation](../reference/status.md#phase-derivation).
 
 ## Next
 
