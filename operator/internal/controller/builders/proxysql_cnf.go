@@ -282,8 +282,11 @@ func (b *Builder) adminDefaultVars(clusterSync bool) map[string]string {
 		d["web_port"] = fmt.Sprintf("%d", b.Spec.Protocols.Web.Port)
 	}
 	if clusterSync {
-		d["cluster_check_interval_ms"] = "200"
-		d["cluster_check_status_frequency"] = "100"
+		// ProxySQL versions and compares cluster checksums with 1 s timestamp
+		// granularity, so polling peers faster than once a second detects nothing
+		// sooner and only adds load. 1000 ms and 10 are ProxySQL's own defaults.
+		d["cluster_check_interval_ms"] = "1000"
+		d["cluster_check_status_frequency"] = "10"
 		d["cluster_mysql_query_rules_save_to_disk"] = cnfTrue
 		d["cluster_mysql_servers_save_to_disk"] = cnfTrue
 		d["cluster_mysql_users_save_to_disk"] = cnfTrue
