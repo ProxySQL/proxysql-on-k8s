@@ -16,8 +16,8 @@ admin_variables=
 {{- if .Values.proxysqlServers }}
   cluster_username="radmin"
   cluster_password="{{ include "proxysql.cnfEscape" $pw.radmin }}"
-  cluster_check_interval_ms=200
-  cluster_check_status_frequency=100
+  cluster_check_interval_ms=1000
+  cluster_check_status_frequency=10
   cluster_mysql_query_rules_save_to_disk=true
   cluster_mysql_servers_save_to_disk=true
   cluster_mysql_users_save_to_disk=true

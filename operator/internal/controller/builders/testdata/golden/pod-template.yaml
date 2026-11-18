@@ -1,6 +1,6 @@
 metadata:
   annotations:
-    proxysql.com/cnf-checksum: f00c5de3328e2fe56e56728c4960916f4a400d3a6b447ada309be600fb8f1103
+    proxysql.com/cnf-checksum: fef68db2742611fc151d76a7d95186ed48de6ec4ccaaa2eda8d903bc0e62d731
   labels:
     app.kubernetes.io/instance: golden
     app.kubernetes.io/name: proxysql
