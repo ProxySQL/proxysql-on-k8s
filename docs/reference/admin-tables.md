@@ -233,6 +233,7 @@ back **identity keys only** from the `runtime_*` tables and compares:
 | Table | In drift detection | Compared key |
 |---|---|---|
 | `runtime_mysql_servers` | yes | `hostgroup_id:hostname:port` — membership-aware: hostgroups joined by a `mysqlReplicationHostgroups` pair compare as one equivalence class, so a server in either hostgroup of its pair is present (status counted for `shunnedBackends`; compared only for servers whose spec sets an explicit `OFFLINE_*` `status` — see notes) |
+| `mysql_servers` (config, `OFFLINE_HARD` rows only) | yes | `hostgroup_id:hostname:port`, membership-aware — checked only for servers whose spec sets `status: OFFLINE_HARD` and that are absent from runtime (see notes) |
 | `runtime_mysql_users` | yes | `username` (DISTINCT — runtime holds frontend + backend rows per user) |
 | `runtime_mysql_query_rules` | yes | `rule_id` |
 | `runtime_pgsql_servers` | yes | `hostgroup_id:hostname:port` |
@@ -263,8 +264,18 @@ Notes:
     shun. Reported as `mysql_servers: status <key> want OFFLINE_SOFT have
     <runtime status>`.
   - `OFFLINE_HARD` — ProxySQL omits `OFFLINE_HARD` rows from
-    `runtime_mysql_servers`, so absence is the converged state (never
-    "missing"), and the server appearing at runtime in any status is drift.
+    `runtime_mysql_servers`, so absence from runtime is the converged state
+    (never "missing"), and the server appearing at runtime in any status is
+    drift. Because runtime cannot show the row, its presence is checked in
+    the **config** table instead (`mysql_servers WHERE status='OFFLINE_HARD'`,
+    the one non-`runtime_` read, membership-aware like runtime): when the
+    row is gone the replica is drifted, reported as
+    `mysql_servers: config <key> want OFFLINE_HARD have none`, and the
+    re-push restores and saves it. This catches ProxySQL Cluster sync on
+    multi-replica clusters: a peer's `mysql_servers_v2` omits
+    `OFFLINE_HARD` rows, so a lagging pod that pulls it deletes the row
+    from its config and disk and would bring the server back `ONLINE` on
+    its next restart.
   - When several spec rows of one server in a replication pair disagree on
     status, status is not compared for it (membership only).
 - Server comparison enforces **membership, not placement** (#34): within

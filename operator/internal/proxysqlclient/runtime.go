@@ -47,7 +47,12 @@ type RuntimeState struct {
 	// MySQLServers maps "hostgroup:hostname:port" to the runtime status
 	// (ONLINE, SHUNNED, OFFLINE_SOFT, ...).
 	MySQLServers map[string]string
-	MySQLUsers   map[string]bool
+	// MySQLConfigOfflineHard holds the "hostgroup:hostname:port" keys of the
+	// CONFIG table (mysql_servers, not runtime_) rows whose status is
+	// OFFLINE_HARD. ProxySQL omits OFFLINE_HARD rows from runtime, so this is
+	// the only place a hard-offlined server's presence can be checked.
+	MySQLConfigOfflineHard map[string]bool
+	MySQLUsers             map[string]bool
 	// MySQLUserHostgroups carries the default_hostgroup needed to classify
 	// plugin-owned users without changing the existing username drift model.
 	MySQLUserHostgroups map[string]int32
@@ -60,24 +65,34 @@ type RuntimeState struct {
 }
 
 // ReadRuntime snapshots the runtime_* admin tables of a single ProxySQL
-// instance. Any query error aborts the read — a partial snapshot would look
-// like mass drift.
+// instance, plus the OFFLINE_HARD rows of the mysql_servers config table
+// (see RuntimeState.MySQLConfigOfflineHard). Any query error aborts the read —
+// a partial snapshot would look like mass drift.
 //
 // runtime_mysql_users holds a frontend AND a backend row per user, hence the
 // SELECT DISTINCT. Password columns are never selected.
 func ReadRuntime(ctx context.Context, q Querier) (*RuntimeState, error) {
 	rs := &RuntimeState{
-		MySQLServers:        map[string]string{},
-		MySQLUsers:          map[string]bool{},
-		MySQLUserHostgroups: map[string]int32{},
-		MySQLRules:          map[string]bool{},
-		PgSQLServers:        map[string]string{},
-		PgSQLUsers:          map[string]bool{},
-		PgSQLRules:          map[string]bool{},
+		MySQLServers:           map[string]string{},
+		MySQLConfigOfflineHard: map[string]bool{},
+		MySQLUsers:             map[string]bool{},
+		MySQLUserHostgroups:    map[string]int32{},
+		MySQLRules:             map[string]bool{},
+		PgSQLServers:           map[string]string{},
+		PgSQLUsers:             map[string]bool{},
+		PgSQLRules:             map[string]bool{},
 	}
 
 	if err := readServers(ctx, q, "runtime_mysql_servers", rs.MySQLServers); err != nil {
 		return nil, err
+	}
+	// The one CONFIG-table read: see RuntimeState.MySQLConfigOfflineHard.
+	configHard := map[string]string{}
+	if err := readServers(ctx, q, "mysql_servers WHERE status='OFFLINE_HARD'", configHard); err != nil {
+		return nil, err
+	}
+	for k := range configHard {
+		rs.MySQLConfigOfflineHard[k] = true
 	}
 	if err := readMySQLUsers(ctx, q, rs.MySQLUsers, rs.MySQLUserHostgroups); err != nil {
 		return nil, err
@@ -126,15 +141,26 @@ func NativeRuntime(rs *RuntimeState, desired *Desired, claimedHostgroups map[int
 		return rs
 	}
 	filtered := &RuntimeState{
-		MySQLServers: copyStringMap(rs.MySQLServers), MySQLUsers: copyBoolMap(rs.MySQLUsers),
-		MySQLUserHostgroups: copyInt32Map(rs.MySQLUserHostgroups), MySQLRules: copyBoolMap(rs.MySQLRules),
+		MySQLServers: copyStringMap(rs.MySQLServers), MySQLConfigOfflineHard: copyBoolMap(rs.MySQLConfigOfflineHard),
+		MySQLUsers: copyBoolMap(rs.MySQLUsers), MySQLUserHostgroups: copyInt32Map(rs.MySQLUserHostgroups), MySQLRules: copyBoolMap(rs.MySQLRules),
 		PgSQLServers: copyStringMap(rs.PgSQLServers), PgSQLUsers: copyBoolMap(rs.PgSQLUsers), PgSQLRules: copyBoolMap(rs.PgSQLRules),
 	}
-	for key := range filtered.MySQLServers {
+	claimed := func(key string) bool {
 		if separator := strings.IndexByte(key, ':'); separator > 0 {
 			if hostgroup, err := strconv.ParseInt(key[:separator], 10, 32); err == nil && claimedHostgroups[int32(hostgroup)] {
-				delete(filtered.MySQLServers, key)
+				return true
 			}
+		}
+		return false
+	}
+	for key := range filtered.MySQLServers {
+		if claimed(key) {
+			delete(filtered.MySQLServers, key)
+		}
+	}
+	for key := range filtered.MySQLConfigOfflineHard {
+		if claimed(key) {
+			delete(filtered.MySQLConfigOfflineHard, key)
 		}
 	}
 	nativeUsers := map[string]bool{}
@@ -158,7 +184,7 @@ func NativeRuntimeWithAWSDBProxy(rs *RuntimeState) *RuntimeState {
 		return nil
 	}
 	return &RuntimeState{
-		MySQLServers: map[string]string{}, MySQLUsers: map[string]bool{},
+		MySQLServers: map[string]string{}, MySQLConfigOfflineHard: map[string]bool{}, MySQLUsers: map[string]bool{},
 		MySQLUserHostgroups: map[string]int32{}, MySQLRules: copyBoolMap(rs.MySQLRules),
 		PgSQLServers: copyStringMap(rs.PgSQLServers), PgSQLUsers: copyBoolMap(rs.PgSQLUsers), PgSQLRules: copyBoolMap(rs.PgSQLRules),
 	}
@@ -195,7 +221,7 @@ func copyInt32Map(source map[string]int32) map[string]int32 {
 }
 
 // readServers fills dst with "hostgroup:hostname:port" → status from a
-// runtime servers table.
+// servers table (the FROM target, optionally followed by a WHERE clause).
 func readServers(ctx context.Context, q Querier, table string, dst map[string]string) error {
 	rows, err := q.Query(ctx, "SELECT hostgroup_id, hostname, port, status FROM "+table)
 	if err != nil {
@@ -253,7 +279,9 @@ func (rs *RuntimeState) ShunnedCount() int32 {
 // and losing it (e.g. an out-of-band reset back to ONLINE) is drift. Only
 // explicit OFFLINE_* participates; ONLINE/unset never compares status, so a
 // monitor-SHUNNED (or otherwise non-ONLINE) server whose spec says ONLINE is
-// still not drift. See mysqlStatusDrift for the exact rule.
+// still not drift. See mysqlStatusDrift for the exact rule. For OFFLINE_HARD
+// the CONFIG-table row is checked too (mysqlConfigOfflineHardDrift): runtime
+// cannot show it, and ProxySQL Cluster sync can delete it.
 //
 // Servers are compared as MEMBERSHIP, not placement: for every hostgroup
 // covered by a mysql_replication_hostgroups pair, a desired server counts as
@@ -284,7 +312,8 @@ func (d *Desired) Drift(rs *RuntimeState) []string {
 	// from runtime: ProxySQL omits OFFLINE_HARD rows from
 	// runtime_mysql_servers (verified on proxysql/proxysql:3.0.11). Take it
 	// out of the membership check so it is never reported "missing"; its
-	// presence is judged by mysqlStatusDrift instead.
+	// presence is judged by mysqlStatusDrift (runtime) and
+	// mysqlConfigOfflineHardDrift (config table) instead.
 	membership := make(map[string]string, len(wantServers))
 	for canon, display := range wantServers {
 		if wantStatus[canon] != statusOfflineHard {
@@ -293,6 +322,7 @@ func (d *Desired) Drift(rs *RuntimeState) []string {
 	}
 	diffs = append(diffs, diffServers("mysql_servers", membership, haveServers, wantServers)...)
 	diffs = append(diffs, mysqlStatusDrift(wantServers, wantStatus, haveStatus)...)
+	diffs = append(diffs, mysqlConfigOfflineHardDrift(wantServers, wantStatus, haveStatus, configOfflineHardKeys(rs.MySQLConfigOfflineHard, classes))...)
 	diffs = append(diffs, diffKeys("mysql_users", userKeys(mysqlUsernames(d.MySQLUsers)), rs.MySQLUsers)...)
 	diffs = append(diffs, diffKeys("mysql_query_rules", ruleKeys(mysqlRuleIDs(d.MySQLQueryRules)), rs.MySQLRules)...)
 	pgWant := pgsqlServerKeys(d.PostgreSQLServers)
@@ -473,8 +503,10 @@ func mysqlDesiredStatuses(servers []MySQLServer, classes map[int32]int32) map[st
 //     "No row" rather than "any row" keeps a partially-mirrored pair from
 //     looping; the realistic out-of-band reset flips every row anyway.
 //   - OFFLINE_HARD: ProxySQL hides OFFLINE_HARD rows from
-//     runtime_mysql_servers, so absence is the converged state and ANY
-//     runtime row for the key (ONLINE, SHUNNED, OFFLINE_SOFT) is drift.
+//     runtime_mysql_servers, so absence is the converged runtime state and
+//     ANY runtime row for the key (ONLINE, SHUNNED, OFFLINE_SOFT) is drift.
+//     The config-table row behind that absence is checked separately by
+//     mysqlConfigOfflineHardDrift.
 func mysqlStatusDrift(display map[string]string, want map[string]string, have map[string][]string) []string {
 	diffs := make([]string, 0, len(want))
 	for canon, status := range want {
@@ -490,6 +522,41 @@ func mysqlStatusDrift(display map[string]string, want map[string]string, have ma
 			}
 		}
 		diffs = append(diffs, fmt.Sprintf("mysql_servers: status %s want %s have %s", display[canon], status, strings.Join(got, ",")))
+	}
+	return diffs
+}
+
+// configOfflineHardKeys canonicalizes the config-table OFFLINE_HARD keys
+// with the same replication classes as runtime membership.
+func configOfflineHardKeys(have map[string]bool, classes map[int32]int32) map[string]string {
+	asStatus := make(map[string]string, len(have))
+	for k := range have {
+		asStatus[k] = statusOfflineHard
+	}
+	return runtimeServerKeys(asStatus, classes)
+}
+
+// mysqlConfigOfflineHardDrift reports desired OFFLINE_HARD servers that are
+// absent from runtime (the converged runtime state, see mysqlStatusDrift) but
+// whose OFFLINE_HARD row is also gone from the CONFIG table. ProxySQL Cluster
+// sync of mysql_servers copies a peer's mysql_servers_v2, which omits
+// OFFLINE_HARD rows, so a lagging pod can silently lose the row from config
+// and disk (proxysql-saas#3154); without this check that pod would look
+// converged forever and bring the server back ONLINE on its next restart.
+// A server visible at runtime is left to mysqlStatusDrift, so one divergence
+// is reported once.
+func mysqlConfigOfflineHardDrift(display, want map[string]string, haveRuntime map[string][]string, haveConfig map[string]string) []string {
+	var diffs []string
+	for canon, status := range want {
+		if status != statusOfflineHard {
+			continue
+		}
+		if _, atRuntime := haveRuntime[canon]; atRuntime {
+			continue
+		}
+		if _, inConfig := haveConfig[canon]; !inConfig {
+			diffs = append(diffs, fmt.Sprintf("mysql_servers: config %s want %s have none", display[canon], status))
+		}
 	}
 	return diffs
 }

@@ -48,13 +48,18 @@ func TestReadRuntime_ParsesTables(t *testing.T) {
 		},
 		"runtime_mysql_users":       {{"app", "10"}},
 		"runtime_mysql_query_rules": {{"1"}},
-		"runtime_pgsql_servers":     {},
-		"runtime_pgsql_users":       {},
-		"runtime_pgsql_query_rules": {},
+		// The CONFIG table: only OFFLINE_HARD rows are selected.
+		"FROM mysql_servers WHERE status='OFFLINE_HARD'": {{"10", "db-2", "3306", "OFFLINE_HARD"}},
+		"runtime_pgsql_servers":                          {},
+		"runtime_pgsql_users":                            {},
+		"runtime_pgsql_query_rules":                      {},
 	}}
 	rs, err := ReadRuntime(context.Background(), fq)
 	if err != nil {
 		t.Fatalf("ReadRuntime: %v", err)
+	}
+	if !rs.MySQLConfigOfflineHard["10:db-2:3306"] || len(rs.MySQLConfigOfflineHard) != 1 {
+		t.Errorf("MySQLConfigOfflineHard = %v, want only 10:db-2:3306", rs.MySQLConfigOfflineHard)
 	}
 	if got := rs.MySQLServers["0:db-0:3306"]; got != "ONLINE" {
 		t.Errorf("server 0:db-0:3306 status = %q, want ONLINE", got)
@@ -76,14 +81,21 @@ func TestReadRuntime_ParsesTables(t *testing.T) {
 func TestNativeRuntimeExcludesOnlyPluginOwnedRows(t *testing.T) {
 	desired := &Desired{MySQLUsers: []MySQLUser{{Username: "native", DefaultHostgroup: 1}}}
 	runtime := &RuntimeState{
-		MySQLServers:        map[string]string{"1:plugin-db:3306": "ONLINE", "10:native-db:3306": "ONLINE"},
-		MySQLUsers:          map[string]bool{"plugin": true, "native": true, "outside": true},
-		MySQLUserHostgroups: map[string]int32{"plugin": 1, "native": 1, "outside": 10},
-		MySQLRules:          map[string]bool{}, PgSQLServers: map[string]string{}, PgSQLUsers: map[string]bool{}, PgSQLRules: map[string]bool{},
+		MySQLServers:           map[string]string{"1:plugin-db:3306": "ONLINE", "10:native-db:3306": "ONLINE"},
+		MySQLConfigOfflineHard: map[string]bool{"2:plugin-hard:3306": true, "10:native-hard:3306": true},
+		MySQLUsers:             map[string]bool{"plugin": true, "native": true, "outside": true},
+		MySQLUserHostgroups:    map[string]int32{"plugin": 1, "native": 1, "outside": 10},
+		MySQLRules:             map[string]bool{}, PgSQLServers: map[string]string{}, PgSQLUsers: map[string]bool{}, PgSQLRules: map[string]bool{},
 	}
 	filtered := NativeRuntime(runtime, desired, map[int32]bool{1: true, 2: true})
 	if filtered.MySQLServers["1:plugin-db:3306"] != "" {
 		t.Fatal("plugin server remained in native runtime")
+	}
+	if filtered.MySQLConfigOfflineHard["2:plugin-hard:3306"] || !filtered.MySQLConfigOfflineHard["10:native-hard:3306"] {
+		t.Fatalf("config OFFLINE_HARD rows not filtered by claimed hostgroup: %v", filtered.MySQLConfigOfflineHard)
+	}
+	if len(runtime.MySQLConfigOfflineHard) != 2 {
+		t.Fatal("source config rows were mutated")
 	}
 	if !filtered.MySQLUsers["native"] {
 		t.Fatal("explicit native user was filtered")
@@ -509,14 +521,61 @@ func TestDrift_OfflineSoftMissingReportedOnce(t *testing.T) {
 }
 
 // ProxySQL omits OFFLINE_HARD rows from runtime_mysql_servers (verified on
-// proxysql/proxysql:3.0.11), so absence is the converged state — it must not
-// be reported as missing, or every resync would re-push forever.
+// proxysql/proxysql:3.0.11), so absence from runtime is the converged state —
+// it must not be reported as missing, or every resync would re-push forever —
+// provided the CONFIG table still holds the OFFLINE_HARD row.
 func TestDrift_OfflineHardAbsentIsConverged(t *testing.T) {
 	d := &Desired{MySQLServers: []MySQLServer{
 		{Hostgroup: 0, Hostname: "db-0", Port: 3306},
 		{Hostgroup: 0, Hostname: "db-1", Port: 3306, Status: "OFFLINE_HARD"},
 	}}
-	rs := &RuntimeState{MySQLServers: map[string]string{"0:db-0:3306": "ONLINE"}}
+	rs := &RuntimeState{
+		MySQLServers:           map[string]string{"0:db-0:3306": "ONLINE"},
+		MySQLConfigOfflineHard: map[string]bool{"0:db-1:3306": true},
+	}
+	assertDrift(t, d.Drift(rs), nil)
+}
+
+// ProxySQL Cluster sync copies a peer's mysql_servers_v2, which omits
+// OFFLINE_HARD rows, so a lagging pod can lose the hard-offlined server's
+// CONFIG row entirely (and save that to disk) while runtime looks identical
+// (proxysql-saas#3154). Absent from runtime AND config is drift, so the
+// normal re-push restores the row.
+func TestDrift_OfflineHardMissingFromConfigIsDrift(t *testing.T) {
+	d := &Desired{MySQLServers: []MySQLServer{
+		{Hostgroup: 0, Hostname: "db-0", Port: 3306},
+		{Hostgroup: 10, Hostname: "db-1", Port: 3306, Status: "OFFLINE_HARD"},
+	}}
+	rs := &RuntimeState{
+		MySQLServers:           map[string]string{"0:db-0:3306": "ONLINE"},
+		MySQLConfigOfflineHard: map[string]bool{},
+	}
+	assertDrift(t, d.Drift(rs), []string{
+		"mysql_servers: config 10:db-1:3306 want OFFLINE_HARD have none",
+	})
+}
+
+// A config OFFLINE_HARD row in another hostgroup of the server's replication
+// class still counts: config membership follows the same classes as runtime.
+func TestDrift_OfflineHardConfigFollowsReplicationClass(t *testing.T) {
+	d := pairedDesired()
+	d.MySQLServers[2].Status = "OFFLINE_HARD" // db-2, spec hostgroup 10
+	rs := &RuntimeState{
+		MySQLServers:           map[string]string{"10:db-0:3306": "ONLINE", "20:db-1:3306": "ONLINE"},
+		MySQLConfigOfflineHard: map[string]bool{"20:db-2:3306": true},
+	}
+	assertDrift(t, d.Drift(rs), nil)
+}
+
+// A config OFFLINE_HARD row for a server the spec does not declare
+// OFFLINE_HARD is not drift by itself: membership is judged on runtime, so
+// this check only ever adds diffs for desired OFFLINE_HARD servers.
+func TestDrift_UndesiredConfigOfflineHardIgnored(t *testing.T) {
+	d := &Desired{MySQLServers: []MySQLServer{{Hostgroup: 0, Hostname: "db-0", Port: 3306}}}
+	rs := &RuntimeState{
+		MySQLServers:           map[string]string{"0:db-0:3306": "ONLINE"},
+		MySQLConfigOfflineHard: map[string]bool{"5:other:3306": true},
+	}
 	assertDrift(t, d.Drift(rs), nil)
 }
 
